@@ -13,6 +13,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 
 // Forward declaration of NodeId from web_server.h
@@ -47,6 +48,26 @@ struct AudioDeviceInfo {
     ma_format internal_format = ma_format_unknown;
     std::vector<unsigned> client_channel_map;
     std::vector<unsigned> internal_channel_map;
+};
+
+// PipeWire Patchbay Structures
+struct PipeWireNode {
+    uint32_t id;
+    std::string name;
+    std::string description;
+    bool is_input; // True if it's a source (capture) node
+};
+
+struct PipeWireLink {
+    uint32_t source_port;
+    uint32_t dest_port;
+    uint32_t source_node;
+    uint32_t dest_node;
+};
+
+struct PipeWireGraph {
+    std::vector<PipeWireNode> nodes;
+    std::vector<PipeWireLink> links;
 };
 
 class HardwareDevice {
@@ -89,7 +110,7 @@ private:
 
 class DeviceManager {
 public:
-    explicit DeviceManager(bool initializeBackend = true);
+    explicit DeviceManager(bool initializeBackend = true, bool enablePwPatchbay = false);
     ~DeviceManager();
 
     bool initialized() const { return m_context_initialized; }
@@ -109,8 +130,14 @@ public:
     void deactivate_device(const std::string& id);
     void stop_all();
 
+    // PipeWire Patchbay API
+    PipeWireGraph get_pipewire_graph();
+
 private:
     friend struct DeviceManagerTestAccess;
+    friend void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props);
+    friend void registry_global_remove(void *data, uint32_t id);
+
     std::mutex m_lock;
     ma_context m_context{};
     bool m_context_initialized = false;
@@ -119,6 +146,14 @@ private:
     std::vector<AudioDeviceInfo> m_available_devices;
     // Key is "ID_capture" or "ID_playback" to support duplex devices.
     std::unordered_map<std::string, std::shared_ptr<HardwareDevice>> m_active_devices;
+
+    // PipeWire Internals
+    bool m_pw_enabled = false;
+    struct pw_main_loop* m_pw_loop = nullptr;
+    struct pw_context* m_pw_context = nullptr;
+    std::thread m_pw_thread;
+    std::mutex m_pw_graph_lock;
+    PipeWireGraph m_pw_graph;
 };
 
 #endif

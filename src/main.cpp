@@ -72,7 +72,8 @@ void print_usage(const char* programName) {
               << "Options:\n"
               << "  -h, --help      Display this help message and exit\n"
               << "  --plain-text    Run the web server in plain text mode\n"
-              << "  --no-audio      Bypass audio device manager and context initialization\n\n"
+              << "  --no-audio      Bypass audio device manager and context initialization\n"
+              << "  --enable-pipewire-patchbay  Enable the PipeWire patchbay viewport\n\n"
               << "Environment Variables:\n"
               << "  CM5AUDIO_HTTP_PORT  HTTP server port (default: 8182)\n"
               << "  CM5AUDIO_WS_PORT    WebSocket server port (default: 8183)\n";
@@ -81,7 +82,7 @@ void print_usage(const char* programName) {
 
 int main(int argc, char** argv) {
     try {
-        bool plainText = false, noAudio = false;
+        bool plainText = false, noAudio = false, enablePwPatchbay = false;
         for (int i = 1; i < argc; ++i) {
             const std::string argument(argv[i]);
             if (argument == "--help" || argument == "-h") {
@@ -90,6 +91,7 @@ int main(int argc, char** argv) {
             }
             else if (argument == "--plain-text") plainText = true;
             else if (argument == "--no-audio") noAudio = true;
+            else if (argument == "--enable-pipewire-patchbay") enablePwPatchbay = true;
             else throw std::invalid_argument("Unknown argument: " + argument);
         }
 
@@ -98,7 +100,7 @@ int main(int argc, char** argv) {
         const int httpPort = port_from_env("CM5AUDIO_HTTP_PORT", 8182);
         const int wsPort = port_from_env("CM5AUDIO_WS_PORT", 8183);
         std::cout << "Starting cm5audio..." << std::endl;
-        DeviceManager devices(!noAudio);
+        DeviceManager devices(!noAudio, enablePwPatchbay);
         if (shutdownRequested) return 0;
         if (!noAudio) devices.enumerate_devices();
         if (shutdownRequested) return 0;
@@ -112,7 +114,7 @@ int main(int argc, char** argv) {
         clients.load_settings(controls, tone);
         if (shutdownRequested) { clients.set_dsp_engine(nullptr); return 0; }
         engine->start();
-        WebServer server(metrics, controls, tone, clients, devices, *engine, httpPort, wsPort, plainText);
+        WebServer server(metrics, controls, tone, clients, devices, *engine, httpPort, wsPort, plainText, enablePwPatchbay);
         if (!server.start()) { clients.set_dsp_engine(nullptr); return 1; }
         while (!shutdownRequested && server.is_running()) shutdown.wait();
         std::cout << "[Shutdown] Quiescing control, DSP, network and sessions" << std::endl;

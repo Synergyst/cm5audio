@@ -7,6 +7,9 @@
 #include <iterator>
 #include <set>
 #include <vector>
+#include <pipewire/pipewire.h>
+#include <spa/utils/hook.h>
+#include <spa/utils/defs.h>
 
 namespace {
 template <size_t N>
@@ -85,9 +88,6 @@ bool fail(std::string* error, const std::string& message) {
 HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId)
     : m_info(info), m_context(context), m_originalId(originalId),
       m_requested_channels(info.requested_channels != 0 ? info.requested_channels : info.channels) {
-    // Legacy synthetic HardwareDevice callers select a width through channels.
-    // The manager explicitly clears that field for auto, never using enumerated
-    // capabilities as a request. Preserve the request across stop()/init().
     m_info.requested_channels = m_requested_channels;
 }
 
@@ -95,12 +95,6 @@ HardwareDevice::~HardwareDevice() { stop(); }
 
 void HardwareDevice::stop() {
     if (!m_device_initialized) return;
-
-    // The vendored uninit path wakes synchronous backend data loops after
-    // setting the terminal state. Avoid a preliminary stop wait, which can hang
-    // when backend and miniaudio running states disagree.
-    // A successfully initialized device owns resources even if start failed or
-    // the backend has already stopped. Never use is_started as an ownership flag.
     ma_device_uninit(&m_device);
     m_device_initialized = false;
 }
@@ -109,7 +103,6 @@ bool HardwareDevice::init() {
     m_last_error.clear();
     if (m_context == nullptr) return fail(&m_last_error, "Audio context is not initialized");
     if (m_device_initialized) {
-        // Repeated init must not resize buffers underneath an existing callback.
         if (ma_device_is_started(&m_device)) return true;
         const auto result = ma_device_start(&m_device);
         if (result != MA_SUCCESS) return fail(&m_last_error, backend_error("Cannot restart device", result));
@@ -124,16 +117,13 @@ bool HardwareDevice::init() {
             m_info.is_capture ? ma_device_type_capture : ma_device_type_playback);
         if (m_info.is_capture) {
             config.capture.format = ma_format_f32;
-            config.capture.channels = m_requested_channels; // Zero requests native channels.
+            config.capture.channels = m_requested_channels;
             config.capture.pDeviceID = &deviceId;
         } else {
             config.playback.format = ma_format_f32;
             config.playback.channels = m_requested_channels;
             config.playback.pDeviceID = &deviceId;
         }
-        // Leave channel maps native. With equal widths, miniaudio copies the
-        // backend map to the client map. Never force ALSA's "simple" remix or
-        // choose the largest advertised tuple as a fictitious physical layout.
         config.periodSizeInFrames = CM5_BUFFER_FRAMES;
         config.sampleRate = 48000;
         config.dataCallback = HardwareDevice::data_callback;
@@ -143,9 +133,6 @@ bool HardwareDevice::init() {
             return fail(&m_last_error, backend_error("Cannot initialize device", initResult));
         m_device_initialized = true;
 
-        // Publish diagnostics while still stopped, including the real fallback
-        // ID. Internal channels describe the backend stream, not hidden server
-        // profiles, physical ports, or the hardware behind an ALSA plugin.
         m_info.id = m_info.is_capture ? m_device.capture.id : m_device.playback.id;
         const auto openedId = stable_device_id(m_context->backend, m_info.id);
         if (m_info.stable_id != openedId) m_info.native_formats.clear();
@@ -186,7 +173,6 @@ bool HardwareDevice::init() {
                 stop();
                 return fail(&m_last_error, "Cannot allocate device ring buffers");
             }
-            // Start may callback before returning. Prepare EVERYTHING now.
             io_buffer.assign(static_cast<size_t>(CM5_BUFFER_FRAMES) * m_info.channels, 0.0f);
         } catch (const std::exception& error) {
             stop();
@@ -203,9 +189,6 @@ bool HardwareDevice::init() {
 
     const ma_device_id primaryId = m_info.id;
     if (attempt_init(primaryId)) return true;
-    // Preserve the legacy ALSA hw -> plughw fallback, but never hide a width
-    // mismatch by asking a plugin to invent extra channels. Other backends must
-    // never be given an ALSA ID through the device-ID union.
     if (m_context->backend != ma_backend_alsa || widthMismatch) return false;
     std::string plughwStr = text_id(primaryId.alsa);
     if (plughwStr.find("plughw:") == 0) return false;
@@ -231,42 +214,104 @@ void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void
     }
 }
 
-DeviceManager::DeviceManager(bool initializeBackend) {
-    // Tests can exercise the manager without loading ANY backend or enumerating
-    // physical devices. This is not a request to initialize miniaudio's null backend.
+// PipeWire Registry Callbacks
+void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props) {
+    auto* manager = static_cast<DeviceManager*>(data);
+    std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
+
+    if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+        const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
+        const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
+        manager->m_pw_graph.nodes.push_back({
+            id,
+            name ? name : "Unknown Node",
+            desc ? desc : "",
+            false
+        });
+    } else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
+        manager->m_pw_graph.links.push_back({0, 0, 0, 0});
+    }
+}
+
+void registry_global_remove(void *data, uint32_t id) {
+    auto* manager = static_cast<DeviceManager*>(data);
+    std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
+
+    auto& nodes = manager->m_pw_graph.nodes;
+    nodes.erase(std::remove_if(nodes.begin(), nodes.end(), [id](const auto& n) { return n.id == id; }), nodes.end());
+}
+
+static const struct pw_registry_events registry_events = {
+    PW_VERSION_REGISTRY_EVENTS,
+    .global = registry_global,
+    .global_remove = registry_global_remove,
+};
+
+DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
+    : m_pw_enabled(enablePwPatchbay) {
+    if (m_pw_enabled) {
+        std::cout << "[DeviceManager] Initializing PipeWire patchbay backend..." << std::endl;
+        m_pw_loop = pw_main_loop_new(NULL);
+        if (m_pw_loop) {
+            m_pw_context = pw_context_new(pw_main_loop_get_loop(m_pw_loop), NULL, 0);
+            if (m_pw_context) {
+                struct pw_core *core = pw_context_connect(m_pw_context, NULL, 0);
+                if (core) {
+                    struct pw_registry *registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+                    if (registry) {
+                        static struct spa_hook registry_listener;
+                        spa_zero(registry_listener);
+                        pw_registry_add_listener(registry, &registry_listener, &registry_events, this);
+                    }
+                }
+            }
+        }
+        if (!m_pw_loop || !m_pw_context) {
+            std::cerr << "[DeviceManager] CRITICAL ERROR: Failed to initialize PipeWire context/loop!" << std::endl;
+            m_pw_enabled = false;
+        } else {
+            m_pw_thread = std::thread([this]() {
+                pw_main_loop_run(m_pw_loop);
+            });
+            std::cout << "[DeviceManager] PipeWire patchbay backend active." << std::endl;
+        }
+    }
+
     if (!initializeBackend) return;
 
-    // Priority order: JACK (Pro) -> PulseAudio (Desktop) -> ALSA (Hardware Native)
     ma_backend backends[] = {
-        //ma_backend_jack,
         ma_backend_pulseaudio,
-        //ma_backend_alsa,
     };
 
     std::cout << "[DeviceManager] Initializing backend search..." << std::endl;
-    std::cout << "[DeviceManager] Enabled backends (priority order):" << std::endl;
-    for (size_t i = 0; i < std::size(backends); ++i) {
-        std::cout << "  " << i + 1 << ". " << ma_get_backend_name(backends[i]) << std::endl;
-    }
-
     ma_context_config config = ma_context_config_init();
     if (ma_context_init(backends, std::size(backends), &config, &m_context) != MA_SUCCESS) {
         std::cerr << "[DeviceManager] CRITICAL ERROR: Failed to initialize any available audio backend!" << std::endl;
     } else {
         m_context_initialized = true;
-        std::cout << "[DeviceManager] SUCCESS: Context initialized." << std::endl;
-        std::cout << "[DeviceManager] Active Backend: " << ma_get_backend_name(m_context.backend) << std::endl;
+        std::cout << "[DeviceManager] SUCCESS: Context initialized. Active Backend: " << ma_get_backend_name(m_context.backend) << std::endl;
     }
 }
 
 DeviceManager::~DeviceManager() {
-    // The owner must stop graph/session users and release their device references
-    // before destroying this manager: its context must outlive every device.
     stop_all();
+    if (m_pw_enabled) {
+        if (m_pw_loop) {
+            pw_main_loop_quit(m_pw_loop);
+            if (m_pw_thread.joinable()) m_pw_thread.join();
+            pw_main_loop_destroy(m_pw_loop);
+        }
+        if (m_pw_context) pw_context_destroy(m_pw_context);
+    }
     if (m_context_initialized) {
         ma_context_uninit(&m_context);
         m_context_initialized = false;
     }
+}
+
+PipeWireGraph DeviceManager::get_pipewire_graph() {
+    std::lock_guard<std::mutex> lock(m_pw_graph_lock);
+    return m_pw_graph;
 }
 
 void DeviceManager::enumerate_devices() {
@@ -276,10 +321,6 @@ void DeviceManager::enumerate_devices() {
     ma_device_info* playback = nullptr;
     ma_device_info* capture = nullptr;
     ma_uint32 playbackCount = 0, captureCount = 0;
-    // This API enumerates BASIC data only. Copy it outside the enumeration
-    // callback, under our lock because miniaudio owns/reuses these arrays. Never
-    // call get_device_info here: probing every endpoint is expensive and the
-    // vendored API forbids querying details inside its enumeration callback.
     if (ma_context_get_devices(&m_context, &playback, &playbackCount, &capture, &captureCount) != MA_SUCCESS) return;
     const auto append = [&](const ma_device_info* devices, ma_uint32 count, bool isCapture) {
         static const std::set<std::string> virtualAlsaIds = {
@@ -295,8 +336,6 @@ void DeviceManager::enumerate_devices() {
             info.backend = ma_get_backend_name(m_context.backend);
             info.name = device.name;
             info.is_capture = isCapture;
-            // No inferred maximum, name-based channel override, or fabricated
-            // sample rate. The opened stream is authoritative for auto width.
             m_available_devices.push_back(std::move(info));
         }
     };
@@ -324,9 +363,6 @@ std::vector<NativeStreamFormat> DeviceManager::get_device_capabilities(
         }
         selected = *found;
     }
-    // This may open a temporary device. Like activation/teardown it must not
-    // hold the manager lock. miniaudio serializes detailed queries itself. The
-    // context owner must outlive calls, just as it must outlive HardwareDevice.
     ma_device_info detailed{};
     const auto result = ma_context_get_device_info(&m_context,
         capture ? ma_device_type_capture : ma_device_type_playback, &selected.id, &detailed);
@@ -365,8 +401,6 @@ bool DeviceManager::activate_device(const std::string& id, unsigned captureChann
         return fail(error, "Requested channels exceed the backend limit of " + std::to_string(MA_MAX_CHANNELS));
     const auto requested = [&](bool capture) { return capture ? captureChannels : playbackChannels; };
     const auto activeMismatch = [&](const AudioDeviceInfo& info) {
-        // Auto is unspecified on a repeated call, retaining one-argument caller
-        // compatibility. An explicit count equal to the current width is a no-op.
         return requested(info.is_capture) != 0 && requested(info.is_capture) != info.channels;
     };
     const std::string reconfigureError = "Device is already active with a different channel count; deactivate it before changing channels";
@@ -392,7 +426,7 @@ bool DeviceManager::activate_device(const std::string& id, unsigned captureChann
             if (m_active_devices.count(key) != 0) continue;
             auto info = baseInfo;
             info.requested_channels = requested(info.is_capture);
-            info.channels = info.requested_channels; // Zero MUST remain native, even after a capability query.
+            info.channels = info.requested_channels;
             candidates.push_back(std::move(info));
         }
         if ((captureChannels != 0 && !hasCapture) || (playbackChannels != 0 && !hasPlayback))
@@ -403,8 +437,6 @@ bool DeviceManager::activate_device(const std::string& id, unsigned captureChann
         }
     }
 
-    // Keep owners outside all lock scopes: failed/cancelled/duplicate device
-    // destruction may stop/join a backend worker. No callbacks take m_lock.
     std::vector<std::shared_ptr<HardwareDevice>> ready;
     std::string activationError;
     for (const auto& info : candidates) {
@@ -413,9 +445,6 @@ bool DeviceManager::activate_device(const std::string& id, unsigned captureChann
             if (!activationError.empty()) activationError += "; ";
             activationError += std::string(info.is_capture ? "Capture" : "Playback") +
                 " activation failed for " + id + ": " + device->last_error();
-            // Explicit requests are transactional for newly opened endpoints.
-            // Legacy auto activation retains a usable direction when a backend
-            // enumerates a duplex ID but only one direction can actually open.
             if (captureChannels != 0 || playbackChannels != 0) return fail(error, activationError);
             continue;
         }
@@ -426,9 +455,7 @@ bool DeviceManager::activate_device(const std::string& id, unsigned captureChann
     {
         std::lock_guard<std::mutex> lock(m_lock);
         if (generation != m_activation_generation)
-            return fail(error, "Activation cancelled by device removal or stop; retry after deactivation");
-        // Concurrent activation may have installed the same endpoint while we
-        // initialized. Recheck its width before reporting idempotent success.
+            return fail(error, "Activation cancelled by device removal or stop; after deactivation");
         for (const auto& entry : m_active_devices) {
             if (entry.second->get_original_id() == id && activeMismatch(entry.second->get_info()))
                 return fail(error, reconfigureError);
@@ -461,8 +488,6 @@ void DeviceManager::deactivate_device(const std::string& id) {
             }
         }
     }
-    // Last-owner destruction/worker joins happen here, not under m_lock. Graph
-    // snapshots may deliberately keep an endpoint alive until they are retired.
 }
 
 void DeviceManager::stop_all() {

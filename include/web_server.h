@@ -155,7 +155,7 @@ class WebServer {
 public:
     WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
               ClientManager& clientMgr, DeviceManager& deviceMgr, DspEngine& dspEngine, 
-              int httpPort = 8182, int wsPort = 8183, bool plainText = false);
+              int httpPort = 8182, int wsPort = 8183, bool plainText = false, bool enablePwPatchbay = false);
     ~WebServer();
     bool start();
     void stop();
@@ -173,6 +173,7 @@ private:
     int m_httpPort;
     int m_wsPort;
     bool m_plainText;
+    bool m_pwEnabled;
     std::atomic<bool> m_running{false};
     std::mutex m_lifecycleLock;
     uint64_t m_persistedRevision = 0;

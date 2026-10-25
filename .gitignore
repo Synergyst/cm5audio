@@ -8,3 +8,6 @@ cm5audio_settings.json
 *.orig
 *.rej
 /fix.patch
+apply.sh
+/*.patch
+/*.py

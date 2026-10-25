@@ -81,6 +81,7 @@ struct PipeWireNode {
     unsigned audio_channels = 0; // Zero means the node did not publish an explicit channel count.
     std::vector<uint32_t> audio_positions; // SPA channel-position enum in stream channel order.
     bool audio_layout_resolved = false; // Set only after pw_node_info.props is received.
+    std::string app_name; // PipeWire application name, used to identify CM5Audio nodes in the UI.
 };
 
 struct PipeWireLink {

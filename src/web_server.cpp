@@ -1143,6 +1143,7 @@ bool WebServer::start() {
                     {"id", node.id},
                     {"name", node.name},
                     {"description", node.description},
+                    {"app_name", node.app_name},
                     {"is_input", node.is_input}
                 });
             }

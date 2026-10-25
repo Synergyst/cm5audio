@@ -1398,6 +1398,50 @@ function autoOrganizeLayout() {
             }
         }
 
+        // Use PipeWire's application identity first; node-name/description
+        // fallbacks keep labels useful when a backend omits application.name.
+        function isCm5AudioPipeWireNode(node) {
+            const appName = String(node.app_name || '').trim().toLowerCase();
+            if (appName === 'cm5audio') return true;
+
+            const nodeName = String(node.name || '');
+            const description = String(node.description || '');
+            return /^cm5audio(?:$|[-_.\s])/i.test(nodeName) ||
+                /\[miniaudio:\s*\d+\]/i.test(description);
+        }
+
+        function getPipeWireDisplayLabel(node) {
+            const normalName = node.name || node.description || `PW Node ${node.id}`;
+            if (!isCm5AudioPipeWireNode(node)) return normalName;
+
+            // A native node may have several port-level links to the same peer.
+            // Deduplicate by the peer's human-readable description, not IDs.
+            const peerNames = new Set();
+            const nodeId = Number(node.id);
+            pwGraph.links.forEach(link => {
+                const sourceId = Number(link.source_node);
+                const destId = Number(link.dest_node);
+                let peerId = null;
+                if (sourceId === nodeId) peerId = destId;
+                else if (destId === nodeId) peerId = sourceId;
+                if (peerId === null || peerId === nodeId) return;
+
+                const peer = pwGraph.nodes[peerId];
+                if (!peer || isCm5AudioPipeWireNode(peer)) return;
+                const peerName = String(peer.description || peer.name || '').trim();
+                if (peerName) peerNames.add(peerName.replace(/\s+/g, ' '));
+            });
+
+            const devices = Array.from(peerNames).sort((a, b) =>
+                a.localeCompare(b, undefined, { sensitivity: 'base' }));
+            if (devices.length === 1) return `${devices[0]} [cm5audio]`;
+            if (devices.length > 1) return `${devices.join(' + ')} [cm5audio]`;
+
+            // Keep disconnected streams identifiable without pretending they
+            // are connected to a particular device.
+            return `${normalName} [cm5audio]`;
+        }
+
         function renderPipewirePatchbay() {
             const viewport = $('patchbay-viewport');
             const currentNodeIds = new Set(Object.keys(pwGraph.nodes).map(Number));
@@ -1436,7 +1480,7 @@ function autoOrganizeLayout() {
                     block = createPwEndpointBlock(node, portList);
                     viewport.appendChild(block);
                 } else {
-                    block.querySelector('.endpoint-header').textContent = node.name || `PW Node ${node.id}`;
+                    block.querySelector('.endpoint-header').textContent = getPipeWireDisplayLabel(node);
                     const pos = nodePositions[`pw-${node.id}`];
                     block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
                 }
@@ -1553,7 +1597,7 @@ function autoOrganizeLayout() {
 
             const header = document.createElement('div');
             header.className = 'endpoint-header';
-            header.textContent = node.name || `PW Node ${node.id}`;
+            header.textContent = getPipeWireDisplayLabel(node);
             block.appendChild(header);
             setupBlockDragging(block, `pw-${node.id}`);
 
@@ -1581,7 +1625,7 @@ function autoOrganizeLayout() {
 
             const header = document.createElement('div');
             header.className = 'endpoint-header';
-            header.textContent = node.name || `PW Node ${node.id}`;
+            header.textContent = getPipeWireDisplayLabel(node);
             block.appendChild(header);
             setupBlockDragging(block, `pw-${node.id}`);
 

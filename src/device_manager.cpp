@@ -686,7 +686,9 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
             is_input,
             mediaClass,
             audioLayout.channels,
-            audioLayout.positions
+            audioLayout.positions,
+            false,
+            app_name ? app_name : ""
         };
         manager->rebuild_pipewire_visible_links_locked();
 

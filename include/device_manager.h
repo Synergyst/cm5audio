@@ -12,6 +12,7 @@
 #include <atomic>
 #include "ring_buffer.h"
 #include <cstdint>
+#include <cstddef>
 #include <string>
 #include <vector>
 #include <memory>
@@ -24,6 +25,10 @@
 using NodeId = int32_t;
 class DspEngine;
 struct pw_stream;
+struct spa_loop;
+struct pw_node;
+struct pw_registry;
+struct pw_node_info;
 
 struct NodeMonitor {
     uint32_t node_id;
@@ -73,6 +78,9 @@ struct PipeWireNode {
     std::string description;
     bool is_input; // True if it's a sink (input) node, false if source (output) node
     std::string media_class;
+    unsigned audio_channels = 0; // Zero means the node did not publish an explicit channel count.
+    std::vector<uint32_t> audio_positions; // SPA channel-position enum in stream channel order.
+    bool audio_layout_resolved = false; // Set only after pw_node_info.props is received.
 };
 
 struct PipeWireLink {
@@ -153,13 +161,38 @@ public:
     // PipeWire VU Metering Integration
     void set_dsp_engine(DspEngine* engine);
     void start_node_monitor(uint32_t nodeId, const std::string& name,
-                            bool isCapture, unsigned channels = 2);
+                            bool isCapture, unsigned channels = 2,
+                            std::vector<uint32_t> positions = {});
     void stop_node_monitor(uint32_t nodeId);
 
 private:
     friend struct DeviceManagerTestAccess;
     friend void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props);
     friend void registry_global_remove(void *data, uint32_t id);
+    friend void pipewire_node_info_changed(void *data, const struct pw_node_info *info);
+    struct MonitorLoopRequest {
+        DeviceManager* manager = nullptr;
+        bool start = false;
+        uint32_t node_id = 0;
+        std::string name;
+        bool is_capture = true;
+        unsigned channels = 0;
+        std::vector<uint32_t> positions;
+    };
+    struct PipeWireNodeInfoWatch {
+        DeviceManager* manager = nullptr;
+        uint32_t node_id = 0;
+        struct pw_node* proxy = nullptr;
+        struct spa_hook listener{};
+    };
+    static int invoke_monitor_operation(struct spa_loop*, bool, uint32_t,
+                                        const void*, std::size_t, void*);
+    static int invoke_pipewire_cleanup(struct spa_loop*, bool, uint32_t,
+                                       const void*, std::size_t, void*);
+    void start_node_monitor_in_loop(uint32_t nodeId, const std::string& name,
+                                    bool isCapture, unsigned channels,
+                                    const std::vector<uint32_t>& positions);
+    void stop_node_monitor_in_loop(uint32_t nodeId);
     void rebuild_pipewire_visible_links_locked();
 
     std::mutex m_lock;
@@ -175,13 +208,18 @@ private:
     bool m_pw_enabled = false;
     struct pw_main_loop* m_pw_loop = nullptr;
     struct pw_context* m_pw_context = nullptr;
+    struct pw_registry* m_pw_registry = nullptr;
     struct spa_hook m_registry_listener;
     std::thread m_pw_thread;
     std::mutex m_pw_graph_lock;
     PipeWireGraph m_pw_graph;
     std::unordered_set<uint32_t> m_pw_ignored_nodes;
     std::unordered_map<uint32_t, PipeWireLink> m_pw_links_by_id;
+    // Node proxy listeners are created, updated, and destroyed on the PipeWire loop.
+    std::unordered_map<uint32_t, std::unique_ptr<PipeWireNodeInfoWatch>> m_pw_node_info_watchers;
 
+    // pw_loop_invoke requires external callers to be serialized.
+    std::mutex m_monitorInvokeLock;
     // PipeWire Metering Internals
     std::atomic<DspEngine*> m_dspEngine{nullptr};
     std::unordered_map<uint32_t, std::unique_ptr<NodeMonitor>> m_monitors;

@@ -693,7 +693,7 @@
         function zoomOut() { scale = Math.max(0.2, scale / 1.2); updateTransform(); }
         function resetZoom() { isInitialFitDone = false; autoFitViewport(); }
 
-        function autoOrganizeLayout() {
+        /*function autoOrganizeLayout() {
             nodePositions = {};
             const TIGHT_GAP = 10;     // Tightly packed gap for matching family node windows
             const COL_WIDTH = 340;    // Horizontal spacing between major columns
@@ -787,6 +787,116 @@
             if (pwCaptures.length > 0) {
                 stackFamily(pwCaptures, COL_WIDTH * 4, yCol4, true);
             }
+
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+
+            // Apply positions instantly to DOM elements
+            endpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[id];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+            pwEndpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[`pw-${id}`];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+
+            isInitialFitDone = false;
+            autoFitViewport();
+            drawCables();
+        }*/
+
+function autoOrganizeLayout() {
+            nodePositions = {};
+            const TIGHT_GAP = 10;     // Tightly packed gap for matching family node windows
+            const COL_WIDTH = 340;    // Horizontal spacing between major columns
+
+            function getNodeHeight(id, isPw) {
+                const domEl = $(isPw ? `pw-block-${id}` : `block-${id}`);
+                if (domEl && domEl.offsetHeight > 0) return domEl.offsetHeight;
+
+                if (!isPw) {
+                    const ep = graph.endpoints.find(e => e.id === id);
+                    if (ep) return 42 + (ep.channels * 34);
+                } else {
+                    const node = pwGraph.nodes[id];
+                    if (node) {
+                        const ports = new Set();
+                        pwGraph.links.forEach(l => {
+                            if (l.source_node === node.id) ports.add(l.source_port);
+                            if (l.dest_node === node.id) ports.add(l.dest_port);
+                        });
+                        const portCount = Math.max(2, ports.size);
+                        return 42 + (portCount * 34);
+                    }
+                }
+                return 160;
+            }
+
+            function stackFamily(items, colX, startY, isPw = false) {
+                let currentY = startY;
+                items.forEach(item => {
+                    const id = isPw ? item.id : item.id;
+                    const key = isPw ? `pw-${id}` : id;
+                    nodePositions[key] = { x: colX, y: currentY };
+                    currentY += getNodeHeight(id, isPw) + TIGHT_GAP;
+                });
+                return currentY;
+            }
+
+            // --- 1. Categorize CM5 Internal Endpoints into Families ---
+            const cm5Captures = [];
+            const cm5Playbacks = [];
+            const cm5Drivers = [];
+
+            graph.endpoints.forEach(ep => {
+                const name = (ep.name || ep.id).toLowerCase();
+                if (name.includes('freewheel') || name.includes('dummy') || name.includes('midi') || name.includes('tone')) {
+                    cm5Drivers.push(ep);
+                } else if (ep.direction === 'source') {
+                    cm5Captures.push(ep);
+                } else {
+                    cm5Playbacks.push(ep);
+                }
+            });
+
+            // --- 2. Categorize PipeWire Native Nodes into the Same Families ---
+            const pwCaptures = [];   // Sources / output ports -> Captures stack
+            const pwPlaybacks = [];  // Sinks / input ports -> Playbacks stack
+            const pwDrivers = [];    // Drivers & Utilities
+
+            Object.values(pwGraph.nodes).forEach(node => {
+                const name = (node.name || '').toLowerCase();
+                if (name.includes('freewheel') || name.includes('dummy') || name.includes('midi')) {
+                    pwDrivers.push(node);
+                } else if (!node.is_input) {
+                    // is_input = false means Source (produces audio -> Captures column)
+                    pwCaptures.push(node);
+                } else {
+                    // is_input = true means Sink (consumes audio -> Playbacks column)
+                    pwPlaybacks.push(node);
+                }
+            });
+
+            // --- Column Layout Assignment ---
+            // Left Side: CM5 Internal Windows (Columns 0, 1, 2)
+            let yCol0 = 0;
+            if (cm5Captures.length > 0) stackFamily(cm5Captures, 0, yCol0, false);
+
+            let yCol1 = 0;
+            if (cm5Playbacks.length > 0) stackFamily(cm5Playbacks, COL_WIDTH, yCol1, false);
+
+            let yCol2 = 0;
+            if (cm5Drivers.length > 0) stackFamily(cm5Drivers, COL_WIDTH * 2, yCol2, false);
+
+            // Right Side: PipeWire Native Windows (Columns 3, 4, 5)
+            let yCol3 = 0;
+            if (pwCaptures.length > 0) stackFamily(pwCaptures, COL_WIDTH * 3, yCol3, true);
+
+            let yCol4 = 0;
+            if (pwPlaybacks.length > 0) stackFamily(pwPlaybacks, COL_WIDTH * 4, yCol4, true);
+
+            let yCol5 = 0;
+            if (pwDrivers.length > 0) stackFamily(pwDrivers, COL_WIDTH * 5, yCol5, true);
 
             localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
 

@@ -214,48 +214,84 @@ void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void
     }
 }
 
-// PipeWire Registry Callbacks
-/*void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props) {
-    auto* manager = static_cast<DeviceManager*>(data);
-    std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
-
-    if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
-        const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
-        const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
-        const char* dir = props ? spa_dict_lookup(props, "node.direction") : nullptr;
-        bool is_input = (dir && strcmp(dir, "input") == 0);
-
-        manager->m_pw_graph.nodes.push_back({
-            id,
-            name ? name : "Unknown Node",
-            desc ? desc : "",
-            is_input
-        });
-    } else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
-        uint32_t src_node = 0, dst_node = 0, src_port = 0, dst_port = 0;
-        if (props) {
-            const char* sn = spa_dict_lookup(props, "link.output.node");
-            const char* dn = spa_dict_lookup(props, "link.input.node");
-            const char* sp = spa_dict_lookup(props, "link.output.port");
-            const char* dp = spa_dict_lookup(props, "link.input.port");
-            if (sn) src_node = std::stoul(sn);
-            if (dn) dst_node = std::stoul(dn);
-            if (sp) src_port = std::stoul(sp);
-            if (dp) dst_port = std::stoul(dp);
-        }
-        manager->m_pw_graph.links.push_back({src_port, dst_port, src_node, dst_node});
-    }
-}*/
-
 void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props) {
     auto* manager = static_cast<DeviceManager*>(data);
     std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
 
-    if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+    /*if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
         const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
         const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
         const char* dir = props ? spa_dict_lookup(props, "node.direction") : nullptr;
         bool is_input = (dir && strcmp(dir, "input") == 0);
+
+        manager->m_pw_graph.nodes[id] = {
+            id,
+            name ? name : "Unknown Node",
+            desc ? desc : "",
+            is_input
+        };
+    }*/
+    /*if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+        const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
+        const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
+
+        // PipeWire uses media.class (e.g., Audio/Source vs Audio/Sink) to classify nodes
+        const char* media_class = props ? spa_dict_lookup(props, "media.class") : nullptr;
+
+        bool is_input = false;
+        if (media_class) {
+            std::string mc(media_class);
+            // Audio/Source (capture devices) or Stream/Input/Audio
+            is_input = (mc.find("Source") != std::string::npos || mc.find("Input") != std::string::npos);
+        } else if (name) {
+            // Fallback check on node name prefix if media.class is missing
+            is_input = (std::string(name).find("alsa_input") == 0);
+        }
+
+        manager->m_pw_graph.nodes[id] = {
+            id,
+            name ? name : "Unknown Node",
+            desc ? desc : "",
+            is_input
+        };
+    }*/
+    /*if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+        const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
+        const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
+        const char* media_class = props ? spa_dict_lookup(props, "media.class") : nullptr;
+
+        // A node is an audio producer (Source) if it's an Audio/Source or a Stream/Output/Audio
+        // A node is an audio consumer (Sink) if it's an Audio/Sink or a Stream/Input/Audio
+        bool is_producer = false;
+        if (media_class) {
+            std::string mc(media_class);
+            is_producer = (mc.find("Source") != std::string::npos || mc.find("Output") != std::string::npos);
+        } else if (name) {
+            is_producer = (std::string(name).find("alsa_input") == 0);
+        }
+
+        manager->m_pw_graph.nodes[id] = {
+            id,
+            name ? name : "Unknown Node",
+            desc ? desc : "",
+            is_producer  // Reusing the boolean field (or rename to is_producer / is_source)
+        };
+    }*/
+    if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+        const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
+        const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
+        const char* media_class = props ? spa_dict_lookup(props, "media.class") : nullptr;
+
+        // True = Sink / Consumer (has input ports, labels on LEFT)
+        // False = Source / Producer (has output ports, labels on RIGHT)
+        bool is_input = false;
+        if (media_class) {
+            std::string mc(media_class);
+            is_input = (mc.find("Sink") != std::string::npos || mc.find("Input") != std::string::npos);
+        } else if (name) {
+            std::string n(name);
+            is_input = (n.find("alsa_output") == 0);
+        }
 
         manager->m_pw_graph.nodes[id] = {
             id,
@@ -282,14 +318,6 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
         manager->m_pw_graph.links.push_back({src_port, dst_port, src_node, dst_node});
     }
 }
-
-/*void registry_global_remove(void *data, uint32_t id) {
-    auto* manager = static_cast<DeviceManager*>(data);
-    std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
-
-    auto& nodes = manager->m_pw_graph.nodes;
-    nodes.erase(std::remove_if(nodes.begin(), nodes.end(), [id](const auto& n) { return n.id == id; }), nodes.end());
-}*/
 
 void registry_global_remove(void *data, uint32_t id) {
     auto* manager = static_cast<DeviceManager*>(data);

@@ -1137,16 +1137,6 @@ bool WebServer::start() {
             const auto graph = m_deviceMgr.get_pipewire_graph();
             nlohmann::json j;
 
-            /*j["nodes"] = nlohmann::json::array();
-            for (const auto& node : graph.nodes) {
-                j["nodes"].push_back({
-                    {"id", node.id},
-                    {"name", node.name},
-                    {"description", node.description},
-                    {"is_input", node.is_input}
-                });
-            }*/
-
             j["nodes"] = nlohmann::json::array();
             for (const auto& [id, node] : graph.nodes) {
                 j["nodes"].push_back({

@@ -1,6 +1,8 @@
 #ifndef DEVICE_MANAGER_H
 #define DEVICE_MANAGER_H
 
+#include <spa/utils/hook.h>
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstringop-overflow"
 #include "miniaudio.h"
@@ -66,7 +68,7 @@ struct PipeWireLink {
 };
 
 struct PipeWireGraph {
-    std::vector<PipeWireNode> nodes;
+    std::unordered_map<uint32_t, PipeWireNode> nodes;
     std::vector<PipeWireLink> links;
 };
 
@@ -151,6 +153,7 @@ private:
     bool m_pw_enabled = false;
     struct pw_main_loop* m_pw_loop = nullptr;
     struct pw_context* m_pw_context = nullptr;
+    struct spa_hook m_registry_listener;
     std::thread m_pw_thread;
     std::mutex m_pw_graph_lock;
     PipeWireGraph m_pw_graph;

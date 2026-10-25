@@ -12,9 +12,6 @@
 #include <spa/utils/defs.h>
 
 namespace {
-// File-static pointer to pw_core accessible by registry callbacks
-static struct pw_core* g_pw_core = nullptr;
-
 template <size_t N>
 std::string text_id(const char (&value)[N]) {
     return std::string(value, std::find(value, value + N, '\0'));
@@ -218,7 +215,7 @@ void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void
 }
 
 // PipeWire Registry Callbacks
-void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props) {
+/*void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props) {
     auto* manager = static_cast<DeviceManager*>(data);
     std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
 
@@ -248,14 +245,56 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
         }
         manager->m_pw_graph.links.push_back({src_port, dst_port, src_node, dst_node});
     }
+}*/
+
+void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props) {
+    auto* manager = static_cast<DeviceManager*>(data);
+    std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
+
+    if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+        const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
+        const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
+        const char* dir = props ? spa_dict_lookup(props, "node.direction") : nullptr;
+        bool is_input = (dir && strcmp(dir, "input") == 0);
+
+        manager->m_pw_graph.nodes[id] = {
+            id,
+            name ? name : "Unknown Node",
+            desc ? desc : "",
+            is_input
+        };
+    } else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
+        uint32_t src_node = 0, dst_node = 0, src_port = 0, dst_port = 0;
+        if (props) {
+            try {
+                const char* sn = spa_dict_lookup(props, "link.output.node");
+                const char* dn = spa_dict_lookup(props, "link.input.node");
+                const char* sp = spa_dict_lookup(props, "link.output.port");
+                const char* dp = spa_dict_lookup(props, "link.input.port");
+                if (sn) src_node = std::stoul(sn);
+                if (dn) dst_node = std::stoul(dn);
+                if (sp) src_port = std::stoul(sp);
+                if (dp) dst_port = std::stoul(dp);
+            } catch (...) {
+                return; // Ignore malformed port/node strings to prevent crash
+            }
+        }
+        manager->m_pw_graph.links.push_back({src_port, dst_port, src_node, dst_node});
+    }
 }
 
-void registry_global_remove(void *data, uint32_t id) {
+/*void registry_global_remove(void *data, uint32_t id) {
     auto* manager = static_cast<DeviceManager*>(data);
     std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
 
     auto& nodes = manager->m_pw_graph.nodes;
     nodes.erase(std::remove_if(nodes.begin(), nodes.end(), [id](const auto& n) { return n.id == id; }), nodes.end());
+}*/
+
+void registry_global_remove(void *data, uint32_t id) {
+    auto* manager = static_cast<DeviceManager*>(data);
+    std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
+    manager->m_pw_graph.nodes.erase(id);
 }
 
 static const struct pw_registry_events registry_events = {
@@ -263,53 +302,6 @@ static const struct pw_registry_events registry_events = {
     .global = registry_global,
     .global_remove = registry_global_remove,
 };
-
-/*DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
-    : m_pw_enabled(enablePwPatchbay) {
-    if (m_pw_enabled) {
-        std::cout << "[DeviceManager] Initializing PipeWire patchbay backend..." << std::endl;
-        m_pw_loop = pw_main_loop_new(NULL);
-        if (m_pw_loop) {
-            m_pw_context = pw_context_new(pw_main_loop_get_loop(m_pw_loop), NULL, 0);
-            if (m_pw_context) {
-                struct pw_core *core = pw_context_connect(m_pw_context, NULL, 0);
-                g_pw_core = core;
-                if (core) {
-                    struct pw_registry *registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
-                    if (registry) {
-                        static struct spa_hook registry_listener;
-                        spa_zero(registry_listener);
-                        pw_registry_add_listener(registry, &registry_listener, &registry_events, this);
-                    }
-                }
-            }
-        }
-        if (!m_pw_loop || !m_pw_context) {
-            std::cerr << "[DeviceManager] CRITICAL ERROR: Failed to initialize PipeWire context/loop!" << std::endl;
-            m_pw_enabled = false;
-        } else {
-            m_pw_thread = std::thread([this]() {
-                pw_main_loop_run(m_pw_loop);
-            });
-            std::cout << "[DeviceManager] PipeWire patchbay backend active." << std::endl;
-        }
-    }
-
-    if (!initializeBackend) return;
-
-    ma_backend backends[] = {
-        ma_backend_pulseaudio,
-    };
-
-    std::cout << "[DeviceManager] Initializing backend search..." << std::endl;
-    ma_context_config config = ma_context_config_init();
-    if (ma_context_init(backends, std::size(backends), &config, &m_context) != MA_SUCCESS) {
-        std::cerr << "[DeviceManager] CRITICAL ERROR: Failed to initialize any available audio backend!" << std::endl;
-    } else {
-        m_context_initialized = true;
-        std::cout << "[DeviceManager] SUCCESS: Context initialized. Active Backend: " << ma_get_backend_name(m_context.backend) << std::endl;
-    }
-}*/
 
 DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
     : m_pw_enabled(enablePwPatchbay) {
@@ -324,13 +316,11 @@ DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
             m_pw_context = pw_context_new(pw_main_loop_get_loop(m_pw_loop), NULL, 0);
             if (m_pw_context) {
                 struct pw_core *core = pw_context_connect(m_pw_context, NULL, 0);
-                g_pw_core = core;
                 if (core) {
                     struct pw_registry *registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
                     if (registry) {
-                        static struct spa_hook registry_listener;
-                        spa_zero(registry_listener);
-                        pw_registry_add_listener(registry, &registry_listener, &registry_events, this);
+                        spa_zero(m_registry_listener);
+                        pw_registry_add_listener(registry, &m_registry_listener, &registry_events, this);
                     }
                 }
             }
@@ -364,7 +354,6 @@ DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
 
 DeviceManager::~DeviceManager() {
     stop_all();
-    g_pw_core = nullptr;
     if (m_pw_enabled) {
         if (m_pw_loop) {
             pw_main_loop_quit(m_pw_loop);

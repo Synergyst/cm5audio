@@ -812,7 +812,7 @@ WebServer::WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControl
                      ClientManager& clientMgr, DeviceManager& deviceMgr, DspEngine& dspEngine, int httpPort, int wsPort, bool plainText, bool enablePwPatchbay)
     : m_metrics(metrics), m_controls(controls), m_tone(tone),
       m_clientMgr(clientMgr), m_deviceMgr(deviceMgr), m_dspEngine(dspEngine),
-      m_httpPort(httpPort), m_wsPort(wsPort), m_plainText(plainText) {}
+      m_httpPort(httpPort), m_wsPort(wsPort), m_plainText(plainText), m_pwEnabled(enablePwPatchbay) {}
 
 WebServer::~WebServer() { stop(); }
 
@@ -1124,6 +1124,39 @@ bool WebServer::start() {
                 sj["output_meters"] = build_meter_json(s->output_metrics, s->output_channels.load());
                 j["clients"].push_back(sj);
             }
+            response.set_content(j.dump(2), "application/json");
+        });
+
+        m_httpServer->Get("/api/pipewire/graph", [this](const httplib::Request&, httplib::Response& response) {
+            if (!m_pwEnabled) {
+                response.status = 404;
+                response.set_content("{\"error\": \"PipeWire patchbay not enabled via CLI\"}", "application/json");
+                return;
+            }
+
+            const auto graph = m_deviceMgr.get_pipewire_graph();
+            nlohmann::json j;
+
+            j["nodes"] = nlohmann::json::array();
+            for (const auto& node : graph.nodes) {
+                j["nodes"].push_back({
+                    {"id", node.id},
+                    {"name", node.name},
+                    {"description", node.description},
+                    {"is_input", node.is_input}
+                });
+            }
+
+            j["links"] = nlohmann::json::array();
+            for (const auto& link : graph.links) {
+                j["links"].push_back({
+                    {"source_node", link.source_node},
+                    {"dest_node", link.dest_node},
+                    {"source_port", link.source_port},
+                    {"dest_port", link.dest_port}
+                });
+            }
+
             response.set_content(j.dump(2), "application/json");
         });
 

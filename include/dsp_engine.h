@@ -62,13 +62,15 @@ public:
     void update_route_dsp(uint32_t routeId, std::vector<std::unique_ptr<AudioProcessor>> newChain,
                           float gain, bool active);
 
+    // Publicly exposed so DeviceManager native stream monitors can feed meter data
+    void update_meters(float* buffer, unsigned channels, unsigned stride, const std::string& endpointId, bool isCapture);
+
 private:
     friend struct DspEngineTestAccess;
 
     void processing_loop();
     void process_audio();
     void rebuild_graph();
-    void update_meters(float* buffer, unsigned channels, unsigned stride, const std::string& endpointId, bool isCapture);
 
     DeviceManager& m_deviceManager;
     ClientManager& m_clientManager;

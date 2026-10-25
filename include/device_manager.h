@@ -18,8 +18,19 @@
 #include <thread>
 #include <unordered_map>
 
-// Forward declaration of NodeId from web_server.h
+// Forward declarations
 using NodeId = int32_t;
+class DspEngine;
+struct pw_stream;
+
+struct NodeMonitor {
+    uint32_t node_id;
+    std::string endpoint_name;
+    struct pw_stream* stream = nullptr;
+    struct spa_hook stream_listener{};
+    DspEngine* dsp_engine = nullptr;
+    unsigned channels = 2;
+};
 
 // A native capability is a JOINT tuple, not four independent maxima. Unknown
 // format / zero channels / zero sample_rate retain miniaudio's wildcard meaning.
@@ -57,7 +68,7 @@ struct PipeWireNode {
     uint32_t id;
     std::string name;
     std::string description;
-    bool is_input; // True if it's a source (capture) node
+    bool is_input; // True if it's a sink (input) node, false if source (output) node
 };
 
 struct PipeWireLink {
@@ -135,6 +146,11 @@ public:
     // PipeWire Patchbay API
     PipeWireGraph get_pipewire_graph();
 
+    // PipeWire VU Metering Integration
+    void set_dsp_engine(DspEngine* engine) { m_dspEngine = engine; }
+    void start_node_monitor(uint32_t nodeId, const std::string& name, unsigned channels = 2);
+    void stop_node_monitor(uint32_t nodeId);
+
 private:
     friend struct DeviceManagerTestAccess;
     friend void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props);
@@ -157,6 +173,11 @@ private:
     std::thread m_pw_thread;
     std::mutex m_pw_graph_lock;
     PipeWireGraph m_pw_graph;
+
+    // PipeWire Metering Internals
+    DspEngine* m_dspEngine = nullptr;
+    std::unordered_map<uint32_t, std::unique_ptr<NodeMonitor>> m_monitors;
+    std::mutex m_monitorLock;
 };
 
 #endif

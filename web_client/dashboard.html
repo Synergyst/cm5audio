@@ -1294,7 +1294,7 @@ function autoOrganizeLayout() {
         }
 
         function rebuildMeterCache() {
-            cachedMeters = [];
+            /*cachedMeters = [];
             graph.endpoints.forEach(ep => {
                 for (let i = 0; i < ep.channels; i++) {
                     const fill = document.getElementById(`vu-${ep.id}-${i}`);
@@ -1302,6 +1302,28 @@ function autoOrganizeLayout() {
                     if (fill) {
                         cachedMeters.push({ epId: ep.id, ch: i, fillEl: fill, peakEl: peak });
                     }
+                }
+            });*/
+
+            cachedMeters = [];
+
+            // 1. Cache internal cm5audio endpoints
+            graph.endpoints.forEach(ep => {
+                for (let i = 0; i < ep.channels; i++) {
+                    const fill = document.getElementById(`vu-${ep.id}-${i}`);
+                    const peak = document.getElementById(`peak-${ep.id}-${i}`);
+                    if (fill) cachedMeters.push({ epId: ep.id, ch: i, fillEl: fill, peakEl: peak });
+                }
+            });
+
+            // 2. Cache native PipeWire node ports (pw-node/<id>)
+            Object.values(pwGraph.nodes).forEach(node => {
+                const epId = `pw-node/${node.id}`;
+                // Assuming stereo/multi-channel; adjust channel loop to match node ports if needed
+                for (let i = 0; i < 2; i++) {
+                    const fill = document.getElementById(`vu-${epId}-${i}`);
+                    const peak = document.getElementById(`peak-${epId}-${i}`);
+                    if (fill) cachedMeters.push({ epId: epId, ch: i, fillEl: fill, peakEl: peak });
                 }
             });
         }
@@ -1486,7 +1508,7 @@ function autoOrganizeLayout() {
             return block;
         }
 
-        function createPwEndpointBlock(node, portList) {
+        /*function createPwEndpointBlock(node, portList) {
             const block = document.createElement('div');
             block.className = 'endpoint-block pw-block';
             block.id = `pw-block-${node.id}`;
@@ -1506,6 +1528,43 @@ function autoOrganizeLayout() {
                 row.className = 'channel-row';
                 row.id = `pw-slot-${node.id}-${portId}`;
                 row.innerHTML = node.is_input ? `<span class="ch-label">P${portId}</span><div class="vu-container"></div>` : `<div class="vu-container"></div><span class="ch-label" style="text-align: right;">P${portId}</span>`;
+                block.appendChild(row);
+            });
+
+            pwEndpointBlocks.set(node.id, block);
+            return block;
+        }*/
+
+        function createPwEndpointBlock(node, portList) {
+            const block = document.createElement('div');
+            block.className = 'endpoint-block pw-block';
+            block.id = `pw-block-${node.id}`;
+            block.dataset.epId = `pw-${node.id}`;
+
+            const pos = nodePositions[`pw-${node.id}`] || { x: 1020, y: 0 };
+            block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+
+            const header = document.createElement('div');
+            header.className = 'endpoint-header';
+            header.textContent = node.name || `PW Node ${node.id}`;
+            block.appendChild(header);
+            setupBlockDragging(block, `pw-${node.id}`);
+
+            portList.forEach((portId, index) => {
+                const row = document.createElement('div');
+                row.className = 'channel-row';
+                row.id = `pw-slot-${node.id}-${portId}`;
+                
+                // Inject the actual vu-fill and vu-peak bars inside the vu-container using index
+                const meterHtml = `
+                    <div class="vu-fill" id="vu-pw-node/${node.id}-${index}"></div>
+                    <div class="vu-peak" id="peak-pw-node/${node.id}-${index}"></div>
+                `;
+
+                row.innerHTML = node.is_input 
+                    ? `<span class="ch-label">P${portId}</span><div class="vu-container">${meterHtml}</div>` 
+                    : `<div class="vu-container">${meterHtml}</div><span class="ch-label" style="text-align: right;">P${portId}</span>`;
+                
                 block.appendChild(row);
             });
 

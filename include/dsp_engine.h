@@ -11,6 +11,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstddef>
 #include <atomic>
 #include <vector>
 #include <mutex>
@@ -62,8 +63,16 @@ public:
     void update_route_dsp(uint32_t routeId, std::vector<std::unique_ptr<AudioProcessor>> newChain,
                           float gain, bool active);
 
-    // Publicly exposed so DeviceManager native stream monitors can feed meter data
-    void update_meters(float* buffer, unsigned channels, unsigned stride, const std::string& endpointId, bool isCapture);
+    // PipeWire meter banks are registered when the monitor format is negotiated.
+    void register_pipewire_meter_bank(const std::string& endpointId,
+                                      unsigned channels, bool isCapture);
+    void unregister_pipewire_meter_bank(const std::string& endpointId, bool isCapture);
+
+    // Publicly exposed so DeviceManager native stream monitors can feed meter data.
+    // frames defaults to the CM5 block size for existing internal-meter callers.
+    void update_meters(float* buffer, unsigned channels, unsigned stride,
+                       const std::string& endpointId, bool isCapture,
+                       size_t frames = CM5_BUFFER_FRAMES);
 
 private:
     friend struct DspEngineTestAccess;

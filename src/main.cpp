@@ -110,16 +110,26 @@ int main(int argc, char** argv) {
         ClientManager clients;
         clients.set_device_manager(&devices);
         auto engine = std::make_unique<DspEngine>(devices, clients, metrics, tone);
+        devices.set_dsp_engine(engine.get());
         clients.set_dsp_engine(engine.get());
         clients.load_settings(controls, tone);
-        if (shutdownRequested) { clients.set_dsp_engine(nullptr); return 0; }
+        if (shutdownRequested) {
+            clients.set_dsp_engine(nullptr);
+            devices.set_dsp_engine(nullptr);
+            return 0;
+        }
         engine->start();
         WebServer server(metrics, controls, tone, clients, devices, *engine, httpPort, wsPort, plainText, enablePwPatchbay);
-        if (!server.start()) { clients.set_dsp_engine(nullptr); return 1; }
+        if (!server.start()) {
+            clients.set_dsp_engine(nullptr);
+            devices.set_dsp_engine(nullptr);
+            return 1;
+        }
         while (!shutdownRequested && server.is_running()) shutdown.wait();
         std::cout << "[Shutdown] Quiescing control, DSP, network and sessions" << std::endl;
         server.stop();
         clients.set_dsp_engine(nullptr);
+        devices.set_dsp_engine(nullptr);
         engine.reset(); // Release graph owners before hardware/context teardown.
         devices.stop_all();
         std::cout << "[Shutdown] Application workers stopped; releasing audio context" << std::endl;

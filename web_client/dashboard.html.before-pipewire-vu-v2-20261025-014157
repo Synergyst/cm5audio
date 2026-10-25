@@ -1,0 +1,2237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>CM5 Audio Network Patchbay</title>
+    <style>
+        :root {
+            --bg-color: #0f111a;
+            --panel-bg: #1a1c23;
+            --border-color: #2e3440;
+            --text-main: #eceff4;
+            --text-dim: #d8dee9;
+            --accent-blue: #88c0d0;
+            --accent-green: #a3be8c;
+            --accent-red: #bf616a;
+            --accent-yellow: #ebcb8b;
+            --highlight: #5e81ac;
+            /* Native PipeWire Theme (Purple / Magenta) */
+            --pw-primary: #b48ead;
+            --pw-border: #564c65;
+            --pw-bg: #1e1b24;
+            --pw-cable: #b48ead;
+            --pw-selected: rgba(180, 142, 173, 0.25);
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg-color);
+            color: var(--text-main);
+            font: 13px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        header {
+            background: var(--panel-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 10px 15px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            z-index: 100;
+        }
+        .brand-area { display: flex; align-items: center; gap: 15px; }
+        .brand { font-size: 16px; font-weight: bold; color: var(--accent-blue); white-space: nowrap; }
+
+        .tabs {
+            display: flex;
+            background: var(--bg-color);
+            border-radius: 4px;
+            padding: 2px;
+            border: 1px solid var(--border-color);
+        }
+        .tab-btn {
+            background: transparent;
+            color: var(--text-dim);
+            border: none;
+            padding: 6px 14px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .tab-btn.active {
+            background: var(--highlight);
+            color: #fff;
+        }
+
+        .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        button {
+            background: #4c566a;
+            color: #fff;
+            border: 0;
+            border-radius: 4px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: background 0.2s;
+            min-height: 36px;
+        }
+        button:hover { background: var(--highlight); }
+        button.primary { background: var(--highlight); }
+        button:disabled { opacity: 0.4; cursor: wait; }
+        #status { font-size: 11px; color: var(--text-dim); }
+
+        main {
+            display: flex;
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+        .tab-content {
+            display: none;
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+        }
+        .tab-content.active {
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Patchbay View with Isolated Pan & Zoom */
+        #patchbay-toolbar {
+            background: var(--panel-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 6px 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            z-index: 20;
+            flex-wrap: wrap;
+        }
+        #patchbay {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            touch-action: none;
+            background: radial-gradient(circle, #1a1c23 1px, transparent 1px);
+            background-size: 30px 30px;
+            cursor: grab;
+        }
+        #patchbay:active { cursor: grabbing; }
+
+        #patchbay-viewport {
+            position: absolute;
+            top: 0;
+            left: 0;
+            min-width: 5000px;
+            min-height: 4000px;
+            transform-origin: 0 0;
+            will-change: transform;
+        }
+
+        .endpoint-block {
+            position: absolute;
+            top: 0;
+            left: 0;
+            background: var(--panel-bg);
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px;
+            width: 260px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            cursor: default;
+            user-select: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .endpoint-block.active-block { border-color: var(--accent-blue); }
+        .endpoint-block.multi-selected {
+            border-color: var(--accent-yellow);
+            box-shadow: 0 0 12px rgba(235, 203, 139, 0.5);
+        }
+        
+        /* Native PipeWire Block Theme */
+        .endpoint-block.pw-block {
+            border-color: var(--pw-border);
+            background: var(--pw-bg);
+        }
+        .endpoint-block.pw-block.active-block { border-color: var(--pw-primary); }
+        .endpoint-block.pw-block.multi-selected {
+            border-color: var(--accent-yellow);
+            box-shadow: 0 0 12px rgba(235, 203, 139, 0.5);
+        }
+        .endpoint-block.pw-block .endpoint-header {
+            color: var(--pw-primary);
+            border-bottom-color: var(--pw-border);
+        }
+        .endpoint-block.pw-block .channel-row.selected {
+            background: var(--pw-selected);
+            outline: 1px solid var(--pw-primary);
+        }
+
+        .endpoint-header {
+            font-weight: bold;
+            margin-bottom: 8px;
+            text-align: center;
+            color: var(--text-dim);
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 5px;
+            font-size: 12px;
+            word-break: break-all;
+            cursor: grab;
+        }
+        .endpoint-header:active { cursor: grabbing; }
+        .channel-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 4px 0;
+            padding: 6px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.1s, outline 0.1s;
+            user-select: none;
+            min-height: 32px;
+        }
+        .channel-row:hover { background: rgba(255,255,255,0.05); }
+        .channel-row.selected { background: rgba(136, 192, 208, 0.25); outline: 1px solid var(--accent-blue); }
+        .channel-row.snapped { background: rgba(163, 190, 140, 0.35); outline: 2px solid var(--accent-green); }
+        .ch-label { width: 34px; font-family: monospace; font-size: 11px; color: var(--text-dim); }
+        .vu-container {
+            flex: 1;
+            height: 12px;
+            background: #000;
+            border-radius: 2px;
+            position: relative;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        .vu-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--accent-green) 70%, var(--accent-yellow) 85%, var(--accent-red) 100%);
+            transition: width 0.1s;
+        }
+        .vu-peak {
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: white;
+            opacity: 0;
+        }
+        .vu-peak.active { opacity: 1; }
+        #cable-svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 5000px;
+            height: 4000px;
+            overflow: visible;
+            pointer-events: none;
+        }
+        .cable {
+            fill: none;
+            stroke-width: 3;
+            stroke-linecap: round;
+            transition: stroke 0.3s;
+            cursor: pointer;
+            pointer-events: all;
+        }
+        .cable:hover { stroke-width: 6; }
+        .cable-fx {
+            filter: drop-shadow(0 0 4px var(--accent-blue));
+        }
+        .cable.pw-cable {
+            stroke: var(--pw-primary);
+            stroke-dasharray: 4 2;
+        }
+        .cable.pw-cable:hover {
+            filter: drop-shadow(0 0 4px var(--pw-primary));
+        }
+        .temp-cable {
+            fill: none;
+            stroke: var(--accent-green);
+            stroke-width: 3;
+            stroke-dasharray: 6 4;
+            stroke-linecap: round;
+            pointer-events: none;
+        }
+
+        /* Controls / Hardware View */
+        .controls-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            align-content: start;
+        }
+        .panel-card {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .panel-card h2 {
+            font-size: 14px;
+            margin: 0 0 5px;
+            color: var(--accent-blue);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 8px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .control-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+        .control-row label { color: var(--text-dim); font-size: 12px; }
+        input[type="number"], select, input[type="text"] {
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 6px 8px;
+            border-radius: 4px;
+            width: 120px;
+            font-size: 13px;
+        }
+        .device-item {
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+        .device-item.active { border-color: var(--accent-green); }
+        .device-info { display: flex; flex-direction: column; overflow: hidden; }
+        .device-name { font-weight: bold; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .device-id { font-size: 10px; color: var(--text-dim); font-family: monospace; }
+
+        /* Inspector Modal / DSP Chain Styles */
+        #route-modal {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: var(--panel-bg);
+            border: 1px solid var(--accent-blue);
+            padding: 20px;
+            border-radius: 8px;
+            z-index: 1000;
+            display: none;
+            width: 90%;
+            max-width: 520px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 0 50px rgba(0,0,0,0.8);
+        }
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 999;
+            display: none;
+        }
+        .dsp-section {
+            margin-top: 15px;
+            border-top: 1px solid var(--border-color);
+            padding-top: 12px;
+        }
+        .dsp-chain-container {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin: 10px 0;
+            max-height: 250px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+        .dsp-processor-card {
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            position: relative;
+        }
+        .dsp-processor-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            font-weight: bold;
+            color: var(--accent-blue);
+            font-size: 12px;
+        }
+        .dsp-processor-params {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 8px;
+            font-size: 11px;
+        }
+        .dsp-processor-params .control-row { margin: 0; }
+        .dsp-processor-params input, .dsp-processor-params select {
+            width: 140px;
+            max-width: 50%;
+        }
+        .dsp-help {
+            color: var(--text-dim);
+            font-size: 11px;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
+        }
+        .dsp-warning { color: var(--accent-yellow); }
+        .dsp-error { color: var(--accent-red); }
+        .dsp-message { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .dsp-processor-card.unavailable { border-color: var(--accent-yellow); }
+        .dsp-actions { display: flex; gap: 4px; flex-shrink: 0; }
+        .dsp-small-btn { padding: 2px 6px; min-height: 26px; font-size: 11px; }
+        .dsp-extra-param { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .chain-arrow {
+            text-align: center;
+            color: var(--text-dim);
+            font-size: 14px;
+            line-height: 8px;
+        }
+        .remove-btn {
+            background: var(--accent-red);
+            padding: 2px 6px;
+            font-size: 10px;
+            min-height: 26px;
+        }
+        #error-overlay {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: var(--accent-red);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            z-index: 2000;
+            display: none;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="error-overlay"></div>
+    <header>
+        <div class="brand-area">
+            <div class="brand">CM5 AUDIO PATCHBAY</div>
+            <div class="tabs">
+                <button class="tab-btn active" onclick="switchTab('patchbay')">Patchbay</button>
+                <button class="tab-btn" onclick="switchTab('controls')">Hardware & DSP</button>
+            </div>
+        </div>
+        <div class="toolbar">
+            <span id="status">Ready</span>
+            <button onclick="refreshAll()">REFRESH</button>
+            <button onclick="resetClips()">RESET CLIPS</button>
+            <button class="primary" onclick="saveSettings()">SAVE</button>
+        </div>
+    </header>
+
+    <main>
+        <!-- Tab 1: Patchbay / Routing View -->
+        <div id="tab-patchbay" class="tab-content active">
+            <div id="patchbay-toolbar">
+                <span style="font-size: 11px; color: var(--text-dim);">Canvas Zoom:</span>
+                <button onclick="zoomIn()" style="padding: 4px 10px; min-height: 28px;">+</button>
+                <span id="zoom-indicator" style="font-size: 11px; min-width: 40px; text-align: center; color: var(--accent-blue); font-weight: bold;">100%</span>
+                <button onclick="zoomOut()" style="padding: 4px 10px; min-height: 28px;">-</button>
+                <button onclick="resetZoom()" style="padding: 4px 10px; min-height: 28px;">RESET</button>
+                <button onclick="autoOrganizeLayout()" style="padding: 4px 10px; min-height: 28px; background: #5e81ac; font-weight: bold; margin-left: 5px;">ORGANIZE LAYOUT</button>
+                <button onclick="PluginDemo.spawnNode()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 5px;">ADD DUMMY PLUGIN</button>
+                
+                <!-- Layout Backup & Grid Snap Controls -->
+                <button onclick="exportLayout()" style="background: #a3be8c; color: #000; font-weight: bold; margin-left: 15px;">EXPORT LAYOUT</button>
+                <button onclick="$('layout-file-input').click()" style="background: #88c0d0; color: #000; font-weight: bold;">IMPORT LAYOUT</button>
+                <input type="file" id="layout-file-input" style="display: none;" accept=".json" onchange="importLayout(event)">
+                
+                <label style="font-size: 11px; color: var(--text-dim); margin-left: 10px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                    <input type="checkbox" id="snap-grid-toggle" onchange="toggleSnapGrid(this)" checked> Snap Grid (3px)
+                </label>
+            </div>
+            <div id="patchbay">
+                <div id="patchbay-viewport">
+                    <svg id="cable-svg">
+                        <path id="temp-cable" class="temp-cable" d="" style="display: none;"></path>
+                    </svg>
+                    <!-- Node blocks appended directly here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab 2: Hardware Manager, Tone Generator, Global DSP & System Info -->
+        <div id="tab-controls" class="tab-content">
+            <div class="controls-container">
+                <div class="panel-card">
+                    <h2 style="color: var(--accent-green)">Hardware Manager</h2>
+                    <div id="device-list">Loading devices...</div>
+                </div>
+
+                <div class="panel-card">
+                    <h2>Tone Generator</h2>
+                    <div class="control-group">
+                        <div class="control-row">
+                            <label>Enabled</label>
+                            <select id="tone-enabled"><option value="0">OFF</option><option value="1">ON</option></select>
+                        </div>
+                        <div class="control-row">
+                            <label>Freq (Hz)</label>
+                            <input type="number" id="tone-freq" value="440">
+                        </div>
+                        <div class="control-row">
+                            <label>Amp</label>
+                            <input type="number" id="tone-amp" step="0.01" value="0.2">
+                        </div>
+                        <button onclick="applyTone()">APPLY TONE</button>
+                    </div>
+                </div>
+
+                <div class="panel-card">
+                    <h2>Global DSP</h2>
+                    <div class="control-group">
+                        <div class="control-row">
+                            <label>Master Gain</label>
+                            <input type="number" id="dsp-gain" step="0.1" value="1.0">
+                        </div>
+                        <button onclick="applyDSP()">UPDATE DSP</button>
+                    </div>
+                </div>
+
+                <div class="panel-card">
+                    <h2>System Info</h2>
+                    <div id="sys-info" style="font-size: 12px; color: var(--text-dim); line-height: 1.6;">Loading endpoints...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div class="modal-overlay" id="overlay" onclick="closeModal()"></div>
+    <div id="route-modal" role="dialog" aria-modal="true" aria-labelledby="route-modal-title">
+        <h2 id="route-modal-title" style="margin-top:0; font-size: 15px; color: var(--accent-blue)">Route Inspector & DSP Chain</h2>
+        <div id="route-info" style="margin-bottom: 12px; font-family: monospace; font-size: 11px; word-break: break-all;"></div>
+        <div id="route-error" class="dsp-error dsp-message" role="alert" hidden></div>
+        <div id="dsp-state-status" class="dsp-help dsp-message" role="status"></div>
+        <div id="dsp-route-warning" class="dsp-warning dsp-message" role="status" hidden></div>
+
+        <div class="control-group">
+            <div class="control-row">
+                <label for="modal-gain">Route Gain</label>
+                <input type="number" id="modal-gain" step="any" required>
+            </div>
+            <div class="control-row">
+                <label for="modal-enabled">Route Enabled</label>
+                <select id="modal-enabled"><option value="1">ON</option><option value="0">OFF</option></select>
+            </div>
+        </div>
+
+        <div class="dsp-section">
+            <div class="control-row" style="margin-bottom: 8px;">
+                <label for="modal-dsp-active" style="font-weight: bold; color: var(--accent-blue);">DSP Block Active</label>
+                <select id="modal-dsp-active">
+                    <option value="true">ACTIVE</option>
+                    <option value="false">BYPASS</option>
+                </select>
+            </div>
+            <div class="control-row" style="margin-bottom: 10px;">
+                <label for="modal-dsp-gain">DSP Master Gain</label>
+                <input type="number" id="modal-dsp-gain" step="any" required>
+            </div>
+
+            <label style="font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;">Processor Chain</label>
+            <div id="dsp-discovery-status" class="dsp-help dsp-message" role="status"></div>
+            <button id="dsp-discovery-retry" class="dsp-small-btn" onclick="loadDspAvailable()">Refresh processors</button>
+            <div id="dsp-chain-list" class="dsp-chain-container"></div>
+
+            <div class="control-row" style="margin-top: 10px; gap: 8px;">
+                <select id="new-processor-type" aria-label="Processor to add" style="flex: 1;" disabled></select>
+                <button id="dsp-add" onclick="addProcessorToChain()" disabled>Add to Chain</button>
+            </div>
+            <div class="dsp-help" style="margin-top: 8px;">Changes are local until APPLY. CANCEL discards unapplied edits.</div>
+        </div>
+
+        <div class="toolbar" style="justify-content: flex-end; margin-top: 18px; border-top: 1px solid var(--border-color); padding-top: 12px;">
+            <button id="route-cancel" onclick="closeModal()">CLOSE</button>
+            <button id="route-apply" class="primary" onclick="saveRoute()" disabled>APPLY</button>
+            <button id="route-delete" style="background: var(--accent-red)" onclick="deleteRoute()">DELETE ROUTE</button>
+        </div>
+    </div>
+
+    <script>
+        const $ = id => document.getElementById(id);
+        let graph = { endpoints: [], routes: [] };
+        let pwGraph = { nodes: {}, links: [] };
+        let activeSource = null;
+        let editingRouteId = null;
+        let activeTabName = 'patchbay';
+
+        let endpointBlocks = new Map();
+        let pwEndpointBlocks = new Map();
+
+        let dspDiscovery = { status: 'idle', processors: [], maxChainLength: null, error: '' };
+        let dspDiscoveryRequest = 0;
+        let currentRouteDspState = null;
+        let dspParameterBindings = [];
+        let modalSession = 0;
+        let modalBusy = false;
+        const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+        const cloneJson = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+        const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+        const displayJson = value => JSON.stringify(value) ?? '(not supplied)';
+
+        let nodePositions = JSON.parse(localStorage.getItem('cm5_node_positions') || '{}');
+        let selectedNodeIds = new Set();
+        let activeDraggedNode = null;
+        let nodeDragStart = { mouseX: 0, mouseY: 0 };
+        let dragStartPositions = new Map();
+
+        let snapToGridEnabled = true;
+        const GRID_SIZE = 3;
+
+        function toggleSnapGrid(checkbox) {
+            snapToGridEnabled = checkbox.checked;
+        }
+
+        let isWiringDrag = false;
+        let wiringSource = null;
+        let snappedDestination = null;
+
+        let cachedMeters = [];
+
+        let scale = 1.0;
+        let panX = 0;
+        let panY = 0;
+        let isInitialFitDone = false;
+        let isDragging = false;
+        let startX = 0, startY = 0;
+        let touchStartDist = 0;
+        let touchStartScale = 1;
+        let touchStartPanX = 0, touchStartPanY = 0;
+        let touchCenter = { x: 0, y: 0 };
+
+        function updateTransform() {
+            const viewport = $('patchbay-viewport');
+            viewport.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+            $('zoom-indicator').textContent = Math.round(scale * 100) + '%';
+            drawCables();
+        }
+
+        function autoFitViewport() {
+            if (isInitialFitDone) return;
+            const viewport = $('patchbay-viewport');
+            const container = $('patchbay');
+            if (!viewport || !container) return;
+
+            viewport.style.transform = 'translate(0px, 0px) scale(1)';
+            const blocks = viewport.querySelectorAll('.endpoint-block');
+            if (blocks.length === 0) return;
+
+            const containerRect = container.getBoundingClientRect();
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+            blocks.forEach(block => {
+                const rect = block.getBoundingClientRect();
+                const relX = rect.left - containerRect.left;
+                const relY = rect.top - containerRect.top;
+                minX = Math.min(minX, relX);
+                minY = Math.min(minY, relY);
+                maxX = Math.max(maxX, relX + block.offsetWidth);
+                maxY = Math.max(maxY, relY + block.offsetHeight);
+            });
+
+            const margin = 50;
+            const contentWidth = maxX - minX;
+            const contentHeight = maxY - minY;
+            if (contentWidth <= 0 || contentHeight <= 0) return;
+
+            const containerWidth = container.clientWidth;
+            const containerHeight = container.clientHeight;
+            const scaleX = (containerWidth - margin * 2) / contentWidth;
+            const scaleY = (containerHeight - margin * 2) / contentHeight;
+
+            scale = Math.max(0.2, Math.min(1.5, Math.min(scaleX, scaleY)));
+            panX = (containerWidth - contentWidth * scale) / 2 - minX * scale;
+            panY = (containerHeight - contentHeight * scale) / 2 - minY * scale;
+
+            isInitialFitDone = true;
+            updateTransform();
+        }
+
+        function zoomIn() { scale = Math.min(3.5, scale * 1.2); updateTransform(); }
+        function zoomOut() { scale = Math.max(0.2, scale / 1.2); updateTransform(); }
+        function resetZoom() { isInitialFitDone = false; autoFitViewport(); }
+
+        /*function autoOrganizeLayout() {
+            nodePositions = {};
+            const TIGHT_GAP = 10;     // Tightly packed gap for matching family node windows
+            const COL_WIDTH = 340;    // Horizontal spacing between major columns
+
+            function getNodeHeight(id, isPw) {
+                const domEl = $(isPw ? `pw-block-${id}` : `block-${id}`);
+                if (domEl && domEl.offsetHeight > 0) return domEl.offsetHeight;
+                
+                if (!isPw) {
+                    const ep = graph.endpoints.find(e => e.id === id);
+                    if (ep) return 42 + (ep.channels * 34);
+                } else {
+                    const node = pwGraph.nodes[id];
+                    if (node) {
+                        const ports = new Set();
+                        pwGraph.links.forEach(l => {
+                            if (l.source_node === node.id) ports.add(l.source_port);
+                            if (l.dest_node === node.id) ports.add(l.dest_port);
+                        });
+                        const portCount = Math.max(2, ports.size);
+                        return 42 + (portCount * 34);
+                    }
+                }
+                return 160;
+            }
+
+            function stackFamily(items, colX, startY, isPw = false) {
+                let currentY = startY;
+                items.forEach(item => {
+                    const id = isPw ? item.id : item.id;
+                    const key = isPw ? `pw-${id}` : id;
+                    nodePositions[key] = { x: colX, y: currentY };
+                    currentY += getNodeHeight(id, isPw) + TIGHT_GAP;
+                });
+                return currentY;
+            }
+
+            // Categorize CM5 Endpoints into Families
+            const cm5Captures = [];
+            const cm5Playbacks = [];
+            const drivers = [];
+
+            graph.endpoints.forEach(ep => {
+                const name = (ep.name || ep.id).toLowerCase();
+                if (name.includes('freewheel') || name.includes('dummy') || name.includes('midi') || name.includes('tone')) {
+                    drivers.push(ep);
+                } else if (ep.direction === 'source') {
+                    cm5Captures.push(ep);
+                } else {
+                    cm5Playbacks.push(ep);
+                }
+            });
+
+            // Categorize PipeWire Nodes into Families
+            const pwPlaybacks = [];
+            const pwCaptures = [];
+            Object.values(pwGraph.nodes).forEach(node => {
+                if (node.is_input) {
+                    pwCaptures.push(node);
+                } else {
+                    pwPlaybacks.push(node);
+                }
+            });
+
+            // --- Column 0 (X = 0): CM5 Captures ---
+            let yCol0 = 0;
+            if (cm5Captures.length > 0) {
+                stackFamily(cm5Captures, 0, yCol0, false);
+            }
+
+            // --- Column 1 (X = 340): CM5 Playbacks ---
+            let yCol1 = 0;
+            if (cm5Playbacks.length > 0) {
+                stackFamily(cm5Playbacks, COL_WIDTH, yCol1, false);
+            }
+
+            // --- Column 2 (X = 680): System Drivers & Utilities ---
+            let yCol2 = 0;
+            if (drivers.length > 0) {
+                stackFamily(drivers, COL_WIDTH * 2, yCol2, false);
+            }
+
+            // --- Column 3 (X = 1020): PipeWire Playbacks (Outputs) ---
+            let yCol3 = 0;
+            if (pwPlaybacks.length > 0) {
+                stackFamily(pwPlaybacks, COL_WIDTH * 3, yCol3, true);
+            }
+
+            // --- Column 4 (X = 1360): PipeWire Captures (Inputs) ---
+            let yCol4 = 0;
+            if (pwCaptures.length > 0) {
+                stackFamily(pwCaptures, COL_WIDTH * 4, yCol4, true);
+            }
+
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+
+            // Apply positions instantly to DOM elements
+            endpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[id];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+            pwEndpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[`pw-${id}`];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+
+            isInitialFitDone = false;
+            autoFitViewport();
+            drawCables();
+        }*/
+
+function autoOrganizeLayout() {
+            nodePositions = {};
+            const TIGHT_GAP = 10;     // Tightly packed gap for matching family node windows
+            const COL_WIDTH = 340;    // Horizontal spacing between major columns
+
+            function getNodeHeight(id, isPw) {
+                const domEl = $(isPw ? `pw-block-${id}` : `block-${id}`);
+                if (domEl && domEl.offsetHeight > 0) return domEl.offsetHeight;
+
+                if (!isPw) {
+                    const ep = graph.endpoints.find(e => e.id === id);
+                    if (ep) return 42 + (ep.channels * 34);
+                } else {
+                    const node = pwGraph.nodes[id];
+                    if (node) {
+                        const ports = new Set();
+                        pwGraph.links.forEach(l => {
+                            if (l.source_node === node.id) ports.add(l.source_port);
+                            if (l.dest_node === node.id) ports.add(l.dest_port);
+                        });
+                        const portCount = Math.max(2, ports.size);
+                        return 42 + (portCount * 34);
+                    }
+                }
+                return 160;
+            }
+
+            function stackFamily(items, colX, startY, isPw = false) {
+                let currentY = startY;
+                items.forEach(item => {
+                    const id = isPw ? item.id : item.id;
+                    const key = isPw ? `pw-${id}` : id;
+                    nodePositions[key] = { x: colX, y: currentY };
+                    currentY += getNodeHeight(id, isPw) + TIGHT_GAP;
+                });
+                return currentY;
+            }
+
+            // --- 1. Categorize CM5 Internal Endpoints into Families ---
+            const cm5Captures = [];
+            const cm5Playbacks = [];
+            const cm5Drivers = [];
+
+            graph.endpoints.forEach(ep => {
+                const name = (ep.name || ep.id).toLowerCase();
+                if (name.includes('freewheel') || name.includes('dummy') || name.includes('midi') || name.includes('tone')) {
+                    cm5Drivers.push(ep);
+                } else if (ep.direction === 'source') {
+                    cm5Captures.push(ep);
+                } else {
+                    cm5Playbacks.push(ep);
+                }
+            });
+
+            // --- 2. Categorize PipeWire Native Nodes into the Same Families ---
+            const pwCaptures = [];   // Sources / output ports -> Captures stack
+            const pwPlaybacks = [];  // Sinks / input ports -> Playbacks stack
+            const pwDrivers = [];    // Drivers & Utilities
+
+            Object.values(pwGraph.nodes).forEach(node => {
+                const name = (node.name || '').toLowerCase();
+                if (name.includes('freewheel') || name.includes('dummy') || name.includes('midi')) {
+                    pwDrivers.push(node);
+                } else if (!node.is_input) {
+                    // is_input = false means Source (produces audio -> Captures column)
+                    pwCaptures.push(node);
+                } else {
+                    // is_input = true means Sink (consumes audio -> Playbacks column)
+                    pwPlaybacks.push(node);
+                }
+            });
+
+            // --- Column Layout Assignment ---
+            // Left Side: CM5 Internal Windows (Columns 0, 1, 2)
+            let yCol0 = 0;
+            if (cm5Captures.length > 0) stackFamily(cm5Captures, 0, yCol0, false);
+
+            let yCol1 = 0;
+            if (cm5Playbacks.length > 0) stackFamily(cm5Playbacks, COL_WIDTH, yCol1, false);
+
+            let yCol2 = 0;
+            if (cm5Drivers.length > 0) stackFamily(cm5Drivers, COL_WIDTH * 2, yCol2, false);
+
+            // Right Side: PipeWire Native Windows (Columns 3, 4, 5)
+            let yCol3 = 0;
+            if (pwCaptures.length > 0) stackFamily(pwCaptures, COL_WIDTH * 3, yCol3, true);
+
+            let yCol4 = 0;
+            if (pwPlaybacks.length > 0) stackFamily(pwPlaybacks, COL_WIDTH * 4, yCol4, true);
+
+            let yCol5 = 0;
+            if (pwDrivers.length > 0) stackFamily(pwDrivers, COL_WIDTH * 5, yCol5, true);
+
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+
+            // Apply positions instantly to DOM elements
+            endpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[id];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+            pwEndpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[`pw-${id}`];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+
+            isInitialFitDone = false;
+            autoFitViewport();
+            drawCables();
+        }
+
+        function exportLayout() {
+            const data = localStorage.getItem('cm5_node_positions') || '{}';
+            const blob = new Blob([data], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `cm5_patchbay_layout_${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function importLayout(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const imported = JSON.parse(e.target.result);
+                    if (typeof imported !== 'object' || imported === null) {
+                        throw new Error('Invalid layout file format');
+                    }
+                    nodePositions = imported;
+                    localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+
+                    endpointBlocks.forEach((block, id) => {
+                        const pos = nodePositions[id];
+                        if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+                    });
+                    pwEndpointBlocks.forEach((block, id) => {
+                        const pos = nodePositions[`pw-${id}`];
+                        if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+                    });
+
+                    drawCables();
+                    alert('Layout successfully imported and applied!');
+                } catch (err) {
+                    alert('Failed to import layout: ' + err.message);
+                }
+                event.target.value = '';
+            };
+            reader.readAsText(file);
+        }
+
+        const patchbay = $('patchbay');
+
+        patchbay.addEventListener('wheel', e => {
+            e.preventDefault();
+            const zoomFactor = e.deltaY < 0 ? 1.12 : 0.88;
+            const newScale = Math.max(0.2, Math.min(3.5, scale * zoomFactor));
+            const rect = patchbay.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            panX = mouseX - (mouseX - panX) * (newScale / scale);
+            panY = mouseY - (mouseY - panY) * (newScale / scale);
+            scale = newScale;
+            updateTransform();
+        }, { passive: false });
+
+        patchbay.addEventListener('pointerdown', e => {
+            if (e.target.closest('.endpoint-block') || e.target.closest('.cable') || e.target.closest('button')) return;
+            if (!e.ctrlKey && !e.metaKey) {
+                selectedNodeIds.clear();
+                document.querySelectorAll('.endpoint-block.multi-selected').forEach(b => b.classList.remove('multi-selected'));
+            }
+            isDragging = true;
+            startX = e.clientX - panX;
+            startY = e.clientY - panY;
+            patchbay.setPointerCapture(e.pointerId);
+        });
+
+        patchbay.addEventListener('pointermove', e => {
+            if (isDragging) {
+                panX = e.clientX - startX;
+                panY = e.clientY - startY;
+                updateTransform();
+                return;
+            }
+
+            if (activeDraggedNode && selectedNodeIds.size > 0) {
+                const dx = (e.clientX - nodeDragStart.mouseX) / scale;
+                const dy = (e.clientY - nodeDragStart.mouseY) / scale;
+
+                selectedNodeIds.forEach(id => {
+                    const start = dragStartPositions.get(id);
+                    if (!start) return;
+                    let newX = start.x + dx;
+                    let newY = start.y + dy;
+
+                    if (snapToGridEnabled) {
+                        newX = Math.round(newX / GRID_SIZE) * GRID_SIZE;
+                        newY = Math.round(newY / GRID_SIZE) * GRID_SIZE;
+                    }
+
+                    const blockEl = document.querySelector(`[data-ep-id="${CSS.escape(id)}"]`);
+                    if (blockEl) {
+                        blockEl.style.transform = `translate(${newX}px, ${newY}px)`;
+                    }
+                    nodePositions[id] = { x: newX, y: newY };
+                });
+                drawCables();
+                return;
+            }
+
+            if (isWiringDrag && wiringSource) {
+                const viewportRect = $('patchbay-viewport').getBoundingClientRect();
+                const mouseX = (e.clientX - viewportRect.left) / scale;
+                const mouseY = (e.clientY - viewportRect.top) / scale;
+
+                const srcEl = $(`slot-${wiringSource.endpointId}-${wiringSource.channel}`);
+                if (!srcEl) return;
+                const srcRect = srcEl.getBoundingClientRect();
+                const x1 = (srcRect.right - viewportRect.left) / scale;
+                const y1 = (srcRect.top + srcRect.height/2 - viewportRect.top) / scale;
+
+                const tempCable = $('temp-cable');
+                tempCable.style.display = 'block';
+                const cp1x = x1 + (mouseX - x1) * 0.5;
+                const cp2x = x1 + (mouseX - x1) * 0.5;
+                tempCable.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${mouseY}, ${mouseX} ${mouseY}`);
+
+                let closestDest = null;
+                let minDist = 45;
+
+                document.querySelectorAll('.endpoint-block:not(.pw-block) .channel-row, .pw-block .channel-row').forEach(row => {
+                    if (row.id.startsWith('slot-') && row.id.includes(wiringSource.endpointId)) return;
+                    const rowRect = row.getBoundingClientRect();
+                    const rowCenterX = (rowRect.left + rowRect.width / 2 - viewportRect.left) / scale;
+                    const rowCenterY = (rowRect.top + rowRect.height / 2 - viewportRect.top) / scale;
+                    const dist = Math.hypot(mouseX - rowCenterX, mouseY - rowCenterY);
+
+                    if (dist < minDist) {
+                        minDist = dist;
+                        closestDest = row;
+                    }
+                });
+
+                document.querySelectorAll('.channel-row.snapped').forEach(r => r.classList.remove('snapped'));
+                if (closestDest) {
+                    closestDest.classList.add('snapped');
+                    const parts = closestDest.id.replace('slot-', '').replace('pw-slot-', '').split('-');
+                    const ch = parseInt(parts.pop());
+                    const epId = parts.join('-');
+                    snappedDestination = { endpointId: epId, channel: ch };
+                } else {
+                    snappedDestination = null;
+                }
+            }
+        });
+
+        patchbay.addEventListener('pointerup', e => {
+            isDragging = false;
+            try { patchbay.releasePointerCapture(e.pointerId); } catch(err){}
+
+            if (activeDraggedNode) {
+                localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+                activeDraggedNode = null;
+            }
+
+            if (isWiringDrag) {
+                $('temp-cable').style.display = 'none';
+                document.querySelectorAll('.channel-row.snapped').forEach(r => r.classList.remove('snapped'));
+
+                if (snappedDestination && wiringSource) {
+                    createRoute(wiringSource.endpointId, wiringSource.channel, snappedDestination.endpointId, snappedDestination.channel);
+                }
+                isWiringDrag = false;
+                wiringSource = null;
+                snappedDestination = null;
+            }
+        });
+
+        patchbay.addEventListener('touchstart', e => {
+            if (e.target.closest('.endpoint-block') || e.target.closest('button')) return;
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                touchStartDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                touchStartScale = scale;
+                touchStartPanX = panX;
+                touchStartPanY = panY;
+                const rect = patchbay.getBoundingClientRect();
+                touchCenter = {
+                    x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left,
+                    y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top
+                };
+            }
+        }, { passive: false });
+
+        patchbay.addEventListener('touchmove', e => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                if (touchStartDist > 0) {
+                    const newScale = Math.max(0.2, Math.min(3.5, touchStartScale * (dist / touchStartDist)));
+                    panX = touchCenter.x - (touchCenter.x - touchStartPanX) * (newScale / touchStartScale);
+                    panY = touchCenter.y - (touchCenter.y - touchStartPanY) * (newScale / touchStartScale);
+                    scale = newScale;
+                    updateTransform();
+                }
+            }
+        }, { passive: false });
+
+        function switchTab(tabName) {
+            activeTabName = tabName;
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+
+            if (tabName === 'patchbay') {
+                $('tab-patchbay').classList.add('active');
+                document.querySelector('.tab-btn:nth-child(1)').classList.add('active');
+                setTimeout(drawCables, 50);
+            } else if (tabName === 'controls') {
+                $('tab-controls').classList.add('active');
+                document.querySelector('.tab-btn:nth-child(2)').classList.add('active');
+            }
+        }
+
+        function showError(msg) {
+            const el = $('error-overlay');
+            el.textContent = msg;
+            el.style.display = 'block';
+            setTimeout(() => { el.style.display = 'none'; }, 5000);
+        }
+
+        let mutationQueue = Promise.resolve();
+        function fetchAPI(url, options = {}) {
+            if ((options.method || 'GET').toUpperCase() === 'GET') return requestAPI(url, options);
+            const result = mutationQueue.then(() => requestAPI(url, options));
+            mutationQueue = result.catch(() => {});
+            return result;
+        }
+
+        async function requestAPI(url, options = {}) {
+            const absoluteUrl = url.startsWith('/') ? url : '/' + url;
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            try {
+                const res = await fetch(absoluteUrl, { ...options, signal: controller.signal });
+                clearTimeout(timeout);
+                const body = await res.json();
+                if (!res.ok || (body.status && body.status !== 'ok')) {
+                    throw new Error(body.message || `HTTP ${res.status}`);
+                }
+                return body;
+            } catch (e) {
+                clearTimeout(timeout);
+                throw e;
+            }
+        }
+
+        async function loadDevices() {
+            try {
+                const devices = await fetchAPI('/api/devices');
+                const groups = new Map();
+                for (const device of devices) {
+                    if (!groups.has(device.id)) groups.set(device.id, []);
+                    groups.get(device.id).push(device);
+                }
+                const list = $('device-list');
+                list.replaceChildren();
+                const note = document.createElement('p');
+                note.textContent = 'Stream channels: 0 = backend automatic (not maximum). Select explicit counts when needed; deactivate first to change an active stream. PulseAudio/PipeWire profiles and JACK connections are managed externally. Engine: float32, 48 kHz.';
+                list.appendChild(note);
+                for (const [id, endpoints] of groups) {
+                    const active = endpoints.some(device => device.active);
+                    const row = document.createElement('div');
+                    row.className = 'device-item' + (active ? ' active' : '');
+                    const info = document.createElement('div');
+                    info.className = 'device-info';
+                    const name = document.createElement('strong');
+                    name.textContent = endpoints[0].name;
+                    const identity = document.createElement('small');
+                    identity.textContent = `${endpoints[0].backend}: ${id}`;
+                    info.append(name, identity);
+                    const controls = {};
+                    for (const device of endpoints) {
+                        const direction = device.is_capture ? 'capture' : 'playback';
+                        const label = document.createElement('label');
+                        label.textContent = `${direction} channels `;
+                        const input = document.createElement('input');
+                        input.type = 'number'; input.min = 0; input.max = device.max_channels || 254; input.step = 1;
+                        input.value = device[direction + '_channels'] || 0;
+                        input.disabled = active;
+                        label.appendChild(input); info.appendChild(label);
+                        controls[direction] = input;
+                        if (device.layout) {
+                            const details = document.createElement('small');
+                            const layout = device.layout;
+                            details.textContent = `${direction}: client ${layout.client_channels} ch / ${layout.client_sample_rate} Hz → backend ${layout.internal_channels} ch / ${layout.internal_sample_rate} Hz / ${layout.internal_format}`;
+                            info.appendChild(details);
+                        }
+                        const probe = document.createElement('button');
+                        probe.textContent = `PROBE ${direction.toUpperCase()} CAPABILITIES`;
+                        probe.disabled = active;
+                        const result = document.createElement('pre');
+                        result.style.whiteSpace = 'pre-wrap'; result.style.maxWidth = '100%';
+                        probe.onclick = async () => {
+                            if (!window.confirm('Detailed probing may briefly open this device. Continue?')) return;
+                            probe.disabled = true;
+                            try {
+                                const caps = await fetchAPI(`/api/devices/capabilities?id=${encodeURIComponent(id)}&is_capture=${device.is_capture}`);
+                                result.textContent = caps.native_formats.map(format =>
+                                    `${format.format} / ${format.channels || 'any'} ch / ${format.sample_rate || 'any'} Hz`).join('\n') || 'No detailed formats reported';
+                                result.textContent += '\n' + caps.note;
+                            } catch (error) { result.textContent = error.message; }
+                            finally { probe.disabled = false; }
+                        };
+                        info.append(probe, result);
+                    }
+                    const button = document.createElement('button');
+                    button.textContent = active ? 'DEACTIVATE' : 'ACTIVATE';
+                    button.onclick = async () => {
+                        const params = new URLSearchParams({id});
+                        if (!active) {
+                            for (const [direction, input] of Object.entries(controls)) {
+                                if (!input.reportValidity() || !Number.isInteger(Number(input.value))) return;
+                                params.set(direction + '_channels', input.value);
+                            }
+                        }
+                        button.disabled = true;
+                        try {
+                            const result = await fetchAPI(`/api/devices/${active ? 'deactivate' : 'activate'}?${params}`, {method: 'POST'});
+                            if (result.warning) alert(result.warning);
+                            await loadDevices(); await loadGraph();
+                        } catch (error) { alert('Device action failed: ' + error.message); }
+                        finally { button.disabled = false; }
+                    };
+                    row.append(info, button); list.appendChild(row);
+                }
+                if (!groups.size) {
+                    const empty = document.createElement('p'); empty.textContent = 'No devices found'; list.appendChild(empty);
+                }
+            } catch (error) {
+                $('device-list').textContent = 'Error loading devices: ' + error.message;
+                showError('Failed to load hardware devices');
+            }
+        }
+
+        async function loadGraph() {
+            try {
+                graph = await fetchAPI('/api/graph');
+                renderPatchbay();
+                updateSysInfo();
+                if (!isInitialFitDone && Object.keys(nodePositions).length === 0) {
+                    autoOrganizeLayout();
+                } else if (!isInitialFitDone) {
+                    setTimeout(autoFitViewport, 50);
+                }
+            } catch (e) {
+                console.error('Graph load failed', e);
+                showError('Failed to load routing graph');
+                throw e;
+            }
+        }
+
+        async function loadPipewireGraph() {
+            try {
+                const data = await fetchAPI('/api/pipewire/graph');
+                pwGraph.nodes = {};
+                if (Array.isArray(data.nodes)) {
+                    data.nodes.forEach(n => pwGraph.nodes[n.id] = n);
+                } else if (data.nodes) {
+                    pwGraph.nodes = data.nodes;
+                }
+                pwGraph.links = data.links || [];
+                renderPipewirePatchbay();
+            } catch (e) {
+                console.error('PipeWire graph load failed', e);
+            }
+        }
+
+        function updateSysInfo() {
+            $('sys-info').innerHTML = `<b>Endpoints:</b> ${graph.endpoints.length}<br><b>Active Routes:</b> ${graph.routes.length}<br><b>PW Nodes:</b> ${Object.keys(pwGraph.nodes).length}`;
+            $('status').textContent = 'Connected';
+        }
+
+        function rebuildMeterCache() {
+            /*cachedMeters = [];
+            graph.endpoints.forEach(ep => {
+                for (let i = 0; i < ep.channels; i++) {
+                    const fill = document.getElementById(`vu-${ep.id}-${i}`);
+                    const peak = document.getElementById(`peak-${ep.id}-${i}`);
+                    if (fill) {
+                        cachedMeters.push({ epId: ep.id, ch: i, fillEl: fill, peakEl: peak });
+                    }
+                }
+            });*/
+
+            cachedMeters = [];
+
+            // 1. Cache internal cm5audio endpoints
+            graph.endpoints.forEach(ep => {
+                for (let i = 0; i < ep.channels; i++) {
+                    const fill = document.getElementById(`vu-${ep.id}-${i}`);
+                    const peak = document.getElementById(`peak-${ep.id}-${i}`);
+                    if (fill) cachedMeters.push({ epId: ep.id, ch: i, fillEl: fill, peakEl: peak });
+                }
+            });
+
+            // 2. Cache native PipeWire node ports (pw-node/<id>)
+            Object.values(pwGraph.nodes).forEach(node => {
+                const epId = `pw-node/${node.id}`;
+                // Assuming stereo/multi-channel; adjust channel loop to match node ports if needed
+                for (let i = 0; i < 2; i++) {
+                    const fill = document.getElementById(`vu-${epId}-${i}`);
+                    const peak = document.getElementById(`peak-${epId}-${i}`);
+                    if (fill) cachedMeters.push({ epId: epId, ch: i, fillEl: fill, peakEl: peak });
+                }
+            });
+        }
+
+        function renderPatchbay() {
+            const viewport = $('patchbay-viewport');
+            const currentEndpoints = new Set(graph.endpoints.map(e => e.id));
+
+            endpointBlocks.forEach((block, id) => {
+                if (!currentEndpoints.has(id)) {
+                    endpointBlocks.delete(id);
+                    block.style.opacity = '0';
+                    block.style.transform = 'scale(0.8)';
+                    setTimeout(() => block.remove(), 300);
+                }
+            });
+
+            graph.endpoints.forEach((ep, idx) => {
+                const isSource = ep.direction === 'source';
+
+                if (!nodePositions[ep.id]) {
+                    nodePositions[ep.id] = { x: isSource ? 0 : 340, y: idx * 180 };
+                }
+
+                let block = endpointBlocks.get(ep.id);
+                if (block && (Number(block.dataset.channels) !== ep.channels || block.dataset.direction !== ep.direction)) {
+                    block.remove();
+                    endpointBlocks.delete(ep.id);
+                    block = null;
+                }
+                if (!block) {
+                    block = createEndpointBlock(ep);
+                    viewport.appendChild(block);
+                } else {
+                    block.querySelector('.endpoint-header').textContent = ep.name || ep.id;
+                    const pos = nodePositions[ep.id];
+                    block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+                }
+            });
+
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+            rebuildMeterCache();
+
+            if (activeTabName === 'patchbay') {
+                setTimeout(drawCables, 50);
+            }
+        }
+
+        function renderPipewirePatchbay() {
+            const viewport = $('patchbay-viewport');
+            const currentNodeIds = new Set(Object.keys(pwGraph.nodes).map(Number));
+
+            pwEndpointBlocks.forEach((block, id) => {
+                if (!currentNodeIds.has(id)) {
+                    pwEndpointBlocks.delete(id);
+                    block.remove();
+                }
+            });
+
+            Object.values(pwGraph.nodes).forEach((node, idx) => {
+                const ports = new Set();
+                pwGraph.links.forEach(l => {
+                    if (l.source_node === node.id) ports.add(l.source_port);
+                    if (l.dest_node === node.id) ports.add(l.dest_port);
+                });
+                const portList = Array.from(ports).sort((a, b) => a - b);
+                if (portList.length === 0) {
+                    portList.push(1, 2);
+                }
+
+                if (!nodePositions[`pw-${node.id}`]) {
+                    nodePositions[`pw-${node.id}`] = { x: 1020, y: idx * 180 };
+                }
+
+                let block = pwEndpointBlocks.get(node.id);
+                if (!block) {
+                    block = createPwEndpointBlock(node, portList);
+                    viewport.appendChild(block);
+                } else {
+                    block.querySelector('.endpoint-header').textContent = node.name || `PW Node ${node.id}`;
+                    const pos = nodePositions[`pw-${node.id}`];
+                    block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+                }
+            });
+
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+            if (activeTabName === 'patchbay') {
+                setTimeout(drawCables, 50);
+            }
+        }
+
+        function setupBlockDragging(block, epId) {
+            const header = block.querySelector('.endpoint-header');
+            header.addEventListener('pointerdown', e => {
+                if (e.button !== 0) return;
+
+                if (e.ctrlKey || e.metaKey) {
+                    if (selectedNodeIds.has(epId)) {
+                        selectedNodeIds.delete(epId);
+                        block.classList.remove('multi-selected');
+                    } else {
+                        selectedNodeIds.add(epId);
+                        block.classList.add('multi-selected');
+                    }
+                } else {
+                    if (!selectedNodeIds.has(epId)) {
+                        document.querySelectorAll('.endpoint-block.multi-selected').forEach(b => b.classList.remove('multi-selected'));
+                        selectedNodeIds.clear();
+                        selectedNodeIds.add(epId);
+                        block.classList.add('multi-selected');
+                    }
+                }
+
+                activeDraggedNode = block;
+                dragStartPositions.clear();
+                selectedNodeIds.forEach(id => {
+                    const b = document.querySelector(`[data-ep-id="${CSS.escape(id)}"]`);
+                    const pos = nodePositions[id] || { x: 0, y: 0 };
+                    dragStartPositions.set(id, { x: pos.x, y: pos.y });
+                    if (b) b.classList.add('multi-selected');
+                });
+
+                nodeDragStart = { mouseX: e.clientX, mouseY: e.clientY };
+                header.setPointerCapture(e.pointerId);
+                e.stopPropagation();
+            });
+
+            header.addEventListener('pointerup', e => {
+                try { header.releasePointerCapture(e.pointerId); } catch(err){}
+            });
+        }
+
+        function createEndpointBlock(ep) {
+            const block = document.createElement('div');
+            block.className = 'endpoint-block';
+            block.id = `block-${ep.id}`;
+            block.dataset.epId = ep.id;
+            block.dataset.channels = ep.channels;
+            block.dataset.direction = ep.direction;
+
+            const pos = nodePositions[ep.id] || { x: 0, y: 0 };
+            block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+
+            const header = document.createElement('div');
+            header.className = 'endpoint-header';
+            header.textContent = ep.name || ep.id;
+            block.appendChild(header);
+            setupBlockDragging(block, ep.id);
+
+            for (let i = 0; i < ep.channels; i++) {
+                const row = document.createElement('div');
+                row.className = 'channel-row';
+                row.id = `slot-${ep.id}-${i}`;
+
+                if (ep.direction === 'source') {
+                    row.innerHTML = `<div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div><span class="ch-label" style="text-align: right;">CH${i+1}</span>`;
+                } else {
+                    row.innerHTML = `<span class="ch-label">CH${i+1}</span><div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div>`;
+                }
+
+                row.onclick = () => handleSlotClick(ep, i);
+
+                if (ep.direction === 'source') {
+                    row.addEventListener('pointerdown', e => {
+                        if (e.button !== 0) return;
+                        isWiringDrag = true;
+                        wiringSource = { endpointId: ep.id, channel: i };
+
+                        document.querySelectorAll('.channel-row.selected').forEach(el => el.classList.remove('selected'));
+                        row.classList.add('selected');
+                        activeSource = { endpointId: ep.id, channel: i };
+
+                        patchbay.setPointerCapture(e.pointerId);
+                        e.stopPropagation();
+                    });
+                }
+
+                block.appendChild(row);
+            }
+
+            endpointBlocks.set(ep.id, block);
+            return block;
+        }
+
+        /*function createPwEndpointBlock(node, portList) {
+            const block = document.createElement('div');
+            block.className = 'endpoint-block pw-block';
+            block.id = `pw-block-${node.id}`;
+            block.dataset.epId = `pw-${node.id}`;
+
+            const pos = nodePositions[`pw-${node.id}`] || { x: 1020, y: 0 };
+            block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+
+            const header = document.createElement('div');
+            header.className = 'endpoint-header';
+            header.textContent = node.name || `PW Node ${node.id}`;
+            block.appendChild(header);
+            setupBlockDragging(block, `pw-${node.id}`);
+
+            portList.forEach((portId) => {
+                const row = document.createElement('div');
+                row.className = 'channel-row';
+                row.id = `pw-slot-${node.id}-${portId}`;
+                row.innerHTML = node.is_input ? `<span class="ch-label">P${portId}</span><div class="vu-container"></div>` : `<div class="vu-container"></div><span class="ch-label" style="text-align: right;">P${portId}</span>`;
+                block.appendChild(row);
+            });
+
+            pwEndpointBlocks.set(node.id, block);
+            return block;
+        }*/
+
+        function createPwEndpointBlock(node, portList) {
+            const block = document.createElement('div');
+            block.className = 'endpoint-block pw-block';
+            block.id = `pw-block-${node.id}`;
+            block.dataset.epId = `pw-${node.id}`;
+
+            const pos = nodePositions[`pw-${node.id}`] || { x: 1020, y: 0 };
+            block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+
+            const header = document.createElement('div');
+            header.className = 'endpoint-header';
+            header.textContent = node.name || `PW Node ${node.id}`;
+            block.appendChild(header);
+            setupBlockDragging(block, `pw-${node.id}`);
+
+            portList.forEach((portId, index) => {
+                const row = document.createElement('div');
+                row.className = 'channel-row';
+                row.id = `pw-slot-${node.id}-${portId}`;
+                
+                // Inject the actual vu-fill and vu-peak bars inside the vu-container using index
+                const meterHtml = `
+                    <div class="vu-fill" id="vu-pw-node/${node.id}-${index}"></div>
+                    <div class="vu-peak" id="peak-pw-node/${node.id}-${index}"></div>
+                `;
+
+                row.innerHTML = node.is_input 
+                    ? `<span class="ch-label">P${portId}</span><div class="vu-container">${meterHtml}</div>` 
+                    : `<div class="vu-container">${meterHtml}</div><span class="ch-label" style="text-align: right;">P${portId}</span>`;
+                
+                block.appendChild(row);
+            });
+
+            pwEndpointBlocks.set(node.id, block);
+            return block;
+        }
+
+        function handleSlotClick(ep, ch) {
+            const row = $(`slot-${ep.id}-${ch}`);
+            if (ep.direction === 'source') {
+                document.querySelectorAll('.channel-row.selected').forEach(el => el.classList.remove('selected'));
+                row.classList.add('selected');
+                activeSource = { endpointId: ep.id, channel: ch };
+            } else if (ep.direction === 'destination' && activeSource) {
+                createRoute(activeSource.endpointId, activeSource.channel, ep.id, ch);
+                document.querySelectorAll('.channel-row.selected').forEach(el => el.classList.remove('selected'));
+                activeSource = null;
+            }
+        }
+
+        async function createRoute(srcId, srcCh, destId, destCh) {
+            try {
+                const params = new URLSearchParams({
+                    source_node: srcId,
+                    source_channel: srcCh,
+                    destination_node: destId,
+                    destination_channel: destCh,
+                    gain: 1.0,
+                    enabled: '1'
+                });
+                await fetchAPI(`/api/routes?${params.toString()}`, { method: 'POST' });
+                await loadGraph();
+            } catch (e) {
+                alert('Routing failed: ' + e.message);
+            }
+        }
+
+        function getEndpointId(nodeRef) {
+            if (!graph.endpoints) return nodeRef;
+            const direct = graph.endpoints.find(e => e.id == nodeRef);
+            if (direct) return direct.id;
+            const idx = Number(nodeRef);
+            if (!isNaN(idx) && graph.endpoints[idx]) {
+                return graph.endpoints[idx].id;
+            }
+            return nodeRef;
+        }
+
+        function drawCables() {
+            if (activeTabName !== 'patchbay') return;
+            const svg = $('cable-svg');
+
+            const cables = svg.querySelectorAll('.cable');
+            cables.forEach(c => c.remove());
+
+            const viewportRect = $('patchbay-viewport').getBoundingClientRect();
+
+            // 1. Render Internal cm5audio Routes
+            if (graph.routes && graph.routes.length > 0) {
+                graph.routes.forEach((route) => {
+                    const srcRef = route.source_node !== undefined ? route.source_node : route.source;
+                    const destRef = route.destination_node !== undefined ? route.destination_node : route.destination;
+
+                    const srcEpId = getEndpointId(srcRef);
+                    const destEpId = getEndpointId(destRef);
+
+                    const srcSlotId = `slot-${srcEpId}-${route.source_channel}`;
+                    const destSlotId = `slot-${destEpId}-${route.destination_channel}`;
+
+                    const srcEl = $(srcSlotId);
+                    const destEl = $(destSlotId);
+                    if (!srcEl || !destEl) return;
+
+                    const srcRect = srcEl.getBoundingClientRect();
+                    const destRect = destEl.getBoundingClientRect();
+
+                    const x1 = (srcRect.right - viewportRect.left) / scale;
+                    const y1 = (srcRect.top + srcRect.height/2 - viewportRect.top) / scale;
+                    const x2 = (destRect.left - viewportRect.left) / scale;
+                    const y2 = (destRect.top + destRect.height/2 - viewportRect.top) / scale;
+
+                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    const cp1x = x1 + (x2 - x1) * 0.5;
+                    const cp2x = x1 + (x2 - x1) * 0.5;
+                    path.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`);
+                    path.setAttribute('class', 'cable');
+
+                    const strokeColor = route.enabled ? '#88c0d0' : '#bf616a';
+                    path.setAttribute('stroke', strokeColor);
+
+                    if (route.dsp_active) {
+                        path.classList.add('cable-fx');
+                    }
+
+                    path.onclick = () => openRouteModal(route);
+                    svg.appendChild(path);
+                });
+            }
+
+            // 2. Render Native PipeWire Links
+            if (pwGraph.links && pwGraph.links.length > 0) {
+                pwGraph.links.forEach((link) => {
+                    const srcSlotId = `pw-slot-${link.source_node}-${link.source_port}`;
+                    const destSlotId = `pw-slot-${link.dest_node}-${link.dest_port}`;
+
+                    const srcEl = $(srcSlotId);
+                    const destEl = $(destSlotId);
+                    if (!srcEl || !destEl) return;
+
+                    const srcRect = srcEl.getBoundingClientRect();
+                    const destRect = destEl.getBoundingClientRect();
+
+                    const x1 = (srcRect.right - viewportRect.left) / scale;
+                    const y1 = (srcRect.top + srcRect.height/2 - viewportRect.top) / scale;
+                    const x2 = (destRect.left - viewportRect.left) / scale;
+                    const y2 = (destRect.top + destRect.height/2 - viewportRect.top) / scale;
+
+                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    const cp1x = x1 + (x2 - x1) * 0.5;
+                    const cp2x = x1 + (x2 - x1) * 0.5;
+                    path.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`);
+                    path.setAttribute('class', 'cable pw-cable');
+                    path.setAttribute('stroke', 'var(--pw-primary)');
+
+                    svg.appendChild(path);
+                });
+            }
+        }
+
+        function dspText(tag, text, className = '') {
+            const element = document.createElement(tag);
+            element.textContent = text;
+            element.className = className;
+            return element;
+        }
+
+        function setRouteError(message = '') {
+            $('route-error').textContent = message;
+            $('route-error').hidden = !message;
+        }
+
+        function validateDspDiscovery(data) {
+            if (!isObject(data) || data.schema_version !== 1 ||
+                !Number.isInteger(data.max_chain_length) || data.max_chain_length < 0 ||
+                !Array.isArray(data.processors)) {
+                throw new Error('Unsupported or invalid DSP discovery response (expected schema version 1).');
+            }
+            const types = new Set();
+            const parameterTypes = new Set(['number', 'integer', 'boolean', 'string', 'enum']);
+            for (const processor of data.processors) {
+                if (!isObject(processor) || typeof processor.type !== 'string' || !processor.type ||
+                    types.has(processor.type) || !isObject(processor.defaults) || !Array.isArray(processor.parameters)) {
+                    throw new Error('Invalid processor metadata in DSP discovery response.');
+                }
+                types.add(processor.type);
+                const ids = new Set();
+                for (const parameter of processor.parameters) {
+                    if (!isObject(parameter) || typeof parameter.id !== 'string' || !parameter.id ||
+                        ids.has(parameter.id) || !parameterTypes.has(parameter.type) || !hasOwn(parameter, 'default')) {
+                        throw new Error('Invalid parameter metadata for processor ' + processor.type + '.');
+                    }
+                    ids.add(parameter.id);
+                    if (parameter.type === 'enum' && (!Array.isArray(parameter.choices) ||
+                        parameter.choices.some(choice => !isObject(choice) || !hasOwn(choice, 'value')))) {
+                        throw new Error('Invalid enum choices for processor ' + processor.type + '.');
+                    }
+                    for (const bound of ['min', 'max', 'step']) {
+                        if (parameter[bound] != null && (!Number.isFinite(parameter[bound]) ||
+                            (bound === 'step' && parameter[bound] <= 0))) {
+                            throw new Error('Invalid numeric metadata for processor ' + processor.type + '.');
+                        }
+                    }
+                }
+            }
+            return data;
+        }
+
+        async function loadDspAvailable() {
+            const request = ++dspDiscoveryRequest;
+            dspDiscovery = { status: 'loading', processors: [], maxChainLength: null, error: '' };
+            renderDspDiscovery();
+            try {
+                const data = validateDspDiscovery(await fetchAPI('/api/dsp/available', { cache: 'no-store' }));
+                if (request !== dspDiscoveryRequest) return;
+                dspDiscovery = { status: 'ready', processors: data.processors, maxChainLength: data.max_chain_length, error: '' };
+            } catch (e) {
+                if (request !== dspDiscoveryRequest) return;
+                dspDiscovery = { status: 'error', processors: [], maxChainLength: null, error: e.message };
+                showError('DSP discovery failed: ' + e.message);
+            }
+            renderDspDiscovery();
+        }
+
+        function renderDspDiscovery() {
+            const select = $('new-processor-type');
+            const previous = select.value;
+            select.replaceChildren();
+            const status = $('dsp-discovery-status');
+            status.className = 'dsp-help dsp-message';
+            if (dspDiscovery.status === 'ready') {
+                for (const processor of dspDiscovery.processors) {
+                    const option = dspText('option', processor.name ?? processor.type);
+                    option.value = processor.type;
+                    option.title = processor.description ?? '';
+                    select.appendChild(option);
+                }
+                if (dspDiscovery.processors.some(processor => processor.type === previous)) select.value = previous;
+                const length = currentRouteDspState?.chain.length ?? 0;
+                status.textContent = `${dspDiscovery.processors.length} processors available. Chain: ${length}/${dspDiscovery.maxChainLength}.`;
+                if (dspDiscovery.processors.length === 0) status.textContent += ' No DSP processors are registered on this backend.';
+                if (length > dspDiscovery.maxChainLength) {
+                    status.classList.add('dsp-warning');
+                    status.textContent += ' Remove processors to meet the chain limit before applying.';
+                }
+            } else if (dspDiscovery.status === 'error') {
+                status.classList.add('dsp-error');
+                status.textContent = 'Unable to discover DSP processors: ' + dspDiscovery.error + '\nAdding and applying are disabled. Check the backend and use Refresh processors to retry.';
+            } else {
+                status.textContent = 'Loading DSP processors from the backend… Adding and applying are disabled until discovery succeeds.';
+            }
+            if (editingRouteId !== null && !modalBusy) renderDspChain();
+            updateModalControls();
+        }
+
+        function updateModalControls() {
+            const stateLocked = modalBusy || currentRouteDspState === null;
+            $('modal-gain').disabled = modalBusy;
+            $('modal-enabled').disabled = modalBusy;
+            $('modal-dsp-active').disabled = stateLocked;
+            $('modal-dsp-gain').disabled = stateLocked;
+            $('dsp-chain-list').querySelectorAll('input, select, button').forEach(control => {
+                control.disabled = stateLocked || control.dataset.locked === 'true';
+            });
+            const available = dspDiscovery.status === 'ready' && dspDiscovery.processors.length > 0;
+            $('new-processor-type').disabled = stateLocked || !available;
+            $('dsp-add').disabled = stateLocked || !available || currentRouteDspState.chain.length >= dspDiscovery.maxChainLength;
+            $('dsp-discovery-retry').disabled = modalBusy || dspDiscovery.status === 'loading';
+            $('route-apply').disabled = stateLocked || dspDiscovery.status !== 'ready';
+            $('route-apply').textContent = modalBusy ? 'WORKING…' : 'APPLY';
+            $('route-cancel').disabled = modalBusy;
+            $('route-delete').disabled = modalBusy;
+            $('route-modal').setAttribute('aria-busy', modalBusy ? 'true' : 'false');
+        }
+
+        function readDspState(data) {
+            if (!isObject(data) || typeof data.active !== 'boolean' || !Number.isFinite(data.gain) || !Array.isArray(data.chain)) {
+                throw new Error('Invalid route DSP state returned by the backend.');
+            }
+            return cloneJson({ active: data.active, gain: data.gain, chain: data.chain });
+        }
+
+        function showDspState(state) {
+            currentRouteDspState = state;
+            $('modal-dsp-active').value = state.active ? 'true' : 'false';
+            $('modal-dsp-gain').value = state.gain;
+            renderDspDiscovery();
+        }
+
+        async function openRouteModal(route) {
+            if (modalBusy) return;
+            const session = ++modalSession;
+            editingRouteId = route.id;
+            currentRouteDspState = null;
+            dspParameterBindings = [];
+            setRouteError();
+            $('dsp-route-warning').hidden = true;
+            $('dsp-route-warning').textContent = '';
+            $('dsp-state-status').textContent = 'Loading saved route DSP state…';
+            $('modal-dsp-gain').value = '';
+            const srcRef = route.source_node !== undefined ? route.source_node : route.source;
+            const destRef = route.destination_node !== undefined ? route.destination_node : route.destination;
+            const srcEpId = getEndpointId(srcRef);
+            const destEpId = getEndpointId(destRef);
+
+            $('route-info').textContent = `${srcEpId} (CH${route.source_channel + 1}) \u2192 ${destEpId} (CH${route.destination_channel + 1})`;
+            $('modal-gain').value = route.gain;
+            $('modal-enabled').value = route.enabled ? '1' : '0';
+            $('overlay').style.display = 'block';
+            $('route-modal').style.display = 'block';
+            renderDspChain();
+            updateModalControls();
+
+            const discovery = loadDspAvailable();
+            try {
+                const dspData = await fetchAPI(`/api/routes/${encodeURIComponent(route.id)}/dsp`, { cache: 'no-store' });
+                if (session !== modalSession) return;
+                showDspState(readDspState(dspData));
+                $('dsp-state-status').textContent = '';
+                if (dspData.warning != null && dspData.warning !== '') {
+                    $('dsp-route-warning').textContent = 'Backend warning: ' + (typeof dspData.warning === 'string' ? dspData.warning : displayJson(dspData.warning));
+                    $('dsp-route-warning').hidden = false;
+                }
+            } catch (e) {
+                if (session !== modalSession) return;
+                $('dsp-state-status').textContent = '';
+                setRouteError('Cannot load saved DSP state: ' + e.message + '\nAPPLY is disabled to avoid overwriting it. Close and reopen this route to retry.');
+                updateModalControls();
+            }
+            await discovery;
+        }
+
+        function closeModal() {
+            if (modalBusy) return;
+            ++modalSession;
+            editingRouteId = null;
+            currentRouteDspState = null;
+            dspParameterBindings = [];
+            $('overlay').style.display = 'none';
+            $('route-modal').style.display = 'none';
+        }
+
+        function dspButton(text, handler, className = 'dsp-small-btn') {
+            const button = dspText('button', text, className);
+            button.type = 'button';
+            button.addEventListener('click', handler);
+            return button;
+        }
+
+        function setDraftParam(processor, key, value) {
+            Object.defineProperty(processor.params, key, { value, writable: true, configurable: true, enumerable: true });
+        }
+
+        function renderDspParameter(processor, descriptor, parameter, container, index) {
+            const key = parameter.id;
+            const defaultValue = parameter.default ?? descriptor.defaults[key];
+            if (!hasOwn(processor.params, key) && defaultValue !== undefined) {
+                setDraftParam(processor, key, cloneJson(defaultValue));
+            }
+            const savedValue = hasOwn(processor.params, key) ? processor.params[key] : undefined;
+            const wrapper = document.createElement('div');
+            const row = dspText('div', '', 'control-row');
+            const label = dspText('label', (parameter.name ?? key) + (parameter.unit ? ` (${parameter.unit})` : ''));
+            const control = document.createElement(parameter.type === 'boolean' || parameter.type === 'enum' ? 'select' : 'input');
+            control.id = `dsp-param-${index}-${dspParameterBindings.length}`;
+            label.htmlFor = control.id;
+            let readValue;
+            let validateType;
+            if (parameter.type === 'boolean' || parameter.type === 'enum') {
+                const choices = parameter.type === 'boolean' ? [{ label: 'True', value: true }, { label: 'False', value: false }] : parameter.choices;
+                const match = choices.findIndex(choice => displayJson(choice.value) === displayJson(savedValue));
+                if (match < 0) {
+                    const invalid = dspText('option', 'Invalid saved value: ' + displayJson(savedValue));
+                    invalid.value = '';
+                    control.appendChild(invalid);
+                }
+                choices.forEach((choice, choiceIndex) => {
+                    const option = dspText('option', choice.label ?? displayJson(choice.value));
+                    option.value = String(choiceIndex);
+                    control.appendChild(option);
+                });
+                control.value = match < 0 ? '' : String(match);
+                control.required = true;
+                readValue = () => control.value === '' ? savedValue : cloneJson(choices[Number(control.value)].value);
+                validateType = () => control.value === '' ? 'Choose a valid value.' : '';
+            } else if (parameter.type === 'number' || parameter.type === 'integer') {
+                control.type = 'number';
+                control.required = true;
+                control.step = parameter.step ?? (parameter.type === 'integer' ? 1 : 'any');
+                if (parameter.min != null) control.min = parameter.min;
+                if (parameter.max != null) control.max = parameter.max;
+                control.value = typeof savedValue === 'number' || typeof savedValue === 'string' ? savedValue : '';
+                readValue = () => control.value.trim() === '' ? '' : Number(control.value);
+                validateType = () => {
+                    const value = readValue();
+                    if (value === '' || !Number.isFinite(value)) return 'Enter a finite number.';
+                    if (parameter.type === 'integer' && !Number.isInteger(value)) return 'Enter a whole number.';
+                    return '';
+                };
+            } else {
+                control.type = 'text';
+                control.value = typeof savedValue === 'string' ? savedValue : displayJson(savedValue);
+                readValue = () => control.value;
+                validateType = () => typeof processor.params[key] === 'string' ? '' : 'Saved value is not a string; edit it to provide a string.';
+            }
+            const validate = () => {
+                control.setCustomValidity(validateType());
+                return control.checkValidity();
+            };
+            control.addEventListener('input', () => {
+                setDraftParam(processor, key, readValue());
+                validate();
+            });
+            control.addEventListener('change', () => {
+                setDraftParam(processor, key, readValue());
+                validate();
+            });
+            dspParameterBindings.push({ control, validate, commit: () => setDraftParam(processor, key, readValue()) });
+            row.append(label, control);
+            wrapper.appendChild(row);
+            const hints = [];
+            if (parameter.min != null) hints.push('min ' + parameter.min);
+            if (parameter.max != null) hints.push('max ' + parameter.max);
+            if (parameter.step != null) hints.push('step ' + parameter.step);
+            hints.push('default ' + displayJson(defaultValue));
+            const help = dspText('div', hints.join(' · '), 'dsp-help');
+            help.id = control.id + '-help';
+            control.setAttribute('aria-describedby', help.id);
+            wrapper.appendChild(help);
+            container.appendChild(wrapper);
+        }
+
+        function renderDspChain() {
+            const container = $('dsp-chain-list');
+            container.replaceChildren();
+            dspParameterBindings = [];
+            if (!currentRouteDspState) {
+                container.appendChild(dspText('div', 'Saved DSP state has not been loaded.', 'dsp-help'));
+                return;
+            }
+            if (currentRouteDspState.chain.length === 0) {
+                container.appendChild(dspText('div', 'No processors in chain.', 'dsp-help'));
+            }
+            currentRouteDspState.chain.forEach((processor, index) => {
+                const descriptor = isObject(processor) ? dspDiscovery.processors.find(item => item.type === processor.type) : undefined;
+                const card = dspText('div', '', 'dsp-processor-card');
+                const header = dspText('div', '', 'dsp-processor-header');
+                const type = isObject(processor) ? processor.type : '(invalid processor)';
+                header.appendChild(dspText('span', `#${index + 1}: ${descriptor?.name ?? type}`));
+                const actions = dspText('div', '', 'dsp-actions');
+                const up = dspButton('↑', () => moveProcessor(index, -1));
+                up.title = 'Move processor up';
+                up.setAttribute('aria-label', `Move processor ${index + 1} up`);
+                up.dataset.locked = String(index === 0);
+                const down = dspButton('↓', () => moveProcessor(index, 1));
+                down.title = 'Move processor down';
+                down.setAttribute('aria-label', `Move processor ${index + 1} down`);
+                down.dataset.locked = String(index === currentRouteDspState.chain.length - 1);
+                actions.append(up, down, dspButton('Remove', () => removeProcessor(index), 'remove-btn'));
+                header.appendChild(actions);
+                card.appendChild(header);
+                const params = dspText('div', '', 'dsp-processor-params');
+                if (!descriptor) {
+                    card.classList.add('unavailable');
+                    const reason = dspDiscovery.status === 'ready' ? 'Unavailable processor on this backend. Remove it before applying, or restore the plugin.' : 'Processor availability cannot be verified until discovery succeeds.';
+                    card.appendChild(dspText('div', reason, 'dsp-help dsp-warning'));
+                    if (isObject(processor)) params.appendChild(dspText('div', 'Saved parameters: ' + displayJson(processor.params), 'dsp-help'));
+                } else if (!isObject(processor.params)) {
+                    card.classList.add('unavailable');
+                    card.appendChild(dspText('div', 'Invalid saved parameters. Remove this processor and add it again.', 'dsp-help dsp-warning'));
+                    params.appendChild(dspText('div', displayJson(processor.params), 'dsp-help'));
+                } else {
+                    if (descriptor.description) card.appendChild(dspText('div', descriptor.description, 'dsp-help'));
+                    descriptor.parameters.forEach(parameter => renderDspParameter(processor, descriptor, parameter, params, index));
+                    const known = new Set(descriptor.parameters.map(parameter => parameter.id));
+                    for (const [key, value] of Object.entries(processor.params)) {
+                        if (known.has(key)) continue;
+                        const extra = dspText('div', '', 'dsp-extra-param');
+                        extra.appendChild(dspText('span', `Unknown parameter ${key}: ${displayJson(value)}`, 'dsp-help dsp-warning'));
+                        extra.appendChild(dspButton('Remove parameter', () => {
+                            if (modalBusy) return;
+                            delete processor.params[key];
+                            renderDspChain();
+                            updateModalControls();
+                        }, 'remove-btn'));
+                        params.appendChild(extra);
+                    }
+                    if (!params.children.length) params.appendChild(dspText('div', 'No parameters.', 'dsp-help'));
+                }
+                card.appendChild(params);
+                container.appendChild(card);
+                if (index < currentRouteDspState.chain.length - 1) container.appendChild(dspText('div', '↓', 'chain-arrow'));
+            });
+            updateModalControls();
+        }
+
+        function addProcessorToChain() {
+            if (modalBusy || !currentRouteDspState || dspDiscovery.status !== 'ready') return;
+            if (currentRouteDspState.chain.length >= dspDiscovery.maxChainLength) {
+                setRouteError('The backend chain limit is ' + dspDiscovery.maxChainLength + '. Remove a processor before adding another.');
+                return;
+            }
+            const descriptor = dspDiscovery.processors.find(processor => processor.type === $('new-processor-type').value);
+            if (!descriptor) return;
+            const processor = { type: descriptor.type, params: cloneJson(descriptor.defaults) };
+            for (const parameter of descriptor.parameters) {
+                if (!hasOwn(processor.params, parameter.id)) {
+                    const value = parameter.default ?? descriptor.defaults[parameter.id];
+                    if (value !== undefined) setDraftParam(processor, parameter.id, cloneJson(value));
+                }
+            }
+            currentRouteDspState.chain.push(processor);
+            renderDspDiscovery();
+        }
+
+        function removeProcessor(index) {
+            if (modalBusy || !currentRouteDspState) return;
+            currentRouteDspState.chain.splice(index, 1);
+            renderDspDiscovery();
+        }
+
+        function moveProcessor(index, direction) {
+            if (modalBusy || !currentRouteDspState) return;
+            const chain = currentRouteDspState.chain;
+            const destination = index + direction;
+            if (destination < 0 || destination >= chain.length) return;
+            [chain[index], chain[destination]] = [chain[destination], chain[index]];
+            renderDspChain();
+            updateModalControls();
+        }
+
+        function validatedRouteDraft() {
+            if (!currentRouteDspState) throw new Error('Saved DSP state has not loaded. Close and reopen this route to retry.');
+            if (dspDiscovery.status !== 'ready') throw new Error('DSP discovery must succeed before applying. Use Refresh processors to retry.');
+            if (currentRouteDspState.chain.length > dspDiscovery.maxChainLength) {
+                throw new Error('Chain exceeds the backend limit of ' + dspDiscovery.maxChainLength + ' processors. Remove processors before applying.');
+            }
+            for (const id of ['modal-gain', 'modal-dsp-gain']) {
+                const control = $(id);
+                const value = control.value.trim() === '' ? NaN : Number(control.value);
+                control.setCustomValidity(Number.isFinite(value) ? '' : 'Enter a finite gain value.');
+                if (!control.reportValidity()) throw new Error('Correct the gain value before applying.');
+            }
+            for (const binding of dspParameterBindings) {
+                if (!binding.validate()) {
+                    binding.control.reportValidity();
+                    throw new Error('Correct the highlighted processor parameter before applying.');
+                }
+            }
+            for (const processor of currentRouteDspState.chain) {
+                const descriptor = isObject(processor) ? dspDiscovery.processors.find(item => item.type === processor.type) : undefined;
+                if (!descriptor) throw new Error('Remove unavailable processors before applying, or restore the missing plugins and refresh processors.');
+                if (!isObject(processor.params)) throw new Error('Remove and re-add processors with invalid saved parameters.');
+                const known = new Set(descriptor.parameters.map(parameter => parameter.id));
+                if (Object.keys(processor.params).some(key => !known.has(key))) {
+                    throw new Error('Remove the visible unknown parameters before applying. The backend rejects unsupported parameters.');
+                }
+            }
+            dspParameterBindings.forEach(binding => binding.commit());
+            return {
+                gain: Number($('modal-gain').value),
+                enabled: $('modal-enabled').value === '1',
+                dsp: {
+                    active: $('modal-dsp-active').value === 'true',
+                    gain: Number($('modal-dsp-gain').value),
+                    chain: cloneJson(currentRouteDspState.chain.map(processor => ({ type: processor.type, params: processor.params })))
+                }
+            };
+        }
+
+        async function saveRoute() {
+            if (modalBusy || editingRouteId === null) return;
+            setRouteError();
+            let draft;
+            try {
+                draft = validatedRouteDraft();
+            } catch (e) {
+                setRouteError(e.message);
+                return;
+            }
+            const id = editingRouteId;
+            modalBusy = true;
+            updateModalControls();
+            let saved = false;
+            let adopted = false;
+            try {
+                const result = await fetchAPI(`/api/routes/${encodeURIComponent(id)}/apply`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(draft)
+                });
+                if (result.status !== 'ok' || result.adopted !== true)
+                    throw new Error('The backend did not confirm engine adoption.');
+                adopted = true;
+                showDspState(readDspState(result));
+                $('dsp-route-warning').hidden = true;
+                await loadGraph();
+                saved = true;
+            } catch (e) {
+                setRouteError((adopted ? 'Changes were applied, but graph confirmation failed: ' : 'APPLY was not confirmed: ') + e.message + '\nThe inspector remains open. Refresh/review the route before retrying.');
+            } finally {
+                modalBusy = false;
+                if (saved) closeModal();
+                else {
+                    renderDspChain();
+                    updateModalControls();
+                }
+            }
+        }
+
+        async function deleteRoute() {
+            if (modalBusy || editingRouteId === null) return;
+            const id = editingRouteId;
+            modalBusy = true;
+            setRouteError();
+            updateModalControls();
+            let deleted = false;
+            try {
+                await fetchAPI(`/api/routes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+                deleted = true;
+                await loadGraph();
+            } catch (e) {
+                setRouteError('Delete failed: ' + e.message);
+            } finally {
+                modalBusy = false;
+                if (deleted) closeModal();
+                else updateModalControls();
+            }
+        }
+
+        async function updateMeters() {
+            try {
+                const data = await fetchAPI('/api/meters');
+                cachedMeters.forEach(m => {
+                    let meter = null;
+                    if (m.epId.includes('/capture')) {
+                        if (data.capture && data.capture[m.epId] && data.capture[m.epId][m.ch]) {
+                            meter = data.capture[m.epId][m.ch];
+                        }
+                    } else if (m.epId.includes('/playback')) {
+                        if (data.playback && data.playback[m.epId] && data.playback[m.epId][m.ch]) {
+                            meter = data.playback[m.epId][m.ch];
+                        }
+                    }
+
+                    if (meter) {
+                        const width = Math.max(0, Math.min(100, (meter.rms_db + 60) * 100 / 60)) + '%';
+                        m.fillEl.style.width = width;
+                        if (m.peakEl) m.peakEl.classList.toggle('active', meter.clipped);
+                    }
+                });
+            } catch (e) { console.error("Meter update error:", e); }
+        }
+
+        async function applyTone() {
+            try {
+                await fetchAPI(`/api/tone?enabled=${$('tone-enabled').value}&frequency=${$('tone-freq').value}&amplitude=${$('tone-amp').value}`, { method: 'POST' });
+            } catch (e) { alert(e.message); }
+        }
+
+        async function applyDSP() {
+            try {
+                await fetchAPI(`/api/dsp?gain=${$('dsp-gain').value}`, { method: 'POST' });
+            } catch (e) { alert(e.message); }
+        }
+
+        async function resetClips() { try { await fetchAPI('/api/reset_clips?all=1', { method: 'POST' }); } catch (e) {} }
+        async function saveSettings() {
+            try {
+                const result = await fetchAPI('/api/settings/save', { method: 'POST' });
+                if (!result.adopted || !result.persisted) throw new Error(result.message || 'Apply/save was not confirmed');
+                alert('Applied configuration saved');
+            } catch (e) { alert(e.message); }
+        }
+        async function refreshAll() { await Promise.all([loadGraph(), loadPipewireGraph(), loadDevices(), loadDspAvailable()]); }
+
+        const viewportObserver = new ResizeObserver(() => {
+            drawCables();
+        });
+
+        window.onresize = drawCables;
+        setInterval(updateMeters, 100);
+
+        async function init() {
+            const viewport = $('patchbay-viewport');
+            if (viewport) viewportObserver.observe(viewport);
+
+            Promise.allSettled([
+                loadDevices(),
+                loadGraph(),
+                loadPipewireGraph(),
+                loadDspAvailable()
+            ]).then(() => {
+                if ($('status')) $('status').textContent = 'Ready';
+            });
+        }
+        init();
+    </script>
+    <script src="client/plugin_demo.js"></script>
+</body>
+</html>

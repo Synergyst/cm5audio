@@ -35,7 +35,12 @@ DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager,
     m_compProc = std::make_unique<CompressorProcessor>(0.7f, 4.0f);
 }
 
-DspEngine::~DspEngine() { stop(); }
+DspEngine::~DspEngine() {
+    stop();
+    // DeviceManager can outlive the engine. Tear down its PipeWire callbacks
+    // while this object is still valid, including exception/unusual shutdown paths.
+    m_deviceManager.set_dsp_engine(nullptr);
+}
 
 void DspEngine::start() {
     if (m_running.exchange(true, std::memory_order_acq_rel)) return;
@@ -123,25 +128,55 @@ void DspEngine::update_route_dsp(uint32_t routeId,
     rdsp.current_idx.store(write_idx);
 }
 
+void DspEngine::register_pipewire_meter_bank(
+    const std::string& endpointId, unsigned channels, bool isCapture)
+{
+    if (endpointId.empty() || channels == 0 || channels > CM5_MAX_CHANNELS)
+        return;
+    std::lock_guard<std::mutex> metricsLock(m_metrics.lock);
+    auto& banks = isCapture ? m_metrics.capture : m_metrics.playback;
+    auto bank = banks.find(endpointId);
+    if (bank == banks.end()) {
+        banks.emplace(endpointId, std::vector<ChannelMeter>(channels));
+    } else if (bank->second.size() != channels) {
+        std::vector<ChannelMeter> prepared(channels);
+        bank->second.swap(prepared);
+    }
+}
+
+void DspEngine::unregister_pipewire_meter_bank(
+    const std::string& endpointId, bool isCapture)
+{
+    std::lock_guard<std::mutex> metricsLock(m_metrics.lock);
+    auto& banks = isCapture ? m_metrics.capture : m_metrics.playback;
+    banks.erase(endpointId);
+}
+
 void DspEngine::update_meters(float* buffer, unsigned channels, unsigned stride,
-                              const std::string& endpointId, bool isCapture) {
-    if (!buffer || stride == 0 || channels > CM5_MAX_CHANNELS) return;
+                              const std::string& endpointId, bool isCapture,
+                              size_t frames) {
+    if (!buffer || channels == 0 || channels > CM5_MAX_CHANNELS ||
+        stride < channels || frames == 0) return;
+
     std::lock_guard<std::mutex> metricsLock(m_metrics.lock);
     auto& banks = isCapture ? m_metrics.capture : m_metrics.playback;
     const auto bank = banks.find(endpointId);
+
     if (bank == banks.end() || bank->second.size() != channels) return;
     auto& targetMeters = bank->second;
+
     for (unsigned ch = 0; ch < channels; ++ch) {
-        float sumSq = 0.0f, peak = 0.0f;
-        for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
-            float sample = buffer[f * stride + ch];
-            float absS = std::abs(sample);
-            sumSq += sample * sample;
+        double sumSq = 0.0;
+        float peak = 0.0f;
+        for (size_t f = 0; f < frames; ++f) {
+            const float sample = buffer[f * stride + ch];
+            const float absS = std::abs(sample);
+            sumSq += static_cast<double>(sample) * sample;
             if (absS > peak) peak = absS;
         }
-        float rms = std::sqrt(sumSq / CM5_BUFFER_FRAMES);
-        float rmsDb = (rms > 0.00001f) ? 20.0f * std::log10(rms) : -60.0f;
-        float peakDb = (peak > 0.00001f) ? 20.0f * std::log10(peak) : -60.0f;
+        const float rms = static_cast<float>(std::sqrt(sumSq / frames));
+        const float rmsDb = rms > 0.00001f ? 20.0f * std::log10(rms) : -60.0f;
+        const float peakDb = peak > 0.00001f ? 20.0f * std::log10(peak) : -60.0f;
         targetMeters[ch].raw_value.store(rms, std::memory_order_relaxed);
         targetMeters[ch].raw_peak.store(peak, std::memory_order_relaxed);
         targetMeters[ch].rms_db.store(rmsDb, std::memory_order_relaxed);

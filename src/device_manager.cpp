@@ -12,6 +12,9 @@
 #include <spa/utils/defs.h>
 
 namespace {
+// File-static pointer to pw_core accessible by registry callbacks
+static struct pw_core* g_pw_core = nullptr;
+
 template <size_t N>
 std::string text_id(const char (&value)[N]) {
     return std::string(value, std::find(value, value + N, '\0'));
@@ -222,14 +225,28 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
     if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
         const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
         const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
+        const char* dir = props ? spa_dict_lookup(props, "node.direction") : nullptr;
+        bool is_input = (dir && strcmp(dir, "input") == 0);
+
         manager->m_pw_graph.nodes.push_back({
             id,
             name ? name : "Unknown Node",
             desc ? desc : "",
-            false
+            is_input
         });
     } else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
-        manager->m_pw_graph.links.push_back({0, 0, 0, 0});
+        uint32_t src_node = 0, dst_node = 0, src_port = 0, dst_port = 0;
+        if (props) {
+            const char* sn = spa_dict_lookup(props, "link.output.node");
+            const char* dn = spa_dict_lookup(props, "link.input.node");
+            const char* sp = spa_dict_lookup(props, "link.output.port");
+            const char* dp = spa_dict_lookup(props, "link.input.port");
+            if (sn) src_node = std::stoul(sn);
+            if (dn) dst_node = std::stoul(dn);
+            if (sp) src_port = std::stoul(sp);
+            if (dp) dst_port = std::stoul(dp);
+        }
+        manager->m_pw_graph.links.push_back({src_port, dst_port, src_node, dst_node});
     }
 }
 
@@ -256,6 +273,7 @@ DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
             m_pw_context = pw_context_new(pw_main_loop_get_loop(m_pw_loop), NULL, 0);
             if (m_pw_context) {
                 struct pw_core *core = pw_context_connect(m_pw_context, NULL, 0);
+                g_pw_core = core;
                 if (core) {
                     struct pw_registry *registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
                     if (registry) {
@@ -295,6 +313,7 @@ DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
 
 DeviceManager::~DeviceManager() {
     stop_all();
+    g_pw_core = nullptr;
     if (m_pw_enabled) {
         if (m_pw_loop) {
             pw_main_loop_quit(m_pw_loop);

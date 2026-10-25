@@ -264,10 +264,61 @@ static const struct pw_registry_events registry_events = {
     .global_remove = registry_global_remove,
 };
 
+/*DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
+    : m_pw_enabled(enablePwPatchbay) {
+    if (m_pw_enabled) {
+        std::cout << "[DeviceManager] Initializing PipeWire patchbay backend..." << std::endl;
+        m_pw_loop = pw_main_loop_new(NULL);
+        if (m_pw_loop) {
+            m_pw_context = pw_context_new(pw_main_loop_get_loop(m_pw_loop), NULL, 0);
+            if (m_pw_context) {
+                struct pw_core *core = pw_context_connect(m_pw_context, NULL, 0);
+                g_pw_core = core;
+                if (core) {
+                    struct pw_registry *registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+                    if (registry) {
+                        static struct spa_hook registry_listener;
+                        spa_zero(registry_listener);
+                        pw_registry_add_listener(registry, &registry_listener, &registry_events, this);
+                    }
+                }
+            }
+        }
+        if (!m_pw_loop || !m_pw_context) {
+            std::cerr << "[DeviceManager] CRITICAL ERROR: Failed to initialize PipeWire context/loop!" << std::endl;
+            m_pw_enabled = false;
+        } else {
+            m_pw_thread = std::thread([this]() {
+                pw_main_loop_run(m_pw_loop);
+            });
+            std::cout << "[DeviceManager] PipeWire patchbay backend active." << std::endl;
+        }
+    }
+
+    if (!initializeBackend) return;
+
+    ma_backend backends[] = {
+        ma_backend_pulseaudio,
+    };
+
+    std::cout << "[DeviceManager] Initializing backend search..." << std::endl;
+    ma_context_config config = ma_context_config_init();
+    if (ma_context_init(backends, std::size(backends), &config, &m_context) != MA_SUCCESS) {
+        std::cerr << "[DeviceManager] CRITICAL ERROR: Failed to initialize any available audio backend!" << std::endl;
+    } else {
+        m_context_initialized = true;
+        std::cout << "[DeviceManager] SUCCESS: Context initialized. Active Backend: " << ma_get_backend_name(m_context.backend) << std::endl;
+    }
+}*/
+
 DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
     : m_pw_enabled(enablePwPatchbay) {
     if (m_pw_enabled) {
         std::cout << "[DeviceManager] Initializing PipeWire patchbay backend..." << std::endl;
+
+        // Initialize PipeWire core engine and load SPA plugins
+        pw_init(nullptr, nullptr);
+
         m_pw_loop = pw_main_loop_new(NULL);
         if (m_pw_loop) {
             m_pw_context = pw_context_new(pw_main_loop_get_loop(m_pw_loop), NULL, 0);

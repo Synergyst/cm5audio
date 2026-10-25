@@ -425,6 +425,24 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
         const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
         const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
         const char* media_class = props ? spa_dict_lookup(props, "media.class") : nullptr;
+        const char* app_name = props ? spa_dict_lookup(props, PW_KEY_APP_NAME) : nullptr;
+
+        // Our monitor streams are implementation details, not patchbay nodes.
+        // Hide them before adding them to the graph and remember their IDs so
+        // their automatically-created links are hidden as well.
+        const bool isMeterStream =
+            (name && std::strstr(name, "cm5-meter") != nullptr) ||
+            (app_name && std::strcmp(app_name, "cm5audio-meter") == 0);
+        if (isMeterStream) {
+            manager->m_pw_ignored_nodes.insert(id);
+            manager->m_pw_graph.nodes.erase(id);
+            auto& links = manager->m_pw_graph.links;
+            links.erase(std::remove_if(links.begin(), links.end(), [id](const PipeWireLink& link) {
+                return link.source_node == id || link.dest_node == id;
+            }), links.end());
+            return;
+        }
+
         const std::string mediaClass = media_class ? media_class : "";
 
         bool is_input = false;
@@ -469,6 +487,10 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
                 return;
             }
         }
+        if (manager->m_pw_ignored_nodes.count(src_node) != 0 ||
+            manager->m_pw_ignored_nodes.count(dst_node) != 0) {
+            return;
+        }
         manager->m_pw_graph.links.push_back({src_port, dst_port, src_node, dst_node});
     }
 }
@@ -478,6 +500,7 @@ void registry_global_remove(void *data, uint32_t id) {
     {
         std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
         manager->m_pw_graph.nodes.erase(id);
+        manager->m_pw_ignored_nodes.erase(id);
         auto& links = manager->m_pw_graph.links;
         links.erase(std::remove_if(links.begin(), links.end(), [id](const PipeWireLink& link) {
             return link.source_node == id || link.dest_node == id;

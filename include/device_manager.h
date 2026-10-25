@@ -160,6 +160,7 @@ private:
     friend struct DeviceManagerTestAccess;
     friend void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props);
     friend void registry_global_remove(void *data, uint32_t id);
+    void rebuild_pipewire_visible_links_locked();
 
     std::mutex m_lock;
     ma_context m_context{};
@@ -179,6 +180,7 @@ private:
     std::mutex m_pw_graph_lock;
     PipeWireGraph m_pw_graph;
     std::unordered_set<uint32_t> m_pw_ignored_nodes;
+    std::unordered_map<uint32_t, PipeWireLink> m_pw_links_by_id;
 
     // PipeWire Metering Internals
     std::atomic<DspEngine*> m_dspEngine{nullptr};

@@ -593,6 +593,9 @@
         const $ = id => document.getElementById(id);
         let graph = { endpoints: [], routes: [] };
         let pwGraph = { nodes: {}, links: [] };
+        let pipewireGraphLoadInProgress = false;
+        let pipewireGraphPollingEnabled = true;
+        let pipewireGraphSnapshot = null;
         let activeSource = null;
         let editingRouteId = null;
         let activeTabName = 'patchbay';
@@ -1272,19 +1275,41 @@ function autoOrganizeLayout() {
             }
         }
 
-        async function loadPipewireGraph() {
+        async function loadPipewireGraph(force = false) {
+            if (force) pipewireGraphPollingEnabled = true;
+            if (!pipewireGraphPollingEnabled || pipewireGraphLoadInProgress) return;
+            pipewireGraphLoadInProgress = true;
             try {
-                const data = await fetchAPI('/api/pipewire/graph');
-                pwGraph.nodes = {};
-                if (Array.isArray(data.nodes)) {
-                    data.nodes.forEach(n => pwGraph.nodes[n.id] = n);
-                } else if (data.nodes) {
-                    pwGraph.nodes = data.nodes;
-                }
-                pwGraph.links = data.links || [];
+                const data = await fetchAPI('/api/pipewire/graph', { cache: 'no-store' });
+                const nodes = (Array.isArray(data.nodes)
+                    ? data.nodes.slice()
+                    : Object.values(data.nodes || {}))
+                    .sort((a, b) => Number(a.id) - Number(b.id));
+                const links = (Array.isArray(data.links) ? data.links.slice() : [])
+                    .sort((a, b) =>
+                        Number(a.source_node) - Number(b.source_node) ||
+                        Number(a.source_port) - Number(b.source_port) ||
+                        Number(a.dest_node) - Number(b.dest_node) ||
+                        Number(a.dest_port) - Number(b.dest_port));
+                const snapshot = JSON.stringify({ nodes, links });
+
+                // Registry changes are polled continuously, but only topology/name
+                // changes rebuild the DOM. This avoids disturbing layout every tick.
+                if (snapshot === pipewireGraphSnapshot) return;
+
+                const nextNodes = {};
+                nodes.forEach(node => { nextNodes[node.id] = node; });
+                pwGraph.nodes = nextNodes;
+                pwGraph.links = links;
+                pipewireGraphSnapshot = snapshot;
                 renderPipewirePatchbay();
             } catch (e) {
+                // The endpoint returns 404 when the patchbay feature is disabled.
+                // Avoid repeating the same failed poll every second; REFRESH retries.
+                if (e.message === 'HTTP 404') pipewireGraphPollingEnabled = false;
                 console.error('PipeWire graph load failed', e);
+            } finally {
+                pipewireGraphLoadInProgress = false;
             }
         }
 
@@ -1394,12 +1419,19 @@ function autoOrganizeLayout() {
                 if (portList.length === 0) {
                     portList.push(1, 2);
                 }
+                const portSignature = portList.join(',');
+
+                let block = pwEndpointBlocks.get(node.id);
+                if (block && block.dataset.portSignature !== portSignature) {
+                    block.remove();
+                    pwEndpointBlocks.delete(node.id);
+                    block = null;
+                }
 
                 if (!nodePositions[`pw-${node.id}`]) {
                     nodePositions[`pw-${node.id}`] = { x: 1020, y: idx * 180 };
                 }
 
-                let block = pwEndpointBlocks.get(node.id);
                 if (!block) {
                     block = createPwEndpointBlock(node, portList);
                     viewport.appendChild(block);
@@ -1542,6 +1574,7 @@ function autoOrganizeLayout() {
             block.className = 'endpoint-block pw-block';
             block.id = `pw-block-${node.id}`;
             block.dataset.epId = `pw-${node.id}`;
+            block.dataset.portSignature = portList.join(',');
 
             const pos = nodePositions[`pw-${node.id}`] || { x: 1020, y: 0 };
             block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
@@ -2218,7 +2251,7 @@ function autoOrganizeLayout() {
                 alert('Applied configuration saved');
             } catch (e) { alert(e.message); }
         }
-        async function refreshAll() { await Promise.all([loadGraph(), loadPipewireGraph(), loadDevices(), loadDspAvailable()]); }
+        async function refreshAll() { await Promise.all([loadGraph(), loadPipewireGraph(true), loadDevices(), loadDspAvailable()]); }
 
         const viewportObserver = new ResizeObserver(() => {
             drawCables();
@@ -2226,6 +2259,7 @@ function autoOrganizeLayout() {
 
         window.onresize = drawCables;
         setInterval(updateMeters, 100);
+        setInterval(() => loadPipewireGraph(), 1000);
 
         async function init() {
             const viewport = $('patchbay-viewport');

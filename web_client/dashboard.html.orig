@@ -1316,14 +1316,15 @@ function autoOrganizeLayout() {
                 }
             });
 
-            // 2. Cache native PipeWire node ports (pw-node/<id>)
+            // 2. Cache every rendered native PipeWire meter index. The backend
+            // negotiates channel count, so do not assume that every node is stereo.
             Object.values(pwGraph.nodes).forEach(node => {
                 const epId = `pw-node/${node.id}`;
-                // Assuming stereo/multi-channel; adjust channel loop to match node ports if needed
-                for (let i = 0; i < 2; i++) {
+                for (let i = 0; ; i++) {
                     const fill = document.getElementById(`vu-${epId}-${i}`);
+                    if (!fill) break;
                     const peak = document.getElementById(`peak-${epId}-${i}`);
-                    if (fill) cachedMeters.push({ epId: epId, ch: i, fillEl: fill, peakEl: peak });
+                    cachedMeters.push({ epId, ch: i, fillEl: fill, peakEl: peak });
                 }
             });
         }
@@ -1410,6 +1411,7 @@ function autoOrganizeLayout() {
             });
 
             localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+            rebuildMeterCache();
             if (activeTabName === 'patchbay') {
                 setTimeout(drawCables, 50);
             }
@@ -2169,7 +2171,15 @@ function autoOrganizeLayout() {
                 const data = await fetchAPI('/api/meters');
                 cachedMeters.forEach(m => {
                     let meter = null;
-                    if (m.epId.includes('/capture')) {
+                    if (m.epId.startsWith('pw-node/')) {
+                        const nodeId = m.epId.slice('pw-node/'.length);
+                        const node = pwGraph.nodes[nodeId];
+                        const bankName = node && node.is_input ? 'playback' : 'capture';
+                        const bank = data[bankName];
+                        if (bank && bank[m.epId] && bank[m.epId][m.ch]) {
+                            meter = bank[m.epId][m.ch];
+                        }
+                    } else if (m.epId.includes('/capture')) {
                         if (data.capture && data.capture[m.epId] && data.capture[m.epId][m.ch]) {
                             meter = data.capture[m.epId][m.ch];
                         }

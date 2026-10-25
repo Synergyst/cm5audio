@@ -436,10 +436,7 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
         if (isMeterStream) {
             manager->m_pw_ignored_nodes.insert(id);
             manager->m_pw_graph.nodes.erase(id);
-            auto& links = manager->m_pw_graph.links;
-            links.erase(std::remove_if(links.begin(), links.end(), [id](const PipeWireLink& link) {
-                return link.source_node == id || link.dest_node == id;
-            }), links.end());
+            manager->rebuild_pipewire_visible_links_locked();
             return;
         }
 
@@ -461,6 +458,7 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
             is_input,
             mediaClass
         };
+        manager->rebuild_pipewire_visible_links_locked();
 
         // Monitor every audio node, including both sources and sinks. The
         // cm5-meter streams are excluded to prevent recursive self-monitoring.
@@ -487,11 +485,8 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
                 return;
             }
         }
-        if (manager->m_pw_ignored_nodes.count(src_node) != 0 ||
-            manager->m_pw_ignored_nodes.count(dst_node) != 0) {
-            return;
-        }
-        manager->m_pw_graph.links.push_back({src_port, dst_port, src_node, dst_node});
+        manager->m_pw_links_by_id[id] = {src_port, dst_port, src_node, dst_node};
+        manager->rebuild_pipewire_visible_links_locked();
     }
 }
 
@@ -501,10 +496,15 @@ void registry_global_remove(void *data, uint32_t id) {
         std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
         manager->m_pw_graph.nodes.erase(id);
         manager->m_pw_ignored_nodes.erase(id);
-        auto& links = manager->m_pw_graph.links;
-        links.erase(std::remove_if(links.begin(), links.end(), [id](const PipeWireLink& link) {
-            return link.source_node == id || link.dest_node == id;
-        }), links.end());
+        manager->m_pw_links_by_id.erase(id); // The removed global may itself be a link.
+        auto& linksById = manager->m_pw_links_by_id;
+        for (auto it = linksById.begin(); it != linksById.end();) {
+            if (it->second.source_node == id || it->second.dest_node == id)
+                it = linksById.erase(it);
+            else
+                ++it;
+        }
+        manager->rebuild_pipewire_visible_links_locked();
     }
     manager->stop_node_monitor(id);
 }
@@ -587,6 +587,21 @@ DeviceManager::~DeviceManager() {
 PipeWireGraph DeviceManager::get_pipewire_graph() {
     std::lock_guard<std::mutex> lock(m_pw_graph_lock);
     return m_pw_graph;
+}
+
+// Caller must hold m_pw_graph_lock. The public graph omits our meter streams,
+// but their registry/link lifetimes remain tracked in m_pw_links_by_id.
+void DeviceManager::rebuild_pipewire_visible_links_locked() {
+    m_pw_graph.links.clear();
+    m_pw_graph.links.reserve(m_pw_links_by_id.size());
+    for (const auto& entry : m_pw_links_by_id) {
+        const auto& link = entry.second;
+        if (m_pw_ignored_nodes.count(link.source_node) ||
+            m_pw_ignored_nodes.count(link.dest_node)) continue;
+        if (!m_pw_graph.nodes.count(link.source_node) ||
+            !m_pw_graph.nodes.count(link.dest_node)) continue;
+        m_pw_graph.links.push_back(link);
+    }
 }
 
 void DeviceManager::set_dsp_engine(DspEngine* engine) {

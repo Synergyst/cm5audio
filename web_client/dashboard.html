@@ -117,6 +117,7 @@
             align-items: center;
             gap: 10px;
             z-index: 20;
+            flex-wrap: wrap;
         }
         #patchbay {
             flex: 1;
@@ -133,22 +134,12 @@
             position: absolute;
             top: 0;
             left: 0;
-            display: flex;
-            justify-content: space-between;
-            gap: 40px;
-            padding: 60px;
-            min-width: 3200px;
-            min-height: 2000px;
+            min-width: 5000px;
+            min-height: 4000px;
             transform-origin: 0 0;
             will-change: transform;
         }
 
-        .column {
-            position: relative;
-            width: 260px;
-            min-height: 2000px;
-            z-index: 5;
-        }
         .endpoint-block {
             position: absolute;
             top: 0;
@@ -157,13 +148,17 @@
             border: 2px solid var(--border-color);
             border-radius: 8px;
             padding: 10px;
-            width: 100%;
+            width: 260px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.5);
             cursor: default;
             user-select: none;
-            transition: border-color 0.2s;
+            transition: border-color 0.2s, box-shadow 0.2s;
         }
         .endpoint-block.active-block { border-color: var(--accent-blue); }
+        .endpoint-block.multi-selected {
+            border-color: var(--accent-yellow);
+            box-shadow: 0 0 12px rgba(235, 203, 139, 0.5);
+        }
         
         /* Native PipeWire Block Theme */
         .endpoint-block.pw-block {
@@ -171,6 +166,10 @@
             background: var(--pw-bg);
         }
         .endpoint-block.pw-block.active-block { border-color: var(--pw-primary); }
+        .endpoint-block.pw-block.multi-selected {
+            border-color: var(--accent-yellow);
+            box-shadow: 0 0 12px rgba(235, 203, 139, 0.5);
+        }
         .endpoint-block.pw-block .endpoint-header {
             color: var(--pw-primary);
             border-bottom-color: var(--pw-border);
@@ -237,11 +236,10 @@
             position: absolute;
             top: 0;
             left: 0;
-            width: 100%;
-            height: 100%;
+            width: 5000px;
+            height: 4000px;
             overflow: visible;
-            pointer-events: auto;
-            z-index: 1;
+            pointer-events: none;
         }
         .cable {
             fill: none;
@@ -472,25 +470,24 @@
                 <span id="zoom-indicator" style="font-size: 11px; min-width: 40px; text-align: center; color: var(--accent-blue); font-weight: bold;">100%</span>
                 <button onclick="zoomOut()" style="padding: 4px 10px; min-height: 28px;">-</button>
                 <button onclick="resetZoom()" style="padding: 4px 10px; min-height: 28px;">RESET</button>
-                <button onclick="resetNodePositions()" style="padding: 4px 10px; min-height: 28px; background: #4c566a; margin-left: 10px;">RESET POSITIONS</button>
-                <button onclick="PluginDemo.spawnNode()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 10px;">ADD DUMMY PLUGIN</button>
-                <!-- Layout Backup Controls -->
-                <button onclick="exportLayout()" style="background: #a3be8c; color: #000; font-weight: bold; margin-left: 20px;">EXPORT LAYOUT</button>
+                <button onclick="autoOrganizeLayout()" style="padding: 4px 10px; min-height: 28px; background: #5e81ac; font-weight: bold; margin-left: 5px;">ORGANIZE LAYOUT</button>
+                <button onclick="PluginDemo.spawnNode()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 5px;">ADD DUMMY PLUGIN</button>
+                
+                <!-- Layout Backup & Grid Snap Controls -->
+                <button onclick="exportLayout()" style="background: #a3be8c; color: #000; font-weight: bold; margin-left: 15px;">EXPORT LAYOUT</button>
                 <button onclick="$('layout-file-input').click()" style="background: #88c0d0; color: #000; font-weight: bold;">IMPORT LAYOUT</button>
                 <input type="file" id="layout-file-input" style="display: none;" accept=".json" onchange="importLayout(event)">
+                
+                <label style="font-size: 11px; color: var(--text-dim); margin-left: 10px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                    <input type="checkbox" id="snap-grid-toggle" onchange="toggleSnapGrid(this)" checked> Snap Grid (3px)
+                </label>
             </div>
             <div id="patchbay">
                 <div id="patchbay-viewport">
-                    <svg id="cable-svg" width="100%" height="100%" style="overflow: visible;">
+                    <svg id="cable-svg">
                         <path id="temp-cable" class="temp-cable" d="" style="display: none;"></path>
                     </svg>
-                    <!-- Internal cm5audio Columns -->
-                    <div class="column" id="sources"></div>
-                    <div class="column" id="destinations"></div>
-                    
-                    <!-- Native PipeWire Columns -->
-                    <div class="column" id="pw-sources"></div>
-                    <div class="column" id="pw-destinations"></div>
+                    <!-- Node blocks appended directly here -->
                 </div>
             </div>
         </div>
@@ -615,8 +612,17 @@
         const displayJson = value => JSON.stringify(value) ?? '(not supplied)';
 
         let nodePositions = JSON.parse(localStorage.getItem('cm5_node_positions') || '{}');
+        let selectedNodeIds = new Set();
         let activeDraggedNode = null;
-        let nodeDragStart = { mouseX: 0, mouseY: 0, startX: 0, startY: 0 };
+        let nodeDragStart = { mouseX: 0, mouseY: 0 };
+        let dragStartPositions = new Map();
+
+        let snapToGridEnabled = true;
+        const GRID_SIZE = 3;
+
+        function toggleSnapGrid(checkbox) {
+            snapToGridEnabled = checkbox.checked;
+        }
 
         let isWiringDrag = false;
         let wiringSource = null;
@@ -686,27 +692,162 @@
         function zoomIn() { scale = Math.min(3.5, scale * 1.2); updateTransform(); }
         function zoomOut() { scale = Math.max(0.2, scale / 1.2); updateTransform(); }
         function resetZoom() { isInitialFitDone = false; autoFitViewport(); }
-        function resetNodePositions() {
-            localStorage.removeItem('cm5_node_positions');
+
+        function autoOrganizeLayout() {
             nodePositions = {};
-            endpointBlocks.forEach(b => {
-                const epId = b.dataset.epId;
-                const parent = b.parentElement;
-                const idx = Array.from(parent.children).indexOf(b);
-                const defY = idx * 160;
-                nodePositions[epId] = { x: 0, y: defY };
-                b.style.transform = `translate(0px, ${defY}px)`;
+            const TIGHT_GAP = 10;     // Tightly packed gap for matching family node windows
+            const COL_WIDTH = 340;    // Horizontal spacing between major columns
+
+            function getNodeHeight(id, isPw) {
+                const domEl = $(isPw ? `pw-block-${id}` : `block-${id}`);
+                if (domEl && domEl.offsetHeight > 0) return domEl.offsetHeight;
+                
+                if (!isPw) {
+                    const ep = graph.endpoints.find(e => e.id === id);
+                    if (ep) return 42 + (ep.channels * 34);
+                } else {
+                    const node = pwGraph.nodes[id];
+                    if (node) {
+                        const ports = new Set();
+                        pwGraph.links.forEach(l => {
+                            if (l.source_node === node.id) ports.add(l.source_port);
+                            if (l.dest_node === node.id) ports.add(l.dest_port);
+                        });
+                        const portCount = Math.max(2, ports.size);
+                        return 42 + (portCount * 34);
+                    }
+                }
+                return 160;
+            }
+
+            function stackFamily(items, colX, startY, isPw = false) {
+                let currentY = startY;
+                items.forEach(item => {
+                    const id = isPw ? item.id : item.id;
+                    const key = isPw ? `pw-${id}` : id;
+                    nodePositions[key] = { x: colX, y: currentY };
+                    currentY += getNodeHeight(id, isPw) + TIGHT_GAP;
+                });
+                return currentY;
+            }
+
+            // Categorize CM5 Endpoints into Families
+            const cm5Captures = [];
+            const cm5Playbacks = [];
+            const drivers = [];
+
+            graph.endpoints.forEach(ep => {
+                const name = (ep.name || ep.id).toLowerCase();
+                if (name.includes('freewheel') || name.includes('dummy') || name.includes('midi') || name.includes('tone')) {
+                    drivers.push(ep);
+                } else if (ep.direction === 'source') {
+                    cm5Captures.push(ep);
+                } else {
+                    cm5Playbacks.push(ep);
+                }
             });
-            pwEndpointBlocks.forEach(b => {
-                const epId = b.dataset.epId;
-                const defY = 0;
-                nodePositions[epId] = { x: 600, y: defY };
-                b.style.transform = `translate(600px, ${defY}px)`;
+
+            // Categorize PipeWire Nodes into Families
+            const pwPlaybacks = [];
+            const pwCaptures = [];
+            Object.values(pwGraph.nodes).forEach(node => {
+                if (node.is_input) {
+                    pwCaptures.push(node);
+                } else {
+                    pwPlaybacks.push(node);
+                }
             });
+
+            // --- Column 0 (X = 0): CM5 Captures ---
+            let yCol0 = 0;
+            if (cm5Captures.length > 0) {
+                stackFamily(cm5Captures, 0, yCol0, false);
+            }
+
+            // --- Column 1 (X = 340): CM5 Playbacks ---
+            let yCol1 = 0;
+            if (cm5Playbacks.length > 0) {
+                stackFamily(cm5Playbacks, COL_WIDTH, yCol1, false);
+            }
+
+            // --- Column 2 (X = 680): System Drivers & Utilities ---
+            let yCol2 = 0;
+            if (drivers.length > 0) {
+                stackFamily(drivers, COL_WIDTH * 2, yCol2, false);
+            }
+
+            // --- Column 3 (X = 1020): PipeWire Playbacks (Outputs) ---
+            let yCol3 = 0;
+            if (pwPlaybacks.length > 0) {
+                stackFamily(pwPlaybacks, COL_WIDTH * 3, yCol3, true);
+            }
+
+            // --- Column 4 (X = 1360): PipeWire Captures (Inputs) ---
+            let yCol4 = 0;
+            if (pwCaptures.length > 0) {
+                stackFamily(pwCaptures, COL_WIDTH * 4, yCol4, true);
+            }
+
             localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+
+            // Apply positions instantly to DOM elements
+            endpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[id];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+            pwEndpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[`pw-${id}`];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+
             isInitialFitDone = false;
             autoFitViewport();
             drawCables();
+        }
+
+        function exportLayout() {
+            const data = localStorage.getItem('cm5_node_positions') || '{}';
+            const blob = new Blob([data], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `cm5_patchbay_layout_${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function importLayout(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const imported = JSON.parse(e.target.result);
+                    if (typeof imported !== 'object' || imported === null) {
+                        throw new Error('Invalid layout file format');
+                    }
+                    nodePositions = imported;
+                    localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+
+                    endpointBlocks.forEach((block, id) => {
+                        const pos = nodePositions[id];
+                        if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+                    });
+                    pwEndpointBlocks.forEach((block, id) => {
+                        const pos = nodePositions[`pw-${id}`];
+                        if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+                    });
+
+                    drawCables();
+                    alert('Layout successfully imported and applied!');
+                } catch (err) {
+                    alert('Failed to import layout: ' + err.message);
+                }
+                event.target.value = '';
+            };
+            reader.readAsText(file);
         }
 
         const patchbay = $('patchbay');
@@ -727,6 +868,10 @@
 
         patchbay.addEventListener('pointerdown', e => {
             if (e.target.closest('.endpoint-block') || e.target.closest('.cable') || e.target.closest('button')) return;
+            if (!e.ctrlKey && !e.metaKey) {
+                selectedNodeIds.clear();
+                document.querySelectorAll('.endpoint-block.multi-selected').forEach(b => b.classList.remove('multi-selected'));
+            }
             isDragging = true;
             startX = e.clientX - panX;
             startY = e.clientY - panY;
@@ -741,14 +886,27 @@
                 return;
             }
 
-            if (activeDraggedNode) {
+            if (activeDraggedNode && selectedNodeIds.size > 0) {
                 const dx = (e.clientX - nodeDragStart.mouseX) / scale;
                 const dy = (e.clientY - nodeDragStart.mouseY) / scale;
-                const newX = nodeDragStart.startX + dx;
-                const newY = nodeDragStart.startY + dy;
 
-                activeDraggedNode.style.transform = `translate(${newX}px, ${newY}px)`;
-                nodePositions[activeDraggedNode.dataset.epId] = { x: newX, y: newY };
+                selectedNodeIds.forEach(id => {
+                    const start = dragStartPositions.get(id);
+                    if (!start) return;
+                    let newX = start.x + dx;
+                    let newY = start.y + dy;
+
+                    if (snapToGridEnabled) {
+                        newX = Math.round(newX / GRID_SIZE) * GRID_SIZE;
+                        newY = Math.round(newY / GRID_SIZE) * GRID_SIZE;
+                    }
+
+                    const blockEl = document.querySelector(`[data-ep-id="${CSS.escape(id)}"]`);
+                    if (blockEl) {
+                        blockEl.style.transform = `translate(${newX}px, ${newY}px)`;
+                    }
+                    nodePositions[id] = { x: newX, y: newY };
+                });
                 drawCables();
                 return;
             }
@@ -773,7 +931,8 @@
                 let closestDest = null;
                 let minDist = 45;
 
-                document.querySelectorAll('#destinations .channel-row').forEach(row => {
+                document.querySelectorAll('.endpoint-block:not(.pw-block) .channel-row, .pw-block .channel-row').forEach(row => {
+                    if (row.id.startsWith('slot-') && row.id.includes(wiringSource.endpointId)) return;
                     const rowRect = row.getBoundingClientRect();
                     const rowCenterX = (rowRect.left + rowRect.width / 2 - viewportRect.left) / scale;
                     const rowCenterY = (rowRect.top + rowRect.height / 2 - viewportRect.top) / scale;
@@ -788,7 +947,7 @@
                 document.querySelectorAll('.channel-row.snapped').forEach(r => r.classList.remove('snapped'));
                 if (closestDest) {
                     closestDest.classList.add('snapped');
-                    const parts = closestDest.id.replace('slot-', '').split('-');
+                    const parts = closestDest.id.replace('slot-', '').replace('pw-slot-', '').split('-');
                     const ch = parseInt(parts.pop());
                     const epId = parts.join('-');
                     snappedDestination = { endpointId: epId, channel: ch };
@@ -991,7 +1150,9 @@
                 graph = await fetchAPI('/api/graph');
                 renderPatchbay();
                 updateSysInfo();
-                if (!isInitialFitDone) {
+                if (!isInitialFitDone && Object.keys(nodePositions).length === 0) {
+                    autoOrganizeLayout();
+                } else if (!isInitialFitDone) {
                     setTimeout(autoFitViewport, 50);
                 }
             } catch (e) {
@@ -1036,31 +1197,23 @@
         }
 
         function renderPatchbay() {
-            const srcCont = $('sources');
-            const destCont = $('destinations');
+            const viewport = $('patchbay-viewport');
             const currentEndpoints = new Set(graph.endpoints.map(e => e.id));
 
-            [srcCont, destCont].forEach(cont => {
-                Array.from(cont.children).forEach(child => {
-                    const id = child.dataset.epId;
-                    if (!currentEndpoints.has(id)) {
-                        endpointBlocks.delete(id);
-                        child.style.opacity = '0';
-                        child.style.transform = 'scale(0.8)';
-                        setTimeout(() => child.remove(), 300);
-                    }
-                });
+            endpointBlocks.forEach((block, id) => {
+                if (!currentEndpoints.has(id)) {
+                    endpointBlocks.delete(id);
+                    block.style.opacity = '0';
+                    block.style.transform = 'scale(0.8)';
+                    setTimeout(() => block.remove(), 300);
+                }
             });
 
-            let srcIndex = 0;
-            let destIndex = 0;
-
-            graph.endpoints.forEach(ep => {
+            graph.endpoints.forEach((ep, idx) => {
                 const isSource = ep.direction === 'source';
-                const idx = isSource ? srcIndex++ : destIndex++;
 
                 if (!nodePositions[ep.id]) {
-                    nodePositions[ep.id] = { x: 0, y: idx * 160 };
+                    nodePositions[ep.id] = { x: isSource ? 0 : 340, y: idx * 180 };
                 }
 
                 let block = endpointBlocks.get(ep.id);
@@ -1071,8 +1224,7 @@
                 }
                 if (!block) {
                     block = createEndpointBlock(ep);
-                    if (isSource) srcCont.appendChild(block);
-                    else destCont.appendChild(block);
+                    viewport.appendChild(block);
                 } else {
                     block.querySelector('.endpoint-header').textContent = ep.name || ep.id;
                     const pos = nodePositions[ep.id];
@@ -1089,27 +1241,17 @@
         }
 
         function renderPipewirePatchbay() {
-            const pwSrcCont = $('pw-sources');
-            const pwDestCont = $('pw-destinations');
+            const viewport = $('patchbay-viewport');
             const currentNodeIds = new Set(Object.keys(pwGraph.nodes).map(Number));
 
-            [pwSrcCont, pwDestCont].forEach(cont => {
-                Array.from(cont.children).forEach(child => {
-                    const id = Number(child.dataset.epId?.replace('pw-', ''));
-                    if (!currentNodeIds.has(id)) {
-                        pwEndpointBlocks.delete(id);
-                        child.remove();
-                    }
-                });
+            pwEndpointBlocks.forEach((block, id) => {
+                if (!currentNodeIds.has(id)) {
+                    pwEndpointBlocks.delete(id);
+                    block.remove();
+                }
             });
 
-            let srcIdx = 0;
-            let destIdx = 0;
-
-            Object.values(pwGraph.nodes).forEach(node => {
-                const isInput = node.is_input;
-                const cont = isInput ? pwDestCont : pwSrcCont;
-
+            Object.values(pwGraph.nodes).forEach((node, idx) => {
                 const ports = new Set();
                 pwGraph.links.forEach(l => {
                     if (l.source_node === node.id) ports.add(l.source_port);
@@ -1117,17 +1259,17 @@
                 });
                 const portList = Array.from(ports).sort((a, b) => a - b);
                 if (portList.length === 0) {
-                    portList.push(1, 2); // Default fallback ports if none registered yet
+                    portList.push(1, 2);
                 }
 
                 if (!nodePositions[`pw-${node.id}`]) {
-                    nodePositions[`pw-${node.id}`] = { x: 600, y: (isInput ? destIdx++ : srcIdx++) * 160 };
+                    nodePositions[`pw-${node.id}`] = { x: 1020, y: idx * 180 };
                 }
 
                 let block = pwEndpointBlocks.get(node.id);
                 if (!block) {
                     block = createPwEndpointBlock(node, portList);
-                    cont.appendChild(block);
+                    viewport.appendChild(block);
                 } else {
                     block.querySelector('.endpoint-header').textContent = node.name || `PW Node ${node.id}`;
                     const pos = nodePositions[`pw-${node.id}`];
@@ -1139,6 +1281,47 @@
             if (activeTabName === 'patchbay') {
                 setTimeout(drawCables, 50);
             }
+        }
+
+        function setupBlockDragging(block, epId) {
+            const header = block.querySelector('.endpoint-header');
+            header.addEventListener('pointerdown', e => {
+                if (e.button !== 0) return;
+
+                if (e.ctrlKey || e.metaKey) {
+                    if (selectedNodeIds.has(epId)) {
+                        selectedNodeIds.delete(epId);
+                        block.classList.remove('multi-selected');
+                    } else {
+                        selectedNodeIds.add(epId);
+                        block.classList.add('multi-selected');
+                    }
+                } else {
+                    if (!selectedNodeIds.has(epId)) {
+                        document.querySelectorAll('.endpoint-block.multi-selected').forEach(b => b.classList.remove('multi-selected'));
+                        selectedNodeIds.clear();
+                        selectedNodeIds.add(epId);
+                        block.classList.add('multi-selected');
+                    }
+                }
+
+                activeDraggedNode = block;
+                dragStartPositions.clear();
+                selectedNodeIds.forEach(id => {
+                    const b = document.querySelector(`[data-ep-id="${CSS.escape(id)}"]`);
+                    const pos = nodePositions[id] || { x: 0, y: 0 };
+                    dragStartPositions.set(id, { x: pos.x, y: pos.y });
+                    if (b) b.classList.add('multi-selected');
+                });
+
+                nodeDragStart = { mouseX: e.clientX, mouseY: e.clientY };
+                header.setPointerCapture(e.pointerId);
+                e.stopPropagation();
+            });
+
+            header.addEventListener('pointerup', e => {
+                try { header.releasePointerCapture(e.pointerId); } catch(err){}
+            });
         }
 
         function createEndpointBlock(ep) {
@@ -1155,21 +1338,8 @@
             const header = document.createElement('div');
             header.className = 'endpoint-header';
             header.textContent = ep.name || ep.id;
-
-            header.addEventListener('pointerdown', e => {
-                if (e.button !== 0) return;
-                activeDraggedNode = block;
-                const currentPos = nodePositions[ep.id] || { x: 0, y: 0 };
-                nodeDragStart = { mouseX: e.clientX, mouseY: e.clientY, startX: currentPos.x, startY: currentPos.y };
-                header.setPointerCapture(e.pointerId);
-                e.stopPropagation();
-            });
-
-            header.addEventListener('pointerup', e => {
-                try { header.releasePointerCapture(e.pointerId); } catch(err){}
-            });
-
             block.appendChild(header);
+            setupBlockDragging(block, ep.id);
 
             for (let i = 0; i < ep.channels; i++) {
                 const row = document.createElement('div');
@@ -1212,27 +1382,14 @@
             block.id = `pw-block-${node.id}`;
             block.dataset.epId = `pw-${node.id}`;
 
-            const pos = nodePositions[`pw-${node.id}`] || { x: 600, y: 0 };
+            const pos = nodePositions[`pw-${node.id}`] || { x: 1020, y: 0 };
             block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
 
             const header = document.createElement('div');
             header.className = 'endpoint-header';
             header.textContent = node.name || `PW Node ${node.id}`;
-
-            header.addEventListener('pointerdown', e => {
-                if (e.button !== 0) return;
-                activeDraggedNode = block;
-                const currentPos = nodePositions[`pw-${node.id}`] || { x: 600, y: 0 };
-                nodeDragStart = { mouseX: e.clientX, mouseY: e.clientY, startX: currentPos.x, startY: currentPos.y };
-                header.setPointerCapture(e.pointerId);
-                e.stopPropagation();
-            });
-
-            header.addEventListener('pointerup', e => {
-                try { header.releasePointerCapture(e.pointerId); } catch(err){}
-            });
-
             block.appendChild(header);
+            setupBlockDragging(block, `pw-${node.id}`);
 
             portList.forEach((portId) => {
                 const row = document.createElement('div');
@@ -1905,53 +2062,6 @@
             });
         }
         init();
-
-function exportLayout() {
-    const data = localStorage.getItem('cm5_node_positions') || '{}';
-    const blob = new Blob([data], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `cm5_patchbay_layout_${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-}
-
-function importLayout(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            const imported = JSON.parse(e.target.result);
-            if (typeof imported !== 'object' || imported === null) {
-                throw new Error('Invalid layout file format');
-            }
-
-            nodePositions = imported;
-            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
-
-            // Immediately apply imported positions to active blocks on screen
-            endpointBlocks.forEach((block, id) => {
-                const pos = nodePositions[id];
-                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
-            });
-            pwEndpointBlocks.forEach((block, id) => {
-                const pos = nodePositions[`pw-${id}`];
-                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
-            });
-
-            drawCables();
-            alert('Layout successfully imported and applied!');
-        } catch (err) {
-            alert('Failed to import layout: ' + err.message);
-        }
-        event.target.value = ''; // Reset file picker state
-    };
-    reader.readAsText(file);
-}
     </script>
     <script src="client/plugin_demo.js"></script>
 </body>

@@ -593,6 +593,7 @@
         const $ = id => document.getElementById(id);
         let graph = { endpoints: [], routes: [] };
         let pwGraph = { nodes: {}, links: [] };
+        let pwLayoutAssignments = new Map();
         let pipewireGraphLoadInProgress = false;
         let pipewireGraphPollingEnabled = true;
         let pipewireGraphSnapshot = null;
@@ -809,6 +810,7 @@
         }*/
 
 function autoOrganizeLayout() {
+            refreshPipeWireLayoutAssignments();
             nodePositions = {};
             const TIGHT_GAP = 10;     // Tightly packed gap for matching family node windows
             const COL_WIDTH = 340;    // Horizontal spacing between major columns
@@ -839,7 +841,7 @@ function autoOrganizeLayout() {
                 let currentY = startY;
                 items.forEach(item => {
                     const id = isPw ? item.id : item.id;
-                    const key = isPw ? `pw-${id}` : id;
+                    const key = isPw ? getPipeWireLayoutKey(item) : id;
                     nodePositions[key] = { x: colX, y: currentY };
                     currentY += getNodeHeight(id, isPw) + TIGHT_GAP;
                 });
@@ -867,10 +869,17 @@ function autoOrganizeLayout() {
             const pwPlaybacks = [];  // Sinks / input ports -> Playbacks stack
             const pwDrivers = [];    // Drivers & Utilities
 
+            const pwApplications = [];
             Object.values(pwGraph.nodes).forEach(node => {
+                if (isPipeWireInfrastructureNode(node)) {
+                    pwDrivers.push(node);
+                    return;
+                }
                 const name = (node.name || '').toLowerCase();
                 if (name.includes('freewheel') || name.includes('dummy') || name.includes('midi')) {
                     pwDrivers.push(node);
+                } else if (isPipeWireApplicationStream(node)) {
+                    pwApplications.push(node);
                 } else if (!node.is_input) {
                     // is_input = false means Source (produces audio -> Captures column)
                     pwCaptures.push(node);
@@ -891,15 +900,24 @@ function autoOrganizeLayout() {
             let yCol2 = 0;
             if (cm5Drivers.length > 0) stackFamily(cm5Drivers, COL_WIDTH * 2, yCol2, false);
 
-            // Right Side: PipeWire Native Windows (Columns 3, 4, 5)
+            const sortByPipeWireLayoutName = (a, b) => {
+                const aa = pwLayoutAssignments.get(Number(a.id));
+                const bb = pwLayoutAssignments.get(Number(b.id));
+                const byFamily = (aa?.familyKey || '').localeCompare(bb?.familyKey || '');
+                return byFamily || (aa?.ordinal || 0) - (bb?.ordinal || 0);
+            };
+            [pwApplications, pwCaptures, pwPlaybacks, pwDrivers].forEach(family => family.sort(sortByPipeWireLayoutName));
+            // Right Side: application streams, hardware endpoints, and infrastructure
+            let yApp = 0;
+            if (pwApplications.length > 0) stackFamily(pwApplications, COL_WIDTH * 3, yApp, true);
             let yCol3 = 0;
-            if (pwCaptures.length > 0) stackFamily(pwCaptures, COL_WIDTH * 3, yCol3, true);
+            if (pwCaptures.length > 0) stackFamily(pwCaptures, COL_WIDTH * 4, yCol3, true);
 
             let yCol4 = 0;
-            if (pwPlaybacks.length > 0) stackFamily(pwPlaybacks, COL_WIDTH * 4, yCol4, true);
+            if (pwPlaybacks.length > 0) stackFamily(pwPlaybacks, COL_WIDTH * 5, yCol4, true);
 
             let yCol5 = 0;
-            if (pwDrivers.length > 0) stackFamily(pwDrivers, COL_WIDTH * 5, yCol5, true);
+            if (pwDrivers.length > 0) stackFamily(pwDrivers, COL_WIDTH * 6, yCol5, true);
 
             localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
 
@@ -909,7 +927,8 @@ function autoOrganizeLayout() {
                 if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
             });
             pwEndpointBlocks.forEach((block, id) => {
-                const pos = nodePositions[`pw-${id}`];
+                const node = pwGraph.nodes[id];
+                const pos = node ? nodePositions[getPipeWireLayoutKey(node)] : null;
                 if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
             });
 
@@ -942,6 +961,8 @@ function autoOrganizeLayout() {
                         throw new Error('Invalid layout file format');
                     }
                     nodePositions = imported;
+                    refreshPipeWireLayoutAssignments();
+                    migratePipeWireLayoutPositions();
                     localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
 
                     endpointBlocks.forEach((block, id) => {
@@ -949,7 +970,8 @@ function autoOrganizeLayout() {
                         if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
                     });
                     pwEndpointBlocks.forEach((block, id) => {
-                        const pos = nodePositions[`pw-${id}`];
+                        const node = pwGraph.nodes[id];
+                        const pos = node ? nodePositions[getPipeWireLayoutKey(node)] : null;
                         if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
                     });
 
@@ -1442,8 +1464,102 @@ function autoOrganizeLayout() {
             return `${normalName} [cm5audio]`;
         }
 
+        function normalizePipeWireLayoutName(value) {
+            return String(value || 'unknown').normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+        }
+        function isPipeWireInfrastructureNode(node) {
+            const normalize = value => String(value || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+            return [normalize(node.name), normalize(node.description)].some(name =>
+                name === 'midi-bridge' || name === 'dummy-driver' || name === 'freewheel-driver');
+        }
+        function isPipeWireApplicationStream(node) {
+            if (isPipeWireInfrastructureNode(node)) return false;
+            if (isCm5AudioPipeWireNode(node)) return true;
+            const mediaClass = String(node.media_class || '').trim().toLowerCase();
+            if (/^(audio|midi)\/(sink|source|device)(\/|$)/.test(mediaClass)) return false;
+            if (mediaClass.startsWith('stream/')) return true;
+            const clientName = String(node.client_name || '').trim().toLowerCase();
+            return (clientName !== '' && clientName !== 'pipewire') || Number(node.process_id) > 0;
+        }
+        function getPipeWireDefaultColumn(node) {
+            if (isPipeWireInfrastructureNode(node)) return 6;
+            if (isPipeWireApplicationStream(node)) return 3;
+            return node.is_input ? 5 : 4;
+        }
+        function buildPipeWireLayoutAssignments() {
+            const groups = new Map();
+            Object.values(pwGraph.nodes).forEach(node => {
+                const baseLabel = getPipeWireDisplayLabel(node);
+                const familyKey = normalizePipeWireLayoutName(baseLabel);
+                if (!groups.has(familyKey)) groups.set(familyKey, []);
+                groups.get(familyKey).push({ node, baseLabel, familyKey });
+            });
+            const assignments = new Map();
+            for (const [familyKey, items] of groups) {
+                items.sort((a, b) => {
+                    const ap = Number(a.node.process_id) || 0;
+                    const bp = Number(b.node.process_id) || 0;
+                    if (ap !== bp) {
+                        if (ap === 0) return 1;
+                        if (bp === 0) return -1;
+                        return ap - bp;
+                    }
+                    const as = Number(a.node.object_serial) || 0;
+                    const bs = Number(b.node.object_serial) || 0;
+                    if (as !== bs) {
+                        if (as === 0) return 1;
+                        if (bs === 0) return -1;
+                        return as - bs;
+                    }
+                    return Number(a.node.id) - Number(b.node.id);
+                });
+                items.forEach((item, ordinal) => {
+                    assignments.set(Number(item.node.id), {
+                        key: `pw-layout:${familyKey}:${ordinal}`,
+                        familyKey,
+                        ordinal,
+                        displayLabel: ordinal === 0 ? item.baseLabel : `${item.baseLabel}-${ordinal}`
+                    });
+                });
+            }
+            return assignments;
+        }
+        function refreshPipeWireLayoutAssignments() {
+            pwLayoutAssignments = buildPipeWireLayoutAssignments();
+        }
+        function getPipeWireLayoutAssignment(nodeOrId) {
+            const id = nodeOrId && typeof nodeOrId === 'object' ? nodeOrId.id : nodeOrId;
+            return pwLayoutAssignments.get(Number(id)) || null;
+        }
+        function getPipeWireLayoutKey(nodeOrId) {
+            const assignment = getPipeWireLayoutAssignment(nodeOrId);
+            if (assignment) return assignment.key;
+            const node = nodeOrId && typeof nodeOrId === 'object' ? nodeOrId : pwGraph.nodes[Number(nodeOrId)];
+            const label = node ? getPipeWireDisplayLabel(node) : String(nodeOrId || 'unknown');
+            return `pw-layout:${normalizePipeWireLayoutName(label)}:0`;
+        }
+        function getPipeWireLayoutLabel(node) {
+            const assignment = getPipeWireLayoutAssignment(node);
+            return assignment ? assignment.displayLabel : getPipeWireDisplayLabel(node);
+        }
+        function getPipeWireLayoutPosition(node, index = 0) {
+            const layoutKey = getPipeWireLayoutKey(node);
+            const legacyKey = `pw-${node.id}`;
+            if (!hasOwn(nodePositions, layoutKey) && hasOwn(nodePositions, legacyKey)) {
+                nodePositions[layoutKey] = nodePositions[legacyKey];
+            }
+            if (hasOwn(nodePositions, legacyKey)) delete nodePositions[legacyKey];
+            if (!nodePositions[layoutKey]) {
+                nodePositions[layoutKey] = { x: getPipeWireDefaultColumn(node) * 340, y: index * 180 };
+            }
+            return nodePositions[layoutKey];
+        }
+        function migratePipeWireLayoutPositions() {
+            Object.values(pwGraph.nodes).forEach((node, index) => getPipeWireLayoutPosition(node, index));
+        }
         function renderPipewirePatchbay() {
             const viewport = $('patchbay-viewport');
+            refreshPipeWireLayoutAssignments();
             const currentNodeIds = new Set(Object.keys(pwGraph.nodes).map(Number));
 
             pwEndpointBlocks.forEach((block, id) => {
@@ -1464,24 +1580,23 @@ function autoOrganizeLayout() {
                     portList.push(1, 2);
                 }
                 const portSignature = portList.join(',');
+                const layoutKey = getPipeWireLayoutKey(node);
 
                 let block = pwEndpointBlocks.get(node.id);
-                if (block && block.dataset.portSignature !== portSignature) {
+                if (block && (block.dataset.portSignature !== portSignature || block.dataset.layoutKey !== layoutKey)) {
                     block.remove();
                     pwEndpointBlocks.delete(node.id);
                     block = null;
                 }
-
-                if (!nodePositions[`pw-${node.id}`]) {
-                    nodePositions[`pw-${node.id}`] = { x: 1020, y: idx * 180 };
-                }
+                const pos = getPipeWireLayoutPosition(node, idx);
 
                 if (!block) {
                     block = createPwEndpointBlock(node, portList);
                     viewport.appendChild(block);
                 } else {
-                    block.querySelector('.endpoint-header').textContent = getPipeWireDisplayLabel(node);
-                    const pos = nodePositions[`pw-${node.id}`];
+                    block.querySelector('.endpoint-header').textContent = getPipeWireLayoutLabel(node);
+                    block.dataset.epId = layoutKey;
+                    block.dataset.layoutKey = layoutKey;
                     block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
                 }
             });
@@ -1617,17 +1732,19 @@ function autoOrganizeLayout() {
             const block = document.createElement('div');
             block.className = 'endpoint-block pw-block';
             block.id = `pw-block-${node.id}`;
-            block.dataset.epId = `pw-${node.id}`;
+            const layoutKey = getPipeWireLayoutKey(node);
+            block.dataset.epId = layoutKey;
+            block.dataset.layoutKey = layoutKey;
             block.dataset.portSignature = portList.join(',');
 
-            const pos = nodePositions[`pw-${node.id}`] || { x: 1020, y: 0 };
+            const pos = getPipeWireLayoutPosition(node, 0);
             block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
 
             const header = document.createElement('div');
             header.className = 'endpoint-header';
-            header.textContent = getPipeWireDisplayLabel(node);
+            header.textContent = getPipeWireLayoutLabel(node);
             block.appendChild(header);
-            setupBlockDragging(block, `pw-${node.id}`);
+            setupBlockDragging(block, layoutKey);
 
             portList.forEach((portId, index) => {
                 const row = document.createElement('div');

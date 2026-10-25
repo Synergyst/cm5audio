@@ -90,6 +90,18 @@ std::string backend_error(const char* operation, ma_result result) {
            " (" + std::to_string(result) + ")";
 }
 
+uint64_t pipewire_property_u64(const struct spa_dict* props, const char* key) {
+    const char* text = props ? spa_dict_lookup(props, key) : nullptr;
+    if (!text || !*text) return 0;
+    try {
+        std::size_t used = 0;
+        const auto value = std::stoull(text, &used, 10);
+        return used == std::strlen(text) ? static_cast<uint64_t>(value) : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
 bool fail(std::string* error, const std::string& message) {
     if (error) *error = message;
     return false;
@@ -644,15 +656,82 @@ static const struct pw_node_events node_info_events = {
     .info = pipewire_node_info_changed,
 };
 
+void DeviceManager::refresh_pipewire_process_ids_locked() {
+    for (auto& [nodeId, node] : m_pw_graph.nodes) {
+        (void)nodeId;
+        node.process_id = node.reported_process_id;
+        if (node.process_id != 0) continue;
+
+        const PipeWireClientInfo* matched = nullptr;
+        if (node.client_id != 0) {
+            const auto it = m_pw_clients_by_id.find(node.client_id);
+            if (it != m_pw_clients_by_id.end() && it->second.process_id != 0)
+                matched = &it->second;
+        }
+
+        const std::string nodeClientName = !node.client_name.empty()
+            ? node.client_name
+            : (!node.app_name.empty() ? node.app_name : node.name);
+        const auto namesMatch = [&node, &nodeClientName](const PipeWireClientInfo& client) {
+            if (!nodeClientName.empty() &&
+                (client.name == nodeClientName || client.app_name == nodeClientName))
+                return true;
+            return !node.app_name.empty() && !client.app_name.empty() &&
+                   node.app_name == client.app_name;
+        };
+
+        if (!matched && node.object_serial > 0) {
+            for (const auto& [clientId, client] : m_pw_clients_by_id) {
+                (void)clientId;
+                if (client.process_id == 0 || client.object_serial == 0) continue;
+                if (client.object_serial + 1 != node.object_serial) continue;
+                if (!namesMatch(client)) continue;
+                matched = &client;
+                break;
+            }
+        }
+
+        if (!matched && !nodeClientName.empty()) {
+            const PipeWireClientInfo* unique = nullptr;
+            bool ambiguous = false;
+            for (const auto& [clientId, client] : m_pw_clients_by_id) {
+                (void)clientId;
+                if (client.process_id == 0 || !namesMatch(client)) continue;
+                if (node.object_serial > 0 && client.object_serial >= node.object_serial) continue;
+                if (unique) { ambiguous = true; break; }
+                unique = &client;
+            }
+            if (!ambiguous) matched = unique;
+        }
+        if (matched) node.process_id = matched->process_id;
+    }
+}
+
 void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props) {
     auto* manager = static_cast<DeviceManager*>(data);
     std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
 
+    if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0) {
+        PipeWireClientInfo client;
+        const char* name = props ? spa_dict_lookup(props, PW_KEY_CLIENT_NAME) : nullptr;
+        const char* app_name = props ? spa_dict_lookup(props, PW_KEY_APP_NAME) : nullptr;
+        client.name = name ? name : "";
+        client.app_name = app_name ? app_name : "";
+        client.object_serial = pipewire_property_u64(props, "object.serial");
+        client.process_id = pipewire_property_u64(props, PW_KEY_APP_PROCESS_ID);
+        manager->m_pw_clients_by_id[id] = std::move(client);
+        manager->refresh_pipewire_process_ids_locked();
+        return;
+    }
     if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
         const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
         const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
         const char* media_class = props ? spa_dict_lookup(props, "media.class") : nullptr;
         const char* app_name = props ? spa_dict_lookup(props, PW_KEY_APP_NAME) : nullptr;
+        const char* client_name = props ? spa_dict_lookup(props, PW_KEY_CLIENT_NAME) : nullptr;
+        const uint32_t client_id = static_cast<uint32_t>(pipewire_property_u64(props, PW_KEY_CLIENT_ID));
+        const uint64_t object_serial = pipewire_property_u64(props, "object.serial");
+        const uint64_t reported_process_id = pipewire_property_u64(props, PW_KEY_APP_PROCESS_ID);
 
         // Our monitor streams are implementation details, not patchbay nodes.
         // Hide them before adding them to the graph and remember their IDs so
@@ -688,8 +767,14 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
             audioLayout.channels,
             audioLayout.positions,
             false,
-            app_name ? app_name : ""
+            app_name ? app_name : "",
+            client_name ? client_name : "",
+            client_id,
+            object_serial,
+            reported_process_id,
+            reported_process_id
         };
+        manager->refresh_pipewire_process_ids_locked();
         manager->rebuild_pipewire_visible_links_locked();
 
         // Bind the actual node and wait for pw_node_info.props before creating
@@ -776,7 +861,9 @@ void registry_global_remove(void *data, uint32_t id) {
     }
     {
         std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
+        manager->m_pw_clients_by_id.erase(id);
         manager->m_pw_graph.nodes.erase(id);
+        manager->refresh_pipewire_process_ids_locked();
         manager->m_pw_ignored_nodes.erase(id);
         manager->m_pw_links_by_id.erase(id); // The removed global may itself be a link.
         auto& linksById = manager->m_pw_links_by_id;

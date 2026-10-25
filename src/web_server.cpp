@@ -1144,6 +1144,11 @@ bool WebServer::start() {
                     {"name", node.name},
                     {"description", node.description},
                     {"app_name", node.app_name},
+                    {"client_name", node.client_name},
+                    {"client_id", node.client_id},
+                    {"process_id", node.process_id},
+                    {"object_serial", node.object_serial},
+                    {"media_class", node.media_class},
                     {"is_input", node.is_input}
                 });
             }

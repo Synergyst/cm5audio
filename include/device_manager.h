@@ -72,6 +72,12 @@ struct AudioDeviceInfo {
 };
 
 // PipeWire Patchbay Structures
+struct PipeWireClientInfo {
+    uint64_t object_serial = 0;
+    std::string name;
+    std::string app_name;
+    uint64_t process_id = 0;
+};
 struct PipeWireNode {
     uint32_t id;
     std::string name;
@@ -82,6 +88,11 @@ struct PipeWireNode {
     std::vector<uint32_t> audio_positions; // SPA channel-position enum in stream channel order.
     bool audio_layout_resolved = false; // Set only after pw_node_info.props is received.
     std::string app_name; // PipeWire application name, used to identify CM5Audio nodes in the UI.
+    std::string client_name;
+    uint32_t client_id = 0;
+    uint64_t object_serial = 0;
+    uint64_t reported_process_id = 0;
+    uint64_t process_id = 0;
 };
 
 struct PipeWireLink {
@@ -188,6 +199,7 @@ private:
     };
     static int invoke_monitor_operation(struct spa_loop*, bool, uint32_t,
                                         const void*, std::size_t, void*);
+    void refresh_pipewire_process_ids_locked();
     static int invoke_pipewire_cleanup(struct spa_loop*, bool, uint32_t,
                                        const void*, std::size_t, void*);
     void start_node_monitor_in_loop(uint32_t nodeId, const std::string& name,
@@ -214,6 +226,7 @@ private:
     std::thread m_pw_thread;
     std::mutex m_pw_graph_lock;
     PipeWireGraph m_pw_graph;
+    std::unordered_map<uint32_t, PipeWireClientInfo> m_pw_clients_by_id;
     std::unordered_set<uint32_t> m_pw_ignored_nodes;
     std::unordered_map<uint32_t, PipeWireLink> m_pw_links_by_id;
     // Node proxy listeners are created, updated, and destroyed on the PipeWire loop.

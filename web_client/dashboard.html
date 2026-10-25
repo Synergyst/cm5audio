@@ -16,6 +16,12 @@
             --accent-red: #bf616a;
             --accent-yellow: #ebcb8b;
             --highlight: #5e81ac;
+            /* Native PipeWire Theme (Purple / Magenta) */
+            --pw-primary: #b48ead;
+            --pw-border: #564c65;
+            --pw-bg: #1e1b24;
+            --pw-cable: #b48ead;
+            --pw-selected: rgba(180, 142, 173, 0.25);
         }
         * { box-sizing: border-box; }
         body {
@@ -129,8 +135,9 @@
             left: 0;
             display: flex;
             justify-content: space-between;
+            gap: 40px;
             padding: 60px;
-            min-width: 2500px;
+            min-width: 3200px;
             min-height: 2000px;
             transform-origin: 0 0;
             will-change: transform;
@@ -157,6 +164,22 @@
             transition: border-color 0.2s;
         }
         .endpoint-block.active-block { border-color: var(--accent-blue); }
+        
+        /* Native PipeWire Block Theme */
+        .endpoint-block.pw-block {
+            border-color: var(--pw-border);
+            background: var(--pw-bg);
+        }
+        .endpoint-block.pw-block.active-block { border-color: var(--pw-primary); }
+        .endpoint-block.pw-block .endpoint-header {
+            color: var(--pw-primary);
+            border-bottom-color: var(--pw-border);
+        }
+        .endpoint-block.pw-block .channel-row.selected {
+            background: var(--pw-selected);
+            outline: 1px solid var(--pw-primary);
+        }
+
         .endpoint-header {
             font-weight: bold;
             margin-bottom: 8px;
@@ -231,6 +254,13 @@
         .cable:hover { stroke-width: 6; }
         .cable-fx {
             filter: drop-shadow(0 0 4px var(--accent-blue));
+        }
+        .cable.pw-cable {
+            stroke: var(--pw-primary);
+            stroke-dasharray: 4 2;
+        }
+        .cable.pw-cable:hover {
+            filter: drop-shadow(0 0 4px var(--pw-primary));
         }
         .temp-cable {
             fill: none;
@@ -442,15 +472,25 @@
                 <span id="zoom-indicator" style="font-size: 11px; min-width: 40px; text-align: center; color: var(--accent-blue); font-weight: bold;">100%</span>
                 <button onclick="zoomOut()" style="padding: 4px 10px; min-height: 28px;">-</button>
                 <button onclick="resetZoom()" style="padding: 4px 10px; min-height: 28px;">RESET</button>
-                <button onclick="resetNodePositions()" style="padding: 4px 10px; min-height: 28px; background: #4c566a; margin-left: 10px;">RESET POSITIONS</button>            <button onclick="PluginDemo.spawnNode()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 10px;">ADD DUMMY PLUGIN</button>
+                <button onclick="resetNodePositions()" style="padding: 4px 10px; min-height: 28px; background: #4c566a; margin-left: 10px;">RESET POSITIONS</button>
+                <button onclick="PluginDemo.spawnNode()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 10px;">ADD DUMMY PLUGIN</button>
+                <!-- Layout Backup Controls -->
+                <button onclick="exportLayout()" style="background: #a3be8c; color: #000; font-weight: bold; margin-left: 20px;">EXPORT LAYOUT</button>
+                <button onclick="$('layout-file-input').click()" style="background: #88c0d0; color: #000; font-weight: bold;">IMPORT LAYOUT</button>
+                <input type="file" id="layout-file-input" style="display: none;" accept=".json" onchange="importLayout(event)">
             </div>
             <div id="patchbay">
                 <div id="patchbay-viewport">
                     <svg id="cable-svg" width="100%" height="100%" style="overflow: visible;">
                         <path id="temp-cable" class="temp-cable" d="" style="display: none;"></path>
                     </svg>
+                    <!-- Internal cm5audio Columns -->
                     <div class="column" id="sources"></div>
                     <div class="column" id="destinations"></div>
+                    
+                    <!-- Native PipeWire Columns -->
+                    <div class="column" id="pw-sources"></div>
+                    <div class="column" id="pw-destinations"></div>
                 </div>
             </div>
         </div>
@@ -555,14 +595,14 @@
     <script>
         const $ = id => document.getElementById(id);
         let graph = { endpoints: [], routes: [] };
+        let pwGraph = { nodes: {}, links: [] };
         let activeSource = null;
         let editingRouteId = null;
         let activeTabName = 'patchbay';
 
-        // Endpoint Map Lookup
         let endpointBlocks = new Map();
+        let pwEndpointBlocks = new Map();
 
-        // DSP metadata and modal draft are deliberately separate from server state.
         let dspDiscovery = { status: 'idle', processors: [], maxChainLength: null, error: '' };
         let dspDiscoveryRequest = 0;
         let currentRouteDspState = null;
@@ -574,20 +614,16 @@
         const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
         const displayJson = value => JSON.stringify(value) ?? '(not supplied)';
 
-        // Node Positions State
         let nodePositions = JSON.parse(localStorage.getItem('cm5_node_positions') || '{}');
         let activeDraggedNode = null;
         let nodeDragStart = { mouseX: 0, mouseY: 0, startX: 0, startY: 0 };
 
-        // Drag-to-Wire State
         let isWiringDrag = false;
         let wiringSource = null;
         let snappedDestination = null;
 
-        // Meter Cache
         let cachedMeters = [];
 
-        // Pan & Zoom State
         let scale = 1.0;
         let panX = 0;
         let panY = 0;
@@ -660,6 +696,12 @@
                 const defY = idx * 160;
                 nodePositions[epId] = { x: 0, y: defY };
                 b.style.transform = `translate(0px, ${defY}px)`;
+            });
+            pwEndpointBlocks.forEach(b => {
+                const epId = b.dataset.epId;
+                const defY = 0;
+                nodePositions[epId] = { x: 600, y: defY };
+                b.style.transform = `translate(600px, ${defY}px)`;
             });
             localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
             isInitialFitDone = false;
@@ -959,8 +1001,24 @@
             }
         }
 
+        async function loadPipewireGraph() {
+            try {
+                const data = await fetchAPI('/api/pipewire/graph');
+                pwGraph.nodes = {};
+                if (Array.isArray(data.nodes)) {
+                    data.nodes.forEach(n => pwGraph.nodes[n.id] = n);
+                } else if (data.nodes) {
+                    pwGraph.nodes = data.nodes;
+                }
+                pwGraph.links = data.links || [];
+                renderPipewirePatchbay();
+            } catch (e) {
+                console.error('PipeWire graph load failed', e);
+            }
+        }
+
         function updateSysInfo() {
-            $('sys-info').innerHTML = `<b>Endpoints:</b> ${graph.endpoints.length}<br><b>Active Routes:</b> ${graph.routes.length}`;
+            $('sys-info').innerHTML = `<b>Endpoints:</b> ${graph.endpoints.length}<br><b>Active Routes:</b> ${graph.routes.length}<br><b>PW Nodes:</b> ${Object.keys(pwGraph.nodes).length}`;
             $('status').textContent = 'Connected';
         }
 
@@ -1006,7 +1064,6 @@
                 }
 
                 let block = endpointBlocks.get(ep.id);
-                // Reconnects can change a device's width without changing its ID.
                 if (block && (Number(block.dataset.channels) !== ep.channels || block.dataset.direction !== ep.direction)) {
                     block.remove();
                     endpointBlocks.delete(ep.id);
@@ -1031,6 +1088,59 @@
             }
         }
 
+        function renderPipewirePatchbay() {
+            const pwSrcCont = $('pw-sources');
+            const pwDestCont = $('pw-destinations');
+            const currentNodeIds = new Set(Object.keys(pwGraph.nodes).map(Number));
+
+            [pwSrcCont, pwDestCont].forEach(cont => {
+                Array.from(cont.children).forEach(child => {
+                    const id = Number(child.dataset.epId?.replace('pw-', ''));
+                    if (!currentNodeIds.has(id)) {
+                        pwEndpointBlocks.delete(id);
+                        child.remove();
+                    }
+                });
+            });
+
+            let srcIdx = 0;
+            let destIdx = 0;
+
+            Object.values(pwGraph.nodes).forEach(node => {
+                const isInput = node.is_input;
+                const cont = isInput ? pwDestCont : pwSrcCont;
+
+                const ports = new Set();
+                pwGraph.links.forEach(l => {
+                    if (l.source_node === node.id) ports.add(l.source_port);
+                    if (l.dest_node === node.id) ports.add(l.dest_port);
+                });
+                const portList = Array.from(ports).sort((a, b) => a - b);
+                if (portList.length === 0) {
+                    portList.push(1, 2); // Default fallback ports if none registered yet
+                }
+
+                if (!nodePositions[`pw-${node.id}`]) {
+                    nodePositions[`pw-${node.id}`] = { x: 600, y: (isInput ? destIdx++ : srcIdx++) * 160 };
+                }
+
+                let block = pwEndpointBlocks.get(node.id);
+                if (!block) {
+                    block = createPwEndpointBlock(node, portList);
+                    cont.appendChild(block);
+                } else {
+                    block.querySelector('.endpoint-header').textContent = node.name || `PW Node ${node.id}`;
+                    const pos = nodePositions[`pw-${node.id}`];
+                    block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+                }
+            });
+
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+            if (activeTabName === 'patchbay') {
+                setTimeout(drawCables, 50);
+            }
+        }
+
         function createEndpointBlock(ep) {
             const block = document.createElement('div');
             block.className = 'endpoint-block';
@@ -1050,12 +1160,7 @@
                 if (e.button !== 0) return;
                 activeDraggedNode = block;
                 const currentPos = nodePositions[ep.id] || { x: 0, y: 0 };
-                nodeDragStart = {
-                    mouseX: e.clientX,
-                    mouseY: e.clientY,
-                    startX: currentPos.x,
-                    startY: currentPos.y
-                };
+                nodeDragStart = { mouseX: e.clientX, mouseY: e.clientY, startX: currentPos.x, startY: currentPos.y };
                 header.setPointerCapture(e.pointerId);
                 e.stopPropagation();
             });
@@ -1071,8 +1176,6 @@
                 row.className = 'channel-row';
                 row.id = `slot-${ep.id}-${i}`;
 
-                // Sources (Outputs): [VU Meter] [CH Label] (label closest to right edge/cables)
-                // Destinations (Inputs): [CH Label] [VU Meter] (label closest to left edge/cables)
                 if (ep.direction === 'source') {
                     row.innerHTML = `<div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div><span class="ch-label" style="text-align: right;">CH${i+1}</span>`;
                 } else {
@@ -1100,6 +1203,46 @@
             }
 
             endpointBlocks.set(ep.id, block);
+            return block;
+        }
+
+        function createPwEndpointBlock(node, portList) {
+            const block = document.createElement('div');
+            block.className = 'endpoint-block pw-block';
+            block.id = `pw-block-${node.id}`;
+            block.dataset.epId = `pw-${node.id}`;
+
+            const pos = nodePositions[`pw-${node.id}`] || { x: 600, y: 0 };
+            block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+
+            const header = document.createElement('div');
+            header.className = 'endpoint-header';
+            header.textContent = node.name || `PW Node ${node.id}`;
+
+            header.addEventListener('pointerdown', e => {
+                if (e.button !== 0) return;
+                activeDraggedNode = block;
+                const currentPos = nodePositions[`pw-${node.id}`] || { x: 600, y: 0 };
+                nodeDragStart = { mouseX: e.clientX, mouseY: e.clientY, startX: currentPos.x, startY: currentPos.y };
+                header.setPointerCapture(e.pointerId);
+                e.stopPropagation();
+            });
+
+            header.addEventListener('pointerup', e => {
+                try { header.releasePointerCapture(e.pointerId); } catch(err){}
+            });
+
+            block.appendChild(header);
+
+            portList.forEach((portId) => {
+                const row = document.createElement('div');
+                row.className = 'channel-row';
+                row.id = `pw-slot-${node.id}-${portId}`;
+                row.innerHTML = node.is_input ? `<span class="ch-label">P${portId}</span><div class="vu-container"></div>` : `<div class="vu-container"></div><span class="ch-label" style="text-align: right;">P${portId}</span>`;
+                block.appendChild(row);
+            });
+
+            pwEndpointBlocks.set(node.id, block);
             return block;
         }
 
@@ -1153,46 +1296,76 @@
 
             const viewportRect = $('patchbay-viewport').getBoundingClientRect();
 
-            if (!graph.routes || graph.routes.length === 0) return;
+            // 1. Render Internal cm5audio Routes
+            if (graph.routes && graph.routes.length > 0) {
+                graph.routes.forEach((route) => {
+                    const srcRef = route.source_node !== undefined ? route.source_node : route.source;
+                    const destRef = route.destination_node !== undefined ? route.destination_node : route.destination;
 
-            graph.routes.forEach((route, idx) => {
-                const srcRef = route.source_node !== undefined ? route.source_node : route.source;
-                const destRef = route.destination_node !== undefined ? route.destination_node : route.destination;
+                    const srcEpId = getEndpointId(srcRef);
+                    const destEpId = getEndpointId(destRef);
 
-                const srcEpId = getEndpointId(srcRef);
-                const destEpId = getEndpointId(destRef);
+                    const srcSlotId = `slot-${srcEpId}-${route.source_channel}`;
+                    const destSlotId = `slot-${destEpId}-${route.destination_channel}`;
 
-                const srcSlotId = `slot-${srcEpId}-${route.source_channel}`;
-                const destSlotId = `slot-${destEpId}-${route.destination_channel}`;
+                    const srcEl = $(srcSlotId);
+                    const destEl = $(destSlotId);
+                    if (!srcEl || !destEl) return;
 
-                const srcEl = $(srcSlotId);
-                const destEl = $(destSlotId);
-                if (!srcEl || !destEl) return;
+                    const srcRect = srcEl.getBoundingClientRect();
+                    const destRect = destEl.getBoundingClientRect();
 
-                const srcRect = srcEl.getBoundingClientRect();
-                const destRect = destEl.getBoundingClientRect();
+                    const x1 = (srcRect.right - viewportRect.left) / scale;
+                    const y1 = (srcRect.top + srcRect.height/2 - viewportRect.top) / scale;
+                    const x2 = (destRect.left - viewportRect.left) / scale;
+                    const y2 = (destRect.top + destRect.height/2 - viewportRect.top) / scale;
 
-                const x1 = (srcRect.right - viewportRect.left) / scale;
-                const y1 = (srcRect.top + srcRect.height/2 - viewportRect.top) / scale;
-                const x2 = (destRect.left - viewportRect.left) / scale;
-                const y2 = (destRect.top + destRect.height/2 - viewportRect.top) / scale;
+                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    const cp1x = x1 + (x2 - x1) * 0.5;
+                    const cp2x = x1 + (x2 - x1) * 0.5;
+                    path.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`);
+                    path.setAttribute('class', 'cable');
 
-                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                const cp1x = x1 + (x2 - x1) * 0.5;
-                const cp2x = x1 + (x2 - x1) * 0.5;
-                path.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`);
-                path.setAttribute('class', 'cable');
+                    const strokeColor = route.enabled ? '#88c0d0' : '#bf616a';
+                    path.setAttribute('stroke', strokeColor);
 
-                const strokeColor = route.enabled ? '#88c0d0' : '#bf616a';
-                path.setAttribute('stroke', strokeColor);
+                    if (route.dsp_active) {
+                        path.classList.add('cable-fx');
+                    }
 
-                if (route.dsp_active) {
-                    path.classList.add('cable-fx');
-                }
+                    path.onclick = () => openRouteModal(route);
+                    svg.appendChild(path);
+                });
+            }
 
-                path.onclick = () => openRouteModal(route);
-                svg.appendChild(path);
-            });
+            // 2. Render Native PipeWire Links
+            if (pwGraph.links && pwGraph.links.length > 0) {
+                pwGraph.links.forEach((link) => {
+                    const srcSlotId = `pw-slot-${link.source_node}-${link.source_port}`;
+                    const destSlotId = `pw-slot-${link.dest_node}-${link.dest_port}`;
+
+                    const srcEl = $(srcSlotId);
+                    const destEl = $(destSlotId);
+                    if (!srcEl || !destEl) return;
+
+                    const srcRect = srcEl.getBoundingClientRect();
+                    const destRect = destEl.getBoundingClientRect();
+
+                    const x1 = (srcRect.right - viewportRect.left) / scale;
+                    const y1 = (srcRect.top + srcRect.height/2 - viewportRect.top) / scale;
+                    const x2 = (destRect.left - viewportRect.left) / scale;
+                    const y2 = (destRect.top + destRect.height/2 - viewportRect.top) / scale;
+
+                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    const cp1x = x1 + (x2 - x1) * 0.5;
+                    const cp2x = x1 + (x2 - x1) * 0.5;
+                    path.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`);
+                    path.setAttribute('class', 'cable pw-cable');
+                    path.setAttribute('stroke', 'var(--pw-primary)');
+
+                    svg.appendChild(path);
+                });
+            }
         }
 
         function dspText(tag, text, className = '') {
@@ -1348,7 +1521,6 @@
             renderDspChain();
             updateModalControls();
 
-            // Always rediscover on open: plugins may have changed after a backend restart.
             const discovery = loadDspAvailable();
             try {
                 const dspData = await fetchAPI(`/api/routes/${encodeURIComponent(route.id)}/dsp`, { cache: 'no-store' });
@@ -1386,7 +1558,6 @@
         }
 
         function setDraftParam(processor, key, value) {
-            // defineProperty also safely handles metadata IDs such as "__proto__".
             Object.defineProperty(processor.params, key, { value, writable: true, configurable: true, enumerable: true });
         }
 
@@ -1706,13 +1877,12 @@
         async function resetClips() { try { await fetchAPI('/api/reset_clips?all=1', { method: 'POST' }); } catch (e) {} }
         async function saveSettings() {
             try {
-                // Closing the inspector discards its draft. SAVE never reads it.
                 const result = await fetchAPI('/api/settings/save', { method: 'POST' });
                 if (!result.adopted || !result.persisted) throw new Error(result.message || 'Apply/save was not confirmed');
                 alert('Applied configuration saved');
             } catch (e) { alert(e.message); }
         }
-        async function refreshAll() { await Promise.all([loadGraph(), loadDevices(), loadDspAvailable()]); }
+        async function refreshAll() { await Promise.all([loadGraph(), loadPipewireGraph(), loadDevices(), loadDspAvailable()]); }
 
         const viewportObserver = new ResizeObserver(() => {
             drawCables();
@@ -1728,12 +1898,60 @@
             Promise.allSettled([
                 loadDevices(),
                 loadGraph(),
+                loadPipewireGraph(),
                 loadDspAvailable()
             ]).then(() => {
-                if ($('status'))$('status').textContent = 'Ready';
+                if ($('status')) $('status').textContent = 'Ready';
             });
         }
         init();
+
+function exportLayout() {
+    const data = localStorage.getItem('cm5_node_positions') || '{}';
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cm5_patchbay_layout_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function importLayout(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            const imported = JSON.parse(e.target.result);
+            if (typeof imported !== 'object' || imported === null) {
+                throw new Error('Invalid layout file format');
+            }
+
+            nodePositions = imported;
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+
+            // Immediately apply imported positions to active blocks on screen
+            endpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[id];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+            pwEndpointBlocks.forEach((block, id) => {
+                const pos = nodePositions[`pw-${id}`];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+
+            drawCables();
+            alert('Layout successfully imported and applied!');
+        } catch (err) {
+            alert('Failed to import layout: ' + err.message);
+        }
+        event.target.value = ''; // Reset file picker state
+    };
+    reader.readAsText(file);
+}
     </script>
     <script src="client/plugin_demo.js"></script>
 </body>

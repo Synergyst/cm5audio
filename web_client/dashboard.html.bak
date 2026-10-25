@@ -130,19 +130,22 @@
             display: flex;
             justify-content: space-between;
             padding: 60px;
-            min-width: 1100px;
+            min-width: 2500px;
+            min-height: 2000px;
             transform-origin: 0 0;
             will-change: transform;
         }
 
         .column {
-            display: flex;
-            flex-direction: column;
-            gap: 25px;
-            z-index: 5;
+            position: relative;
             width: 260px;
+            min-height: 2000px;
+            z-index: 5;
         }
         .endpoint-block {
+            position: absolute;
+            top: 0;
+            left: 0;
             background: var(--panel-bg);
             border: 2px solid var(--border-color);
             border-radius: 8px;
@@ -150,7 +153,6 @@
             width: 100%;
             box-shadow: 0 4px 15px rgba(0,0,0,0.5);
             cursor: default;
-            position: relative;
             user-select: none;
             transition: border-color 0.2s;
         }
@@ -214,7 +216,8 @@
             left: 0;
             width: 100%;
             height: 100%;
-            pointer-events: none;
+            overflow: visible;
+            pointer-events: auto;
             z-index: 1;
         }
         .cable {
@@ -356,22 +359,35 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 8px;
             font-weight: bold;
             color: var(--accent-blue);
             font-size: 12px;
         }
         .dsp-processor-params {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 6px;
+            grid-template-columns: 1fr;
+            gap: 8px;
             font-size: 11px;
         }
-        .dsp-processor-params .control-row {
-            margin: 0;
+        .dsp-processor-params .control-row { margin: 0; }
+        .dsp-processor-params input, .dsp-processor-params select {
+            width: 140px;
+            max-width: 50%;
         }
-        .dsp-processor-params input {
-            width: 70px;
+        .dsp-help {
+            color: var(--text-dim);
+            font-size: 11px;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
         }
+        .dsp-warning { color: var(--accent-yellow); }
+        .dsp-error { color: var(--accent-red); }
+        .dsp-message { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .dsp-processor-card.unavailable { border-color: var(--accent-yellow); }
+        .dsp-actions { display: flex; gap: 4px; flex-shrink: 0; }
+        .dsp-small-btn { padding: 2px 6px; min-height: 26px; font-size: 11px; }
+        .dsp-extra-param { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
         .chain-arrow {
             text-align: center;
             color: var(--text-dim);
@@ -382,7 +398,7 @@
             background: var(--accent-red);
             padding: 2px 6px;
             font-size: 10px;
-            min-height: auto;
+            min-height: 26px;
         }
         #error-overlay {
             position: fixed;
@@ -426,11 +442,11 @@
                 <span id="zoom-indicator" style="font-size: 11px; min-width: 40px; text-align: center; color: var(--accent-blue); font-weight: bold;">100%</span>
                 <button onclick="zoomOut()" style="padding: 4px 10px; min-height: 28px;">-</button>
                 <button onclick="resetZoom()" style="padding: 4px 10px; min-height: 28px;">RESET</button>
-                <button onclick="resetNodePositions()" style="padding: 4px 10px; min-height: 28px; background: #4c566a; margin-left: 10px;">RESET POSITIONS</button>
+                <button onclick="resetNodePositions()" style="padding: 4px 10px; min-height: 28px; background: #4c566a; margin-left: 10px;">RESET POSITIONS</button>            <button onclick="PluginDemo.spawnNode()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 10px;">ADD DUMMY PLUGIN</button>
             </div>
             <div id="patchbay">
                 <div id="patchbay-viewport">
-                    <svg id="cable-svg">
+                    <svg id="cable-svg" width="100%" height="100%" style="overflow: visible;">
                         <path id="temp-cable" class="temp-cable" d="" style="display: none;"></path>
                     </svg>
                     <div class="column" id="sources"></div>
@@ -486,53 +502,53 @@
     </main>
 
     <div class="modal-overlay" id="overlay" onclick="closeModal()"></div>
-    <div id="route-modal">
-        <h2 style="margin-top:0; font-size: 15px; color: var(--accent-blue)">Route Inspector & DSP Chain</h2>
+    <div id="route-modal" role="dialog" aria-modal="true" aria-labelledby="route-modal-title">
+        <h2 id="route-modal-title" style="margin-top:0; font-size: 15px; color: var(--accent-blue)">Route Inspector & DSP Chain</h2>
         <div id="route-info" style="margin-bottom: 12px; font-family: monospace; font-size: 11px; word-break: break-all;"></div>
-        
+        <div id="route-error" class="dsp-error dsp-message" role="alert" hidden></div>
+        <div id="dsp-state-status" class="dsp-help dsp-message" role="status"></div>
+        <div id="dsp-route-warning" class="dsp-warning dsp-message" role="status" hidden></div>
+
         <div class="control-group">
             <div class="control-row">
-                <label>Route Gain</label>
-                <input type="number" id="modal-gain" step="0.01">
+                <label for="modal-gain">Route Gain</label>
+                <input type="number" id="modal-gain" step="any" required>
             </div>
             <div class="control-row">
-                <label>Route Enabled</label>
+                <label for="modal-enabled">Route Enabled</label>
                 <select id="modal-enabled"><option value="1">ON</option><option value="0">OFF</option></select>
             </div>
         </div>
 
         <div class="dsp-section">
             <div class="control-row" style="margin-bottom: 8px;">
-                <label style="font-weight: bold; color: var(--accent-blue);">DSP Block Active</label>
-                <select id="modal-dsp-active" onchange="onDspActiveChange()">
+                <label for="modal-dsp-active" style="font-weight: bold; color: var(--accent-blue);">DSP Block Active</label>
+                <select id="modal-dsp-active">
                     <option value="true">ACTIVE</option>
                     <option value="false">BYPASS</option>
                 </select>
             </div>
             <div class="control-row" style="margin-bottom: 10px;">
-                <label>DSP Master Gain</label>
-                <input type="number" id="modal-dsp-gain" step="0.01" onchange="onDspGainChange()">
+                <label for="modal-dsp-gain">DSP Master Gain</label>
+                <input type="number" id="modal-dsp-gain" step="any" required>
             </div>
-            
+
             <label style="font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;">Processor Chain</label>
+            <div id="dsp-discovery-status" class="dsp-help dsp-message" role="status"></div>
+            <button id="dsp-discovery-retry" class="dsp-small-btn" onclick="loadDspAvailable()">Refresh processors</button>
             <div id="dsp-chain-list" class="dsp-chain-container"></div>
 
             <div class="control-row" style="margin-top: 10px; gap: 8px;">
-                <select id="new-processor-type" style="flex: 1;">
-                    <option value="gain">Gain</option>
-                    <option value="compressor">Compressor</option>
-                    <option value="eq">EQ Filter</option>
-                    <option value="limiter">Limiter</option>
-                    <option value="passthrough">Passthrough</option>
-                </select>
-                <button onclick="addProcessorToChain()">Add to Chain</button>
+                <select id="new-processor-type" aria-label="Processor to add" style="flex: 1;" disabled></select>
+                <button id="dsp-add" onclick="addProcessorToChain()" disabled>Add to Chain</button>
             </div>
+            <div class="dsp-help" style="margin-top: 8px;">Changes are local until APPLY. CANCEL discards unapplied edits.</div>
         </div>
 
         <div class="toolbar" style="justify-content: flex-end; margin-top: 18px; border-top: 1px solid var(--border-color); padding-top: 12px;">
-            <button onclick="closeModal()">CANCEL</button>
-            <button class="primary" onclick="saveRoute()">APPLY</button>
-            <button style="background: var(--accent-red)" onclick="deleteRoute()">DELETE ROUTE</button>
+            <button id="route-cancel" onclick="closeModal()">CLOSE</button>
+            <button id="route-apply" class="primary" onclick="saveRoute()" disabled>APPLY</button>
+            <button id="route-delete" style="background: var(--accent-red)" onclick="deleteRoute()">DELETE ROUTE</button>
         </div>
     </div>
 
@@ -543,24 +559,35 @@
         let editingRouteId = null;
         let activeTabName = 'patchbay';
 
-        // DSP Chain Local State for Route Inspector
-        let currentRouteDspState = {
-            active: false,
-            gain: 1.0,
-            chain: []
-        };
+        // Endpoint Map Lookup
+        let endpointBlocks = new Map();
 
-        // Node Positions (Draggable Windows) State
+        // DSP metadata and modal draft are deliberately separate from server state.
+        let dspDiscovery = { status: 'idle', processors: [], maxChainLength: null, error: '' };
+        let dspDiscoveryRequest = 0;
+        let currentRouteDspState = null;
+        let dspParameterBindings = [];
+        let modalSession = 0;
+        let modalBusy = false;
+        const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+        const cloneJson = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+        const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+        const displayJson = value => JSON.stringify(value) ?? '(not supplied)';
+
+        // Node Positions State
         let nodePositions = JSON.parse(localStorage.getItem('cm5_node_positions') || '{}');
         let activeDraggedNode = null;
         let nodeDragStart = { mouseX: 0, mouseY: 0, startX: 0, startY: 0 };
 
-        // Desktop Drag-to-Wire State
+        // Drag-to-Wire State
         let isWiringDrag = false;
         let wiringSource = null;
         let snappedDestination = null;
 
-        // Isolated Pan & Zoom State
+        // Meter Cache
+        let cachedMeters = [];
+
+        // Pan & Zoom State
         let scale = 1.0;
         let panX = 0;
         let panY = 0;
@@ -626,9 +653,15 @@
         function resetNodePositions() {
             localStorage.removeItem('cm5_node_positions');
             nodePositions = {};
-            document.querySelectorAll('.endpoint-block').forEach(b => {
-                b.style.transform = '';
+            endpointBlocks.forEach(b => {
+                const epId = b.dataset.epId;
+                const parent = b.parentElement;
+                const idx = Array.from(parent.children).indexOf(b);
+                const defY = idx * 160;
+                nodePositions[epId] = { x: 0, y: defY };
+                b.style.transform = `translate(0px, ${defY}px)`;
             });
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
             isInitialFitDone = false;
             autoFitViewport();
             drawCables();
@@ -659,7 +692,6 @@
         });
 
         patchbay.addEventListener('pointermove', e => {
-            // 1. Handle canvas panning
             if (isDragging) {
                 panX = e.clientX - startX;
                 panY = e.clientY - startY;
@@ -667,7 +699,6 @@
                 return;
             }
 
-            // 2. Handle endpoint window dragging
             if (activeDraggedNode) {
                 const dx = (e.clientX - nodeDragStart.mouseX) / scale;
                 const dy = (e.clientY - nodeDragStart.mouseY) / scale;
@@ -680,7 +711,6 @@
                 return;
             }
 
-            // 3. Handle Desktop Drag-to-Wire
             if (isWiringDrag && wiringSource) {
                 const viewportRect = $('patchbay-viewport').getBoundingClientRect();
                 const mouseX = (e.clientX - viewportRect.left) / scale;
@@ -692,16 +722,14 @@
                 const x1 = (srcRect.right - viewportRect.left) / scale;
                 const y1 = (srcRect.top + srcRect.height/2 - viewportRect.top) / scale;
 
-                // Update temp cable path
                 const tempCable = $('temp-cable');
                 tempCable.style.display = 'block';
                 const cp1x = x1 + (mouseX - x1) * 0.5;
                 const cp2x = x1 + (mouseX - x1) * 0.5;
                 tempCable.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${mouseY}, ${mouseX} ${mouseY}`);
 
-                // Check snapping to nearby destination channel rows
                 let closestDest = null;
-                let minDist = 45; // snap threshold in pixels
+                let minDist = 45;
 
                 document.querySelectorAll('#destinations .channel-row').forEach(row => {
                     const rowRect = row.getBoundingClientRect();
@@ -802,15 +830,26 @@
             setTimeout(() => { el.style.display = 'none'; }, 5000);
         }
 
-        async function fetchAPI(url, options = {}) {
+        let mutationQueue = Promise.resolve();
+        function fetchAPI(url, options = {}) {
+            if ((options.method || 'GET').toUpperCase() === 'GET') return requestAPI(url, options);
+            const result = mutationQueue.then(() => requestAPI(url, options));
+            mutationQueue = result.catch(() => {});
+            return result;
+        }
+
+        async function requestAPI(url, options = {}) {
             const absoluteUrl = url.startsWith('/') ? url : '/' + url;
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 5000);
             try {
                 const res = await fetch(absoluteUrl, { ...options, signal: controller.signal });
                 clearTimeout(timeout);
-                if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-                return await res.json();
+                const body = await res.json();
+                if (!res.ok || (body.status && body.status !== 'ok')) {
+                    throw new Error(body.message || `HTTP ${res.status}`);
+                }
+                return body;
             } catch (e) {
                 clearTimeout(timeout);
                 throw e;
@@ -820,33 +859,88 @@
         async function loadDevices() {
             try {
                 const devices = await fetchAPI('/api/devices');
-                const graphData = await fetchAPI('/api/graph');
-                const activeIds = new Set(graphData.endpoints.filter(e => e.id.startsWith('hardware/')).map(e => e.id.replace('hardware/', '').replace('/capture', '').replace('/playback', '')));
-                $('device-list').innerHTML = devices.map(dev => `
-                    <div class="device-item ${activeIds.has(dev.id) ? 'active' : ''}">
-                        <div class="device-info">
-                            <span class="device-name">${dev.name}</span>
-                            <span class="device-id">${dev.id}</span>
-                        </div>
-                        <button onclick="toggleDevice('${dev.id}', ${activeIds.has(dev.id)})">
-                            ${activeIds.has(dev.id) ? 'DEACTIVATE' : 'ACTIVATE'}
-                        </button>
-                    </div>
-                `).join('') || 'No devices found';
-            } catch (e) {
-                $('device-list').textContent = 'Error loading devices: ' + e.message;
+                const groups = new Map();
+                for (const device of devices) {
+                    if (!groups.has(device.id)) groups.set(device.id, []);
+                    groups.get(device.id).push(device);
+                }
+                const list = $('device-list');
+                list.replaceChildren();
+                const note = document.createElement('p');
+                note.textContent = 'Stream channels: 0 = backend automatic (not maximum). Select explicit counts when needed; deactivate first to change an active stream. PulseAudio/PipeWire profiles and JACK connections are managed externally. Engine: float32, 48 kHz.';
+                list.appendChild(note);
+                for (const [id, endpoints] of groups) {
+                    const active = endpoints.some(device => device.active);
+                    const row = document.createElement('div');
+                    row.className = 'device-item' + (active ? ' active' : '');
+                    const info = document.createElement('div');
+                    info.className = 'device-info';
+                    const name = document.createElement('strong');
+                    name.textContent = endpoints[0].name;
+                    const identity = document.createElement('small');
+                    identity.textContent = `${endpoints[0].backend}: ${id}`;
+                    info.append(name, identity);
+                    const controls = {};
+                    for (const device of endpoints) {
+                        const direction = device.is_capture ? 'capture' : 'playback';
+                        const label = document.createElement('label');
+                        label.textContent = `${direction} channels `;
+                        const input = document.createElement('input');
+                        input.type = 'number'; input.min = 0; input.max = device.max_channels || 254; input.step = 1;
+                        input.value = device[direction + '_channels'] || 0;
+                        input.disabled = active;
+                        label.appendChild(input); info.appendChild(label);
+                        controls[direction] = input;
+                        if (device.layout) {
+                            const details = document.createElement('small');
+                            const layout = device.layout;
+                            details.textContent = `${direction}: client ${layout.client_channels} ch / ${layout.client_sample_rate} Hz → backend ${layout.internal_channels} ch / ${layout.internal_sample_rate} Hz / ${layout.internal_format}`;
+                            info.appendChild(details);
+                        }
+                        const probe = document.createElement('button');
+                        probe.textContent = `PROBE ${direction.toUpperCase()} CAPABILITIES`;
+                        probe.disabled = active;
+                        const result = document.createElement('pre');
+                        result.style.whiteSpace = 'pre-wrap'; result.style.maxWidth = '100%';
+                        probe.onclick = async () => {
+                            if (!window.confirm('Detailed probing may briefly open this device. Continue?')) return;
+                            probe.disabled = true;
+                            try {
+                                const caps = await fetchAPI(`/api/devices/capabilities?id=${encodeURIComponent(id)}&is_capture=${device.is_capture}`);
+                                result.textContent = caps.native_formats.map(format =>
+                                    `${format.format} / ${format.channels || 'any'} ch / ${format.sample_rate || 'any'} Hz`).join('\n') || 'No detailed formats reported';
+                                result.textContent += '\n' + caps.note;
+                            } catch (error) { result.textContent = error.message; }
+                            finally { probe.disabled = false; }
+                        };
+                        info.append(probe, result);
+                    }
+                    const button = document.createElement('button');
+                    button.textContent = active ? 'DEACTIVATE' : 'ACTIVATE';
+                    button.onclick = async () => {
+                        const params = new URLSearchParams({id});
+                        if (!active) {
+                            for (const [direction, input] of Object.entries(controls)) {
+                                if (!input.reportValidity() || !Number.isInteger(Number(input.value))) return;
+                                params.set(direction + '_channels', input.value);
+                            }
+                        }
+                        button.disabled = true;
+                        try {
+                            const result = await fetchAPI(`/api/devices/${active ? 'deactivate' : 'activate'}?${params}`, {method: 'POST'});
+                            if (result.warning) alert(result.warning);
+                            await loadDevices(); await loadGraph();
+                        } catch (error) { alert('Device action failed: ' + error.message); }
+                        finally { button.disabled = false; }
+                    };
+                    row.append(info, button); list.appendChild(row);
+                }
+                if (!groups.size) {
+                    const empty = document.createElement('p'); empty.textContent = 'No devices found'; list.appendChild(empty);
+                }
+            } catch (error) {
+                $('device-list').textContent = 'Error loading devices: ' + error.message;
                 showError('Failed to load hardware devices');
-            }
-        }
-
-        async function toggleDevice(id, isActive) {
-            const endpoint = isActive ? '/api/devices/deactivate' : '/api/devices/activate';
-            try {
-                await fetchAPI(`${endpoint}?id=${encodeURIComponent(id)}`, { method: 'POST' });
-                await loadDevices();
-                await loadGraph();
-            } catch (e) {
-                alert('Device action failed: ' + e.message);
             }
         }
 
@@ -861,12 +955,26 @@
             } catch (e) {
                 console.error('Graph load failed', e);
                 showError('Failed to load routing graph');
+                throw e;
             }
         }
 
         function updateSysInfo() {
             $('sys-info').innerHTML = `<b>Endpoints:</b> ${graph.endpoints.length}<br><b>Active Routes:</b> ${graph.routes.length}`;
             $('status').textContent = 'Connected';
+        }
+
+        function rebuildMeterCache() {
+            cachedMeters = [];
+            graph.endpoints.forEach(ep => {
+                for (let i = 0; i < ep.channels; i++) {
+                    const fill = document.getElementById(`vu-${ep.id}-${i}`);
+                    const peak = document.getElementById(`peak-${ep.id}-${i}`);
+                    if (fill) {
+                        cachedMeters.push({ epId: ep.id, ch: i, fillEl: fill, peakEl: peak });
+                    }
+                }
+            });
         }
 
         function renderPatchbay() {
@@ -878,6 +986,7 @@
                 Array.from(cont.children).forEach(child => {
                     const id = child.dataset.epId;
                     if (!currentEndpoints.has(id)) {
+                        endpointBlocks.delete(id);
                         child.style.opacity = '0';
                         child.style.transform = 'scale(0.8)';
                         setTimeout(() => child.remove(), 300);
@@ -885,16 +994,37 @@
                 });
             });
 
+            let srcIndex = 0;
+            let destIndex = 0;
+
             graph.endpoints.forEach(ep => {
-                let block = $(`block-${CSS.escape(ep.id)}`);
+                const isSource = ep.direction === 'source';
+                const idx = isSource ? srcIndex++ : destIndex++;
+
+                if (!nodePositions[ep.id]) {
+                    nodePositions[ep.id] = { x: 0, y: idx * 160 };
+                }
+
+                let block = endpointBlocks.get(ep.id);
+                // Reconnects can change a device's width without changing its ID.
+                if (block && (Number(block.dataset.channels) !== ep.channels || block.dataset.direction !== ep.direction)) {
+                    block.remove();
+                    endpointBlocks.delete(ep.id);
+                    block = null;
+                }
                 if (!block) {
                     block = createEndpointBlock(ep);
-                    if (ep.direction === 'source') srcCont.appendChild(block);
+                    if (isSource) srcCont.appendChild(block);
                     else destCont.appendChild(block);
                 } else {
                     block.querySelector('.endpoint-header').textContent = ep.name || ep.id;
+                    const pos = nodePositions[ep.id];
+                    block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
                 }
             });
+
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
+            rebuildMeterCache();
 
             if (activeTabName === 'patchbay') {
                 setTimeout(drawCables, 50);
@@ -906,19 +1036,18 @@
             block.className = 'endpoint-block';
             block.id = `block-${ep.id}`;
             block.dataset.epId = ep.id;
+            block.dataset.channels = ep.channels;
+            block.dataset.direction = ep.direction;
 
-            // Apply saved position if present
-            if (nodePositions[ep.id]) {
-                block.style.transform = `translate(${nodePositions[ep.id].x}px, ${nodePositions[ep.id].y}px)`;
-            }
+            const pos = nodePositions[ep.id] || { x: 0, y: 0 };
+            block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
 
             const header = document.createElement('div');
             header.className = 'endpoint-header';
             header.textContent = ep.name || ep.id;
 
-            // Draggable Node Header Listener
             header.addEventListener('pointerdown', e => {
-                if (e.button !== 0) return; // Left click only
+                if (e.button !== 0) return;
                 activeDraggedNode = block;
                 const currentPos = nodePositions[ep.id] || { x: 0, y: 0 };
                 nodeDragStart = {
@@ -941,9 +1070,15 @@
                 const row = document.createElement('div');
                 row.className = 'channel-row';
                 row.id = `slot-${ep.id}-${i}`;
-                row.innerHTML = `<span class="ch-label">CH${i+1}</span><div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div>`;
-                
-                // Channel interactions (Click-to-click OR Desktop Drag-to-Wire)
+
+                // Sources (Outputs): [VU Meter] [CH Label] (label closest to right edge/cables)
+                // Destinations (Inputs): [CH Label] [VU Meter] (label closest to left edge/cables)
+                if (ep.direction === 'source') {
+                    row.innerHTML = `<div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div><span class="ch-label" style="text-align: right;">CH${i+1}</span>`;
+                } else {
+                    row.innerHTML = `<span class="ch-label">CH${i+1}</span><div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div>`;
+                }
+
                 row.onclick = () => handleSlotClick(ep, i);
 
                 if (ep.direction === 'source') {
@@ -951,12 +1086,11 @@
                         if (e.button !== 0) return;
                         isWiringDrag = true;
                         wiringSource = { endpointId: ep.id, channel: i };
-                        
-                        // Highlight selected source row visually
+
                         document.querySelectorAll('.channel-row.selected').forEach(el => el.classList.remove('selected'));
                         row.classList.add('selected');
                         activeSource = { endpointId: ep.id, channel: i };
-                        
+
                         patchbay.setPointerCapture(e.pointerId);
                         e.stopPropagation();
                     });
@@ -964,6 +1098,8 @@
 
                 block.appendChild(row);
             }
+
+            endpointBlocks.set(ep.id, block);
             return block;
         }
 
@@ -982,26 +1118,55 @@
 
         async function createRoute(srcId, srcCh, destId, destCh) {
             try {
-                await fetchAPI(`/api/routes?source=${encodeURIComponent(srcId)}&source_ch=${srcCh}&destination=${encodeURIComponent(destId)}&destination_ch=${destCh}&gain=1&enabled=1`, { method: 'POST' });
+                const params = new URLSearchParams({
+                    source_node: srcId,
+                    source_channel: srcCh,
+                    destination_node: destId,
+                    destination_channel: destCh,
+                    gain: 1.0,
+                    enabled: '1'
+                });
+                await fetchAPI(`/api/routes?${params.toString()}`, { method: 'POST' });
                 await loadGraph();
             } catch (e) {
                 alert('Routing failed: ' + e.message);
             }
         }
 
+        function getEndpointId(nodeRef) {
+            if (!graph.endpoints) return nodeRef;
+            const direct = graph.endpoints.find(e => e.id == nodeRef);
+            if (direct) return direct.id;
+            const idx = Number(nodeRef);
+            if (!isNaN(idx) && graph.endpoints[idx]) {
+                return graph.endpoints[idx].id;
+            }
+            return nodeRef;
+        }
+
         function drawCables() {
             if (activeTabName !== 'patchbay') return;
             const svg = $('cable-svg');
-            // Keep temp cable element when clearing SVG
-            const tempCable = $('temp-cable');
-            svg.innerHTML = '';
-            if (tempCable) svg.appendChild(tempCable);
+
+            const cables = svg.querySelectorAll('.cable');
+            cables.forEach(c => c.remove());
 
             const viewportRect = $('patchbay-viewport').getBoundingClientRect();
 
-            graph.routes.forEach(route => {
-                const srcEl = $(`slot-${route.source}-${route.source_channel}`);
-                const destEl = $(`slot-${route.destination}-${route.destination_channel}`);
+            if (!graph.routes || graph.routes.length === 0) return;
+
+            graph.routes.forEach((route, idx) => {
+                const srcRef = route.source_node !== undefined ? route.source_node : route.source;
+                const destRef = route.destination_node !== undefined ? route.destination_node : route.destination;
+
+                const srcEpId = getEndpointId(srcRef);
+                const destEpId = getEndpointId(destRef);
+
+                const srcSlotId = `slot-${srcEpId}-${route.source_channel}`;
+                const destSlotId = `slot-${destEpId}-${route.destination_channel}`;
+
+                const srcEl = $(srcSlotId);
+                const destEl = $(destSlotId);
                 if (!srcEl || !destEl) return;
 
                 const srcRect = srcEl.getBoundingClientRect();
@@ -1017,10 +1182,10 @@
                 const cp2x = x1 + (x2 - x1) * 0.5;
                 path.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`);
                 path.setAttribute('class', 'cable');
-                
-                let strokeColor = route.enabled ? 'var(--accent-blue)' : 'var(--accent-red)';
+
+                const strokeColor = route.enabled ? '#88c0d0' : '#bf616a';
                 path.setAttribute('stroke', strokeColor);
-                
+
                 if (route.dsp_active) {
                     path.classList.add('cable-fx');
                 }
@@ -1030,175 +1195,497 @@
             });
         }
 
+        function dspText(tag, text, className = '') {
+            const element = document.createElement(tag);
+            element.textContent = text;
+            element.className = className;
+            return element;
+        }
+
+        function setRouteError(message = '') {
+            $('route-error').textContent = message;
+            $('route-error').hidden = !message;
+        }
+
+        function validateDspDiscovery(data) {
+            if (!isObject(data) || data.schema_version !== 1 ||
+                !Number.isInteger(data.max_chain_length) || data.max_chain_length < 0 ||
+                !Array.isArray(data.processors)) {
+                throw new Error('Unsupported or invalid DSP discovery response (expected schema version 1).');
+            }
+            const types = new Set();
+            const parameterTypes = new Set(['number', 'integer', 'boolean', 'string', 'enum']);
+            for (const processor of data.processors) {
+                if (!isObject(processor) || typeof processor.type !== 'string' || !processor.type ||
+                    types.has(processor.type) || !isObject(processor.defaults) || !Array.isArray(processor.parameters)) {
+                    throw new Error('Invalid processor metadata in DSP discovery response.');
+                }
+                types.add(processor.type);
+                const ids = new Set();
+                for (const parameter of processor.parameters) {
+                    if (!isObject(parameter) || typeof parameter.id !== 'string' || !parameter.id ||
+                        ids.has(parameter.id) || !parameterTypes.has(parameter.type) || !hasOwn(parameter, 'default')) {
+                        throw new Error('Invalid parameter metadata for processor ' + processor.type + '.');
+                    }
+                    ids.add(parameter.id);
+                    if (parameter.type === 'enum' && (!Array.isArray(parameter.choices) ||
+                        parameter.choices.some(choice => !isObject(choice) || !hasOwn(choice, 'value')))) {
+                        throw new Error('Invalid enum choices for processor ' + processor.type + '.');
+                    }
+                    for (const bound of ['min', 'max', 'step']) {
+                        if (parameter[bound] != null && (!Number.isFinite(parameter[bound]) ||
+                            (bound === 'step' && parameter[bound] <= 0))) {
+                            throw new Error('Invalid numeric metadata for processor ' + processor.type + '.');
+                        }
+                    }
+                }
+            }
+            return data;
+        }
+
+        async function loadDspAvailable() {
+            const request = ++dspDiscoveryRequest;
+            dspDiscovery = { status: 'loading', processors: [], maxChainLength: null, error: '' };
+            renderDspDiscovery();
+            try {
+                const data = validateDspDiscovery(await fetchAPI('/api/dsp/available', { cache: 'no-store' }));
+                if (request !== dspDiscoveryRequest) return;
+                dspDiscovery = { status: 'ready', processors: data.processors, maxChainLength: data.max_chain_length, error: '' };
+            } catch (e) {
+                if (request !== dspDiscoveryRequest) return;
+                dspDiscovery = { status: 'error', processors: [], maxChainLength: null, error: e.message };
+                showError('DSP discovery failed: ' + e.message);
+            }
+            renderDspDiscovery();
+        }
+
+        function renderDspDiscovery() {
+            const select = $('new-processor-type');
+            const previous = select.value;
+            select.replaceChildren();
+            const status = $('dsp-discovery-status');
+            status.className = 'dsp-help dsp-message';
+            if (dspDiscovery.status === 'ready') {
+                for (const processor of dspDiscovery.processors) {
+                    const option = dspText('option', processor.name ?? processor.type);
+                    option.value = processor.type;
+                    option.title = processor.description ?? '';
+                    select.appendChild(option);
+                }
+                if (dspDiscovery.processors.some(processor => processor.type === previous)) select.value = previous;
+                const length = currentRouteDspState?.chain.length ?? 0;
+                status.textContent = `${dspDiscovery.processors.length} processors available. Chain: ${length}/${dspDiscovery.maxChainLength}.`;
+                if (dspDiscovery.processors.length === 0) status.textContent += ' No DSP processors are registered on this backend.';
+                if (length > dspDiscovery.maxChainLength) {
+                    status.classList.add('dsp-warning');
+                    status.textContent += ' Remove processors to meet the chain limit before applying.';
+                }
+            } else if (dspDiscovery.status === 'error') {
+                status.classList.add('dsp-error');
+                status.textContent = 'Unable to discover DSP processors: ' + dspDiscovery.error + '\nAdding and applying are disabled. Check the backend and use Refresh processors to retry.';
+            } else {
+                status.textContent = 'Loading DSP processors from the backend… Adding and applying are disabled until discovery succeeds.';
+            }
+            if (editingRouteId !== null && !modalBusy) renderDspChain();
+            updateModalControls();
+        }
+
+        function updateModalControls() {
+            const stateLocked = modalBusy || currentRouteDspState === null;
+            $('modal-gain').disabled = modalBusy;
+            $('modal-enabled').disabled = modalBusy;
+            $('modal-dsp-active').disabled = stateLocked;
+            $('modal-dsp-gain').disabled = stateLocked;
+            $('dsp-chain-list').querySelectorAll('input, select, button').forEach(control => {
+                control.disabled = stateLocked || control.dataset.locked === 'true';
+            });
+            const available = dspDiscovery.status === 'ready' && dspDiscovery.processors.length > 0;
+            $('new-processor-type').disabled = stateLocked || !available;
+            $('dsp-add').disabled = stateLocked || !available || currentRouteDspState.chain.length >= dspDiscovery.maxChainLength;
+            $('dsp-discovery-retry').disabled = modalBusy || dspDiscovery.status === 'loading';
+            $('route-apply').disabled = stateLocked || dspDiscovery.status !== 'ready';
+            $('route-apply').textContent = modalBusy ? 'WORKING…' : 'APPLY';
+            $('route-cancel').disabled = modalBusy;
+            $('route-delete').disabled = modalBusy;
+            $('route-modal').setAttribute('aria-busy', modalBusy ? 'true' : 'false');
+        }
+
+        function readDspState(data) {
+            if (!isObject(data) || typeof data.active !== 'boolean' || !Number.isFinite(data.gain) || !Array.isArray(data.chain)) {
+                throw new Error('Invalid route DSP state returned by the backend.');
+            }
+            return cloneJson({ active: data.active, gain: data.gain, chain: data.chain });
+        }
+
+        function showDspState(state) {
+            currentRouteDspState = state;
+            $('modal-dsp-active').value = state.active ? 'true' : 'false';
+            $('modal-dsp-gain').value = state.gain;
+            renderDspDiscovery();
+        }
+
         async function openRouteModal(route) {
+            if (modalBusy) return;
+            const session = ++modalSession;
             editingRouteId = route.id;
-            $('route-info').textContent = `${route.source} (CH${route.source_channel + 1}) \u2192 ${route.destination} (CH${route.destination_channel + 1})`;
+            currentRouteDspState = null;
+            dspParameterBindings = [];
+            setRouteError();
+            $('dsp-route-warning').hidden = true;
+            $('dsp-route-warning').textContent = '';
+            $('dsp-state-status').textContent = 'Loading saved route DSP state…';
+            $('modal-dsp-gain').value = '';
+            const srcRef = route.source_node !== undefined ? route.source_node : route.source;
+            const destRef = route.destination_node !== undefined ? route.destination_node : route.destination;
+            const srcEpId = getEndpointId(srcRef);
+            const destEpId = getEndpointId(destRef);
+
+            $('route-info').textContent = `${srcEpId} (CH${route.source_channel + 1}) \u2192 ${destEpId} (CH${route.destination_channel + 1})`;
             $('modal-gain').value = route.gain;
             $('modal-enabled').value = route.enabled ? '1' : '0';
-
-            try {
-                const dspData = await fetchAPI(`/api/routes/${route.id}/dsp`);
-                currentRouteDspState = {
-                    active: !!dspData.active,
-                    gain: dspData.gain !== undefined ? dspData.gain : 1.0,
-                    chain: Array.isArray(dspData.chain) ? dspData.chain : []
-                };
-            } catch (e) {
-                currentRouteDspState = { active: false, gain: 1.0, chain: [] };
-            }
-
-            $('modal-dsp-active').value = currentRouteDspState.active ? 'true' : 'false';
-            $('modal-dsp-gain').value = currentRouteDspState.gain;
+            $('overlay').style.display = 'block';
+            $('route-modal').style.display = 'block';
             renderDspChain();
+            updateModalControls();
 
-            $('overlay').style.display = 'block';$('route-modal').style.display = 'block';
+            // Always rediscover on open: plugins may have changed after a backend restart.
+            const discovery = loadDspAvailable();
+            try {
+                const dspData = await fetchAPI(`/api/routes/${encodeURIComponent(route.id)}/dsp`, { cache: 'no-store' });
+                if (session !== modalSession) return;
+                showDspState(readDspState(dspData));
+                $('dsp-state-status').textContent = '';
+                if (dspData.warning != null && dspData.warning !== '') {
+                    $('dsp-route-warning').textContent = 'Backend warning: ' + (typeof dspData.warning === 'string' ? dspData.warning : displayJson(dspData.warning));
+                    $('dsp-route-warning').hidden = false;
+                }
+            } catch (e) {
+                if (session !== modalSession) return;
+                $('dsp-state-status').textContent = '';
+                setRouteError('Cannot load saved DSP state: ' + e.message + '\nAPPLY is disabled to avoid overwriting it. Close and reopen this route to retry.');
+                updateModalControls();
+            }
+            await discovery;
         }
 
         function closeModal() {
+            if (modalBusy) return;
+            ++modalSession;
             editingRouteId = null;
-            $('overlay').style.display = 'none';$('route-modal').style.display = 'none';
+            currentRouteDspState = null;
+            dspParameterBindings = [];
+            $('overlay').style.display = 'none';
+            $('route-modal').style.display = 'none';
+        }
+
+        function dspButton(text, handler, className = 'dsp-small-btn') {
+            const button = dspText('button', text, className);
+            button.type = 'button';
+            button.addEventListener('click', handler);
+            return button;
+        }
+
+        function setDraftParam(processor, key, value) {
+            // defineProperty also safely handles metadata IDs such as "__proto__".
+            Object.defineProperty(processor.params, key, { value, writable: true, configurable: true, enumerable: true });
+        }
+
+        function renderDspParameter(processor, descriptor, parameter, container, index) {
+            const key = parameter.id;
+            const defaultValue = parameter.default ?? descriptor.defaults[key];
+            if (!hasOwn(processor.params, key) && defaultValue !== undefined) {
+                setDraftParam(processor, key, cloneJson(defaultValue));
+            }
+            const savedValue = hasOwn(processor.params, key) ? processor.params[key] : undefined;
+            const wrapper = document.createElement('div');
+            const row = dspText('div', '', 'control-row');
+            const label = dspText('label', (parameter.name ?? key) + (parameter.unit ? ` (${parameter.unit})` : ''));
+            const control = document.createElement(parameter.type === 'boolean' || parameter.type === 'enum' ? 'select' : 'input');
+            control.id = `dsp-param-${index}-${dspParameterBindings.length}`;
+            label.htmlFor = control.id;
+            let readValue;
+            let validateType;
+            if (parameter.type === 'boolean' || parameter.type === 'enum') {
+                const choices = parameter.type === 'boolean' ? [{ label: 'True', value: true }, { label: 'False', value: false }] : parameter.choices;
+                const match = choices.findIndex(choice => displayJson(choice.value) === displayJson(savedValue));
+                if (match < 0) {
+                    const invalid = dspText('option', 'Invalid saved value: ' + displayJson(savedValue));
+                    invalid.value = '';
+                    control.appendChild(invalid);
+                }
+                choices.forEach((choice, choiceIndex) => {
+                    const option = dspText('option', choice.label ?? displayJson(choice.value));
+                    option.value = String(choiceIndex);
+                    control.appendChild(option);
+                });
+                control.value = match < 0 ? '' : String(match);
+                control.required = true;
+                readValue = () => control.value === '' ? savedValue : cloneJson(choices[Number(control.value)].value);
+                validateType = () => control.value === '' ? 'Choose a valid value.' : '';
+            } else if (parameter.type === 'number' || parameter.type === 'integer') {
+                control.type = 'number';
+                control.required = true;
+                control.step = parameter.step ?? (parameter.type === 'integer' ? 1 : 'any');
+                if (parameter.min != null) control.min = parameter.min;
+                if (parameter.max != null) control.max = parameter.max;
+                control.value = typeof savedValue === 'number' || typeof savedValue === 'string' ? savedValue : '';
+                readValue = () => control.value.trim() === '' ? '' : Number(control.value);
+                validateType = () => {
+                    const value = readValue();
+                    if (value === '' || !Number.isFinite(value)) return 'Enter a finite number.';
+                    if (parameter.type === 'integer' && !Number.isInteger(value)) return 'Enter a whole number.';
+                    return '';
+                };
+            } else {
+                control.type = 'text';
+                control.value = typeof savedValue === 'string' ? savedValue : displayJson(savedValue);
+                readValue = () => control.value;
+                validateType = () => typeof processor.params[key] === 'string' ? '' : 'Saved value is not a string; edit it to provide a string.';
+            }
+            const validate = () => {
+                control.setCustomValidity(validateType());
+                return control.checkValidity();
+            };
+            control.addEventListener('input', () => {
+                setDraftParam(processor, key, readValue());
+                validate();
+            });
+            control.addEventListener('change', () => {
+                setDraftParam(processor, key, readValue());
+                validate();
+            });
+            dspParameterBindings.push({ control, validate, commit: () => setDraftParam(processor, key, readValue()) });
+            row.append(label, control);
+            wrapper.appendChild(row);
+            const hints = [];
+            if (parameter.min != null) hints.push('min ' + parameter.min);
+            if (parameter.max != null) hints.push('max ' + parameter.max);
+            if (parameter.step != null) hints.push('step ' + parameter.step);
+            hints.push('default ' + displayJson(defaultValue));
+            const help = dspText('div', hints.join(' · '), 'dsp-help');
+            help.id = control.id + '-help';
+            control.setAttribute('aria-describedby', help.id);
+            wrapper.appendChild(help);
+            container.appendChild(wrapper);
         }
 
         function renderDspChain() {
             const container = $('dsp-chain-list');
-            if (!container) return;
-
-            if (currentRouteDspState.chain.length === 0) {
-                container.innerHTML = '<div style="font-size: 11px; color: var(--text-dim); text-align: center; padding: 10px;">No processors in chain.</div>';
+            container.replaceChildren();
+            dspParameterBindings = [];
+            if (!currentRouteDspState) {
+                container.appendChild(dspText('div', 'Saved DSP state has not been loaded.', 'dsp-help'));
                 return;
             }
-
-            container.innerHTML = currentRouteDspState.chain.map((proc, idx) => {
-                let paramsHtml = '';
-                const params = proc.params || {};
-                for (const [pKey, pVal] of Object.entries(params)) {
-                    paramsHtml += `
-                        <div class="control-row">
-                            <label>${pKey}</label>
-                            <input type="number" step="0.01" value="${pVal}" onchange="updateProcessorParam(${idx}, '${pKey}', this.value)">
-                        </div>
-                    `;
+            if (currentRouteDspState.chain.length === 0) {
+                container.appendChild(dspText('div', 'No processors in chain.', 'dsp-help'));
+            }
+            currentRouteDspState.chain.forEach((processor, index) => {
+                const descriptor = isObject(processor) ? dspDiscovery.processors.find(item => item.type === processor.type) : undefined;
+                const card = dspText('div', '', 'dsp-processor-card');
+                const header = dspText('div', '', 'dsp-processor-header');
+                const type = isObject(processor) ? processor.type : '(invalid processor)';
+                header.appendChild(dspText('span', `#${index + 1}: ${descriptor?.name ?? type}`));
+                const actions = dspText('div', '', 'dsp-actions');
+                const up = dspButton('↑', () => moveProcessor(index, -1));
+                up.title = 'Move processor up';
+                up.setAttribute('aria-label', `Move processor ${index + 1} up`);
+                up.dataset.locked = String(index === 0);
+                const down = dspButton('↓', () => moveProcessor(index, 1));
+                down.title = 'Move processor down';
+                down.setAttribute('aria-label', `Move processor ${index + 1} down`);
+                down.dataset.locked = String(index === currentRouteDspState.chain.length - 1);
+                actions.append(up, down, dspButton('Remove', () => removeProcessor(index), 'remove-btn'));
+                header.appendChild(actions);
+                card.appendChild(header);
+                const params = dspText('div', '', 'dsp-processor-params');
+                if (!descriptor) {
+                    card.classList.add('unavailable');
+                    const reason = dspDiscovery.status === 'ready' ? 'Unavailable processor on this backend. Remove it before applying, or restore the plugin.' : 'Processor availability cannot be verified until discovery succeeds.';
+                    card.appendChild(dspText('div', reason, 'dsp-help dsp-warning'));
+                    if (isObject(processor)) params.appendChild(dspText('div', 'Saved parameters: ' + displayJson(processor.params), 'dsp-help'));
+                } else if (!isObject(processor.params)) {
+                    card.classList.add('unavailable');
+                    card.appendChild(dspText('div', 'Invalid saved parameters. Remove this processor and add it again.', 'dsp-help dsp-warning'));
+                    params.appendChild(dspText('div', displayJson(processor.params), 'dsp-help'));
+                } else {
+                    if (descriptor.description) card.appendChild(dspText('div', descriptor.description, 'dsp-help'));
+                    descriptor.parameters.forEach(parameter => renderDspParameter(processor, descriptor, parameter, params, index));
+                    const known = new Set(descriptor.parameters.map(parameter => parameter.id));
+                    for (const [key, value] of Object.entries(processor.params)) {
+                        if (known.has(key)) continue;
+                        const extra = dspText('div', '', 'dsp-extra-param');
+                        extra.appendChild(dspText('span', `Unknown parameter ${key}: ${displayJson(value)}`, 'dsp-help dsp-warning'));
+                        extra.appendChild(dspButton('Remove parameter', () => {
+                            if (modalBusy) return;
+                            delete processor.params[key];
+                            renderDspChain();
+                            updateModalControls();
+                        }, 'remove-btn'));
+                        params.appendChild(extra);
+                    }
+                    if (!params.children.length) params.appendChild(dspText('div', 'No parameters.', 'dsp-help'));
                 }
-
-                let arrowHtml = idx < currentRouteDspState.chain.length - 1 ? '<div class="chain-arrow">&darr;</div>' : '';
-
-                return `
-                    <div class="dsp-processor-card">
-                        <div class="dsp-processor-header">
-                            <span>#${idx + 1}: ${proc.type.toUpperCase()}</span>
-                            <button class="remove-btn" onclick="removeProcessor(${idx})">Remove</button>
-                        </div>
-                        <div class="dsp-processor-params">
-                            ${paramsHtml || '<span style="font-size:10px; color:var(--text-dim);">No parameters</span>'}
-                        </div>
-                    </div>
-                    ${arrowHtml}
-                `;
-            }).join('');
-        }
-
-        async function postDspState() {
-            if (!editingRouteId) return;
-            try {
-                await fetchAPI(`/api/routes/${editingRouteId}/dsp`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(currentRouteDspState)
-                });
-            } catch (e) {
-                showError('Failed to update DSP state: ' + e.message);
-            }
-        }
-
-        function onDspActiveChange() {
-            currentRouteDspState.active = $('modal-dsp-active').value === 'true';
-            postDspState();
-        }
-
-        function onDspGainChange() {
-            currentRouteDspState.gain = parseFloat($('modal-dsp-gain').value) || 1.0;
-            postDspState();
-        }
-
-        function updateProcessorParam(index, key, value) {
-            const numVal = parseFloat(value);
-            if (currentRouteDspState.chain[index] && currentRouteDspState.chain[index].params) {
-                currentRouteDspState.chain[index].params[key] = isNaN(numVal) ? value : numVal;
-                postDspState();
-            }
+                card.appendChild(params);
+                container.appendChild(card);
+                if (index < currentRouteDspState.chain.length - 1) container.appendChild(dspText('div', '↓', 'chain-arrow'));
+            });
+            updateModalControls();
         }
 
         function addProcessorToChain() {
-            const type = $('new-processor-type').value;
-            let defaultParams = {};
-            if (type === 'gain') defaultParams = { gain: 1.0 };
-            else if (type === 'compressor') defaultParams = { threshold: -20.0, ratio: 4.0 };
-            else if (type === 'eq') defaultParams = { frequency: 1000.0, q: 1.0, gain: 0.0 };
-            else if (type === 'limiter') defaultParams = { ceiling: -0.1 };
-
-            currentRouteDspState.chain.push({ type: type, params: defaultParams });
-            renderDspChain();
-            postDspState();
+            if (modalBusy || !currentRouteDspState || dspDiscovery.status !== 'ready') return;
+            if (currentRouteDspState.chain.length >= dspDiscovery.maxChainLength) {
+                setRouteError('The backend chain limit is ' + dspDiscovery.maxChainLength + '. Remove a processor before adding another.');
+                return;
+            }
+            const descriptor = dspDiscovery.processors.find(processor => processor.type === $('new-processor-type').value);
+            if (!descriptor) return;
+            const processor = { type: descriptor.type, params: cloneJson(descriptor.defaults) };
+            for (const parameter of descriptor.parameters) {
+                if (!hasOwn(processor.params, parameter.id)) {
+                    const value = parameter.default ?? descriptor.defaults[parameter.id];
+                    if (value !== undefined) setDraftParam(processor, parameter.id, cloneJson(value));
+                }
+            }
+            currentRouteDspState.chain.push(processor);
+            renderDspDiscovery();
         }
 
         function removeProcessor(index) {
+            if (modalBusy || !currentRouteDspState) return;
             currentRouteDspState.chain.splice(index, 1);
+            renderDspDiscovery();
+        }
+
+        function moveProcessor(index, direction) {
+            if (modalBusy || !currentRouteDspState) return;
+            const chain = currentRouteDspState.chain;
+            const destination = index + direction;
+            if (destination < 0 || destination >= chain.length) return;
+            [chain[index], chain[destination]] = [chain[destination], chain[index]];
             renderDspChain();
-            postDspState();
+            updateModalControls();
+        }
+
+        function validatedRouteDraft() {
+            if (!currentRouteDspState) throw new Error('Saved DSP state has not loaded. Close and reopen this route to retry.');
+            if (dspDiscovery.status !== 'ready') throw new Error('DSP discovery must succeed before applying. Use Refresh processors to retry.');
+            if (currentRouteDspState.chain.length > dspDiscovery.maxChainLength) {
+                throw new Error('Chain exceeds the backend limit of ' + dspDiscovery.maxChainLength + ' processors. Remove processors before applying.');
+            }
+            for (const id of ['modal-gain', 'modal-dsp-gain']) {
+                const control = $(id);
+                const value = control.value.trim() === '' ? NaN : Number(control.value);
+                control.setCustomValidity(Number.isFinite(value) ? '' : 'Enter a finite gain value.');
+                if (!control.reportValidity()) throw new Error('Correct the gain value before applying.');
+            }
+            for (const binding of dspParameterBindings) {
+                if (!binding.validate()) {
+                    binding.control.reportValidity();
+                    throw new Error('Correct the highlighted processor parameter before applying.');
+                }
+            }
+            for (const processor of currentRouteDspState.chain) {
+                const descriptor = isObject(processor) ? dspDiscovery.processors.find(item => item.type === processor.type) : undefined;
+                if (!descriptor) throw new Error('Remove unavailable processors before applying, or restore the missing plugins and refresh processors.');
+                if (!isObject(processor.params)) throw new Error('Remove and re-add processors with invalid saved parameters.');
+                const known = new Set(descriptor.parameters.map(parameter => parameter.id));
+                if (Object.keys(processor.params).some(key => !known.has(key))) {
+                    throw new Error('Remove the visible unknown parameters before applying. The backend rejects unsupported parameters.');
+                }
+            }
+            dspParameterBindings.forEach(binding => binding.commit());
+            return {
+                gain: Number($('modal-gain').value),
+                enabled: $('modal-enabled').value === '1',
+                dsp: {
+                    active: $('modal-dsp-active').value === 'true',
+                    gain: Number($('modal-dsp-gain').value),
+                    chain: cloneJson(currentRouteDspState.chain.map(processor => ({ type: processor.type, params: processor.params })))
+                }
+            };
         }
 
         async function saveRoute() {
-            const gain = $('modal-gain').value;
-            const enabled = $('modal-enabled').value === '1';
+            if (modalBusy || editingRouteId === null) return;
+            setRouteError();
+            let draft;
             try {
-                await fetchAPI(`/api/routes/update?id=${editingRouteId}&enabled=${enabled ? 1 : 0}&gain=${gain}`, { method: 'POST' });
-                await postDspState();
-                closeModal();
-                await loadGraph();
+                draft = validatedRouteDraft();
             } catch (e) {
-                alert('Update failed: ' + e.message);
+                setRouteError(e.message);
+                return;
+            }
+            const id = editingRouteId;
+            modalBusy = true;
+            updateModalControls();
+            let saved = false;
+            let adopted = false;
+            try {
+                const result = await fetchAPI(`/api/routes/${encodeURIComponent(id)}/apply`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(draft)
+                });
+                if (result.status !== 'ok' || result.adopted !== true)
+                    throw new Error('The backend did not confirm engine adoption.');
+                adopted = true;
+                showDspState(readDspState(result));
+                $('dsp-route-warning').hidden = true;
+                await loadGraph();
+                saved = true;
+            } catch (e) {
+                setRouteError((adopted ? 'Changes were applied, but graph confirmation failed: ' : 'APPLY was not confirmed: ') + e.message + '\nThe inspector remains open. Refresh/review the route before retrying.');
+            } finally {
+                modalBusy = false;
+                if (saved) closeModal();
+                else {
+                    renderDspChain();
+                    updateModalControls();
+                }
             }
         }
 
         async function deleteRoute() {
+            if (modalBusy || editingRouteId === null) return;
+            const id = editingRouteId;
+            modalBusy = true;
+            setRouteError();
+            updateModalControls();
+            let deleted = false;
             try {
-                await fetchAPI(`/api/routes/${editingRouteId}`, { method: 'DELETE' });
-                closeModal();
+                await fetchAPI(`/api/routes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+                deleted = true;
                 await loadGraph();
             } catch (e) {
-                alert('Delete failed: ' + e.message);
+                setRouteError('Delete failed: ' + e.message);
+            } finally {
+                modalBusy = false;
+                if (deleted) closeModal();
+                else updateModalControls();
             }
         }
 
         async function updateMeters() {
             try {
                 const data = await fetchAPI('/api/meters');
-                const allVuFills = document.querySelectorAll('.vu-fill');
-
-                allVuFills.forEach(fill => {
-                    const id = fill.id;
-                    const lastDash = id.lastIndexOf('-');
-                    if (lastDash === -1) return;
-
-                    const epId = id.substring(3, lastDash);
-                    const chIdx = parseInt(id.substring(lastDash + 1));
-
+                cachedMeters.forEach(m => {
                     let meter = null;
-                    if (epId.includes('/capture')) {
-                        if (data.capture && data.capture[epId] && data.capture[epId][chIdx]) {
-                            meter = data.capture[epId][chIdx];
+                    if (m.epId.includes('/capture')) {
+                        if (data.capture && data.capture[m.epId] && data.capture[m.epId][m.ch]) {
+                            meter = data.capture[m.epId][m.ch];
                         }
-                    } else if (epId.includes('/playback')) {
-                        if (data.playback && data.playback[epId] && data.playback[epId][chIdx]) {
-                            meter = data.playback[epId][chIdx];
+                    } else if (m.epId.includes('/playback')) {
+                        if (data.playback && data.playback[m.epId] && data.playback[m.epId][m.ch]) {
+                            meter = data.playback[m.epId][m.ch];
                         }
                     }
 
                     if (meter) {
-                        const peakEl = document.getElementById(`peak-${epId}-${chIdx}`);
                         const width = Math.max(0, Math.min(100, (meter.rms_db + 60) * 100 / 60)) + '%';
-                        fill.style.width = width;
-                        if (peakEl) peakEl.classList.toggle('active', meter.clipped);
+                        m.fillEl.style.width = width;
+                        if (m.peakEl) m.peakEl.classList.toggle('active', meter.clipped);
                     }
                 });
             } catch (e) { console.error("Meter update error:", e); }
@@ -1217,21 +1704,37 @@
         }
 
         async function resetClips() { try { await fetchAPI('/api/reset_clips?all=1', { method: 'POST' }); } catch (e) {} }
-        async function saveSettings() { try { await fetchAPI('/api/settings/save', { method: 'POST' }); alert('Settings Saved'); } catch (e) { alert(e.message); } }
-        async function refreshAll() { await Promise.all([loadGraph(), loadDevices()]); }
+        async function saveSettings() {
+            try {
+                // Closing the inspector discards its draft. SAVE never reads it.
+                const result = await fetchAPI('/api/settings/save', { method: 'POST' });
+                if (!result.adopted || !result.persisted) throw new Error(result.message || 'Apply/save was not confirmed');
+                alert('Applied configuration saved');
+            } catch (e) { alert(e.message); }
+        }
+        async function refreshAll() { await Promise.all([loadGraph(), loadDevices(), loadDspAvailable()]); }
+
+        const viewportObserver = new ResizeObserver(() => {
+            drawCables();
+        });
 
         window.onresize = drawCables;
         setInterval(updateMeters, 100);
 
         async function init() {
+            const viewport = $('patchbay-viewport');
+            if (viewport) viewportObserver.observe(viewport);
+
             Promise.allSettled([
                 loadDevices(),
-                loadGraph()
+                loadGraph(),
+                loadDspAvailable()
             ]).then(() => {
                 if ($('status'))$('status').textContent = 'Ready';
             });
         }
         init();
     </script>
+    <script src="client/plugin_demo.js"></script>
 </body>
 </html>

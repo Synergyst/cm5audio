@@ -4,3 +4,7 @@ build/
 web_client/dist/
 certs/
 cm5audio_settings.json
+*.before-*
+*.orig
+*.rej
+/fix.patch

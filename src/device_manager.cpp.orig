@@ -258,81 +258,144 @@ static void on_stream_state_changed(void* userdata, enum pw_stream_state old, en
     std::cout << std::endl;
 }
 
+static void on_monitor_param_changed(void* userdata, uint32_t id,
+                                     const struct spa_pod* param) {
+    if (id != SPA_PARAM_Format || !param) return;
+    auto* monitor = static_cast<NodeMonitor*>(userdata);
+    struct spa_audio_info_raw info{};
+    if (spa_format_audio_raw_parse(param, &info) < 0 ||
+        info.format != SPA_AUDIO_FORMAT_F32 ||
+        info.channels == 0 || info.channels > CM5_MAX_CHANNELS) {
+        std::cerr << "[PipeWire Monitor] Unsupported negotiated format for node "
+                  << monitor->node_id << std::endl;
+        return;
+    }
+    monitor->channels.store(info.channels, std::memory_order_release);
+    if (monitor->dsp_engine) {
+        monitor->dsp_engine->register_pipewire_meter_bank(
+            monitor->endpoint_name, info.channels, monitor->is_capture);
+    }
+}
+
 static void on_process_monitor(void* userdata) {
     auto* monitor = static_cast<NodeMonitor*>(userdata);
     struct pw_buffer* b = pw_stream_dequeue_buffer(monitor->stream);
     if (!b) return;
 
-    struct spa_buffer* buf = b->buffer;
-    if (buf->datas[0].data == nullptr) {
-        pw_stream_queue_buffer(monitor->stream, b);
+    auto queue_buffer = [&]() { pw_stream_queue_buffer(monitor->stream, b); };
+    if (!b->buffer || b->buffer->n_datas == 0) {
+        queue_buffer();
         return;
     }
 
-    float* samples = static_cast<float*>(buf->datas[0].data);
-    uint32_t stride = buf->datas[0].chunk->stride / sizeof(float);
-    if (stride == 0) stride = monitor->channels;
-    uint32_t n_frames = buf->datas[0].chunk->size / (stride * sizeof(float));
-
-    if (monitor->dsp_engine && n_frames > 0) {
-        monitor->dsp_engine->update_meters(samples, monitor->channels, stride, monitor->endpoint_name, true);
+    struct spa_data* data = &b->buffer->datas[0];
+    if (!data->data || !data->chunk) {
+        queue_buffer();
+        return;
     }
 
-    pw_stream_queue_buffer(monitor->stream, b);
+    const size_t offset = data->chunk->offset;
+    const size_t bytes = data->chunk->size;
+    if (offset > data->maxsize || bytes > data->maxsize - offset) {
+        queue_buffer();
+        return;
+    }
+
+    const unsigned channels = monitor->channels.load(std::memory_order_acquire);
+    if (channels == 0 || channels > CM5_MAX_CHANNELS) {
+        queue_buffer();
+        return;
+    }
+
+    const size_t strideBytes = data->chunk->stride > 0
+        ? static_cast<size_t>(data->chunk->stride)
+        : static_cast<size_t>(channels) * sizeof(float);
+    if (strideBytes < static_cast<size_t>(channels) * sizeof(float) ||
+        strideBytes % sizeof(float) != 0) {
+        queue_buffer();
+        return;
+    }
+
+    const size_t frames = bytes / strideBytes;
+    auto* samples = reinterpret_cast<float*>(
+        static_cast<uint8_t*>(data->data) + offset);
+
+    if (monitor->dsp_engine && frames > 0) {
+        monitor->dsp_engine->update_meters(
+            samples, channels, static_cast<unsigned>(strideBytes / sizeof(float)),
+            monitor->endpoint_name, monitor->is_capture, frames);
+    }
+    queue_buffer();
 }
 
 static const struct pw_stream_events monitor_stream_events = {
     PW_VERSION_STREAM_EVENTS,
     .state_changed = on_stream_state_changed,
+    .param_changed = on_monitor_param_changed,
     .process = on_process_monitor,
 };
 
-void DeviceManager::start_node_monitor(uint32_t nodeId, const std::string& name, unsigned channels) {
+void DeviceManager::start_node_monitor(uint32_t nodeId, const std::string& name,
+                                       bool isCapture, unsigned channels) {
     std::lock_guard<std::mutex> lock(m_monitorLock);
-    if (m_monitors.find(nodeId) != m_monitors.end()) return;
+    if (!m_pw_loop || !m_dspEngine.load(std::memory_order_acquire) ||
+        m_monitors.find(nodeId) != m_monitors.end()) return;
 
     auto monitor = std::make_unique<NodeMonitor>();
     monitor->node_id = nodeId;
     monitor->endpoint_name = "pw-node/" + std::to_string(nodeId);
-    monitor->dsp_engine = m_dspEngine;
-    monitor->channels = channels > 0 ? channels : 2;
+    monitor->dsp_engine = m_dspEngine.load(std::memory_order_acquire);
+    monitor->channels.store(channels > 0 ? channels : 2, std::memory_order_relaxed);
+    monitor->is_capture = isCapture;
 
     struct pw_properties* props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio",
-        PW_KEY_MEDIA_CATEGORY, "Monitor",
+        PW_KEY_MEDIA_CATEGORY, "Capture",
         PW_KEY_MEDIA_ROLE, "DSP",
+        PW_KEY_STREAM_MONITOR, "true",
         PW_KEY_APP_NAME, "cm5audio-meter",
-        PW_KEY_TARGET_OBJECT, std::to_string(nodeId).c_str(),
-        nullptr
-    );
+        PW_KEY_TARGET_OBJECT, name.c_str(),
+        nullptr);
+    if (!props) return;
+    // For a sink node, capture the sink's monitor output rather than a source.
+    if (!isCapture) pw_properties_set(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
 
+    const std::string streamName = "cm5-meter-" + std::to_string(nodeId);
     monitor->stream = pw_stream_new_simple(
-        pw_main_loop_get_loop(m_pw_loop),
-        ("cm5-meter-" + std::to_string(nodeId)).c_str(),
-        props,
-        &monitor_stream_events,
-        monitor.get()
-    );
-
+        pw_main_loop_get_loop(m_pw_loop), streamName.c_str(), props,
+        &monitor_stream_events, monitor.get());
     if (!monitor->stream) return;
 
     uint8_t buffer[1024];
-    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+    struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+    struct spa_audio_info_raw audioInfo{};
+    audioInfo.format = SPA_AUDIO_FORMAT_F32;
     const struct spa_pod* params[1];
-    params[0] = reinterpret_cast<struct spa_pod*>(spa_pod_builder_add_object(&b,
-        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
-        SPA_FORMAT_AUDIO_format, SPA_POD_Id(SPA_AUDIO_FORMAT_F32)
-    ));
+    params[0] = spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat, &audioInfo);
+    if (!params[0]) {
+        pw_stream_destroy(monitor->stream);
+        return;
+    }
 
-    // Must be PW_DIRECTION_INPUT to capture/receive audio from the node's output ports
-    pw_stream_connect(monitor->stream,
-        PW_DIRECTION_INPUT,
-        PW_ID_ANY,
-        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS),
-        params, 1
-    );
+    // Prepare a meter bank before audio callbacks begin; param_changed resizes it
+    // to the negotiated channel count before steady-state metering.
+    monitor->dsp_engine->register_pipewire_meter_bank(
+        monitor->endpoint_name, monitor->channels.load(std::memory_order_relaxed),
+        monitor->is_capture);
+
+    const int result = pw_stream_connect(
+        monitor->stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT |
+            PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS),
+        params, 1);
+    if (result < 0) {
+        std::cerr << "[PipeWire Monitor] Failed to connect node " << nodeId
+                  << ": " << result << std::endl;
+        pw_stream_destroy(monitor->stream);
+        monitor->dsp_engine->unregister_pipewire_meter_bank(
+            monitor->endpoint_name, monitor->is_capture);
+        return;
+    }
 
     m_monitors[nodeId] = std::move(monitor);
 }
@@ -340,12 +403,18 @@ void DeviceManager::start_node_monitor(uint32_t nodeId, const std::string& name,
 void DeviceManager::stop_node_monitor(uint32_t nodeId) {
     std::lock_guard<std::mutex> lock(m_monitorLock);
     auto it = m_monitors.find(nodeId);
-    if (it != m_monitors.end()) {
-        if (it->second->stream) {
-            pw_stream_destroy(it->second->stream);
-        }
-        m_monitors.erase(it);
+    if (it == m_monitors.end()) return;
+
+    auto& monitor = it->second;
+    if (monitor->stream) {
+        pw_stream_destroy(monitor->stream);
+        monitor->stream = nullptr;
     }
+    if (monitor->dsp_engine) {
+        monitor->dsp_engine->unregister_pipewire_meter_bank(
+            monitor->endpoint_name, monitor->is_capture);
+    }
+    m_monitors.erase(it);
 }
 
 void registry_global(void *data, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props) {
@@ -356,13 +425,14 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
         const char* name = props ? spa_dict_lookup(props, "node.name") : nullptr;
         const char* desc = props ? spa_dict_lookup(props, "node.description") : nullptr;
         const char* media_class = props ? spa_dict_lookup(props, "media.class") : nullptr;
+        const std::string mediaClass = media_class ? media_class : "";
 
         bool is_input = false;
-        if (media_class) {
-            std::string mc(media_class);
-            is_input = (mc.find("Sink") != std::string::npos || mc.find("Input") != std::string::npos);
+        if (!mediaClass.empty()) {
+            is_input = (mediaClass.find("Sink") != std::string::npos ||
+                        mediaClass.find("Input") != std::string::npos);
         } else if (name) {
-            std::string n(name);
+            const std::string n(name);
             is_input = (n.find("alsa_output") == 0);
         }
 
@@ -370,14 +440,18 @@ void registry_global(void *data, uint32_t id, uint32_t permissions, const char *
             id,
             name ? name : "Unknown Node",
             desc ? desc : "",
-            is_input
+            is_input,
+            mediaClass
         };
 
-        // Only monitor audio producers (Sources / Output nodes where is_input == false)
-        // and ignore our own meter streams to prevent recursion.
-        std::string nodeName = name ? name : "";
-        if (manager->m_dspEngine && !is_input && nodeName.find("cm5-meter") == std::string::npos) {
-            manager->start_node_monitor(id, nodeName, 2);
+        // Monitor every audio node, including both sources and sinks. The
+        // cm5-meter streams are excluded to prevent recursive self-monitoring.
+        const std::string nodeName = name ? name : "";
+        const bool isAudio = mediaClass.find("Audio") != std::string::npos;
+        if (isAudio &&
+            manager->m_dspEngine.load(std::memory_order_acquire) &&
+            nodeName.find("cm5-meter") == std::string::npos) {
+            manager->start_node_monitor(id, nodeName, !is_input, 2);
         }
     } else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
         uint32_t src_node = 0, dst_node = 0, src_port = 0, dst_port = 0;
@@ -404,6 +478,10 @@ void registry_global_remove(void *data, uint32_t id) {
     {
         std::lock_guard<std::mutex> lock(manager->m_pw_graph_lock);
         manager->m_pw_graph.nodes.erase(id);
+        auto& links = manager->m_pw_graph.links;
+        links.erase(std::remove_if(links.begin(), links.end(), [id](const PipeWireLink& link) {
+            return link.source_node == id || link.dest_node == id;
+        }), links.end());
     }
     manager->stop_node_monitor(id);
 }
@@ -464,6 +542,7 @@ DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
 
 DeviceManager::~DeviceManager() {
     stop_all();
+    set_dsp_engine(nullptr);
     {
         std::lock_guard<std::mutex> lock(m_monitorLock);
         m_monitors.clear();
@@ -485,6 +564,40 @@ DeviceManager::~DeviceManager() {
 PipeWireGraph DeviceManager::get_pipewire_graph() {
     std::lock_guard<std::mutex> lock(m_pw_graph_lock);
     return m_pw_graph;
+}
+
+void DeviceManager::set_dsp_engine(DspEngine* engine) {
+    DspEngine* previous = m_dspEngine.exchange(engine, std::memory_order_acq_rel);
+
+    if (!engine) {
+        std::vector<uint32_t> ids;
+        {
+            std::lock_guard<std::mutex> lock(m_monitorLock);
+            ids.reserve(m_monitors.size());
+            for (const auto& entry : m_monitors) ids.push_back(entry.first);
+        }
+        for (uint32_t id : ids) stop_node_monitor(id);
+        return;
+    }
+
+    if (previous && previous != engine) {
+        std::vector<uint32_t> ids;
+        {
+            std::lock_guard<std::mutex> lock(m_monitorLock);
+            ids.reserve(m_monitors.size());
+            for (const auto& entry : m_monitors) ids.push_back(entry.first);
+        }
+        for (uint32_t id : ids) stop_node_monitor(id);
+    }
+
+    // The registry may have discovered nodes before DspEngine was constructed.
+    const PipeWireGraph graph = get_pipewire_graph();
+    for (const auto& entry : graph.nodes) {
+        const auto& node = entry.second;
+        if (node.media_class.find("Audio") == std::string::npos ||
+            node.name.find("cm5-meter") != std::string::npos) continue;
+        start_node_monitor(node.id, node.name, !node.is_input, 2);
+    }
 }
 
 void DeviceManager::enumerate_devices() {

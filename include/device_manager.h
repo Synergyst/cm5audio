@@ -18,6 +18,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 // Forward declarations
 using NodeId = int32_t;
@@ -177,6 +178,7 @@ private:
     std::thread m_pw_thread;
     std::mutex m_pw_graph_lock;
     PipeWireGraph m_pw_graph;
+    std::unordered_set<uint32_t> m_pw_ignored_nodes;
 
     // PipeWire Metering Internals
     std::atomic<DspEngine*> m_dspEngine{nullptr};

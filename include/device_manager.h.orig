@@ -9,6 +9,7 @@
 #pragma GCC diagnostic pop
 
 #include "constants.h"
+#include <atomic>
 #include "ring_buffer.h"
 #include <cstdint>
 #include <string>
@@ -29,7 +30,8 @@ struct NodeMonitor {
     struct pw_stream* stream = nullptr;
     struct spa_hook stream_listener{};
     DspEngine* dsp_engine = nullptr;
-    unsigned channels = 2;
+    std::atomic<unsigned> channels{2};
+    bool is_capture = true;
 };
 
 // A native capability is a JOINT tuple, not four independent maxima. Unknown
@@ -69,6 +71,7 @@ struct PipeWireNode {
     std::string name;
     std::string description;
     bool is_input; // True if it's a sink (input) node, false if source (output) node
+    std::string media_class;
 };
 
 struct PipeWireLink {
@@ -147,8 +150,9 @@ public:
     PipeWireGraph get_pipewire_graph();
 
     // PipeWire VU Metering Integration
-    void set_dsp_engine(DspEngine* engine) { m_dspEngine = engine; }
-    void start_node_monitor(uint32_t nodeId, const std::string& name, unsigned channels = 2);
+    void set_dsp_engine(DspEngine* engine);
+    void start_node_monitor(uint32_t nodeId, const std::string& name,
+                            bool isCapture, unsigned channels = 2);
     void stop_node_monitor(uint32_t nodeId);
 
 private:
@@ -175,7 +179,7 @@ private:
     PipeWireGraph m_pw_graph;
 
     // PipeWire Metering Internals
-    DspEngine* m_dspEngine = nullptr;
+    std::atomic<DspEngine*> m_dspEngine{nullptr};
     std::unordered_map<uint32_t, std::unique_ptr<NodeMonitor>> m_monitors;
     std::mutex m_monitorLock;
 };

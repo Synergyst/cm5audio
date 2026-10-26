@@ -166,7 +166,7 @@
         "chain": [
           {
             "params": {
-              "gain": 1
+              "gain": 2
             },
             "type": "gain"
           }
@@ -187,7 +187,7 @@
         "chain": [
           {
             "params": {
-              "gain": 1
+              "gain": 2
             },
             "type": "gain"
           }
@@ -208,7 +208,7 @@
         "chain": [
           {
             "params": {
-              "gain": 1
+              "gain": 2
             },
             "type": "gain"
           }
@@ -229,7 +229,7 @@
         "chain": [
           {
             "params": {
-              "gain": 1
+              "gain": 2
             },
             "type": "gain"
           }
@@ -250,7 +250,7 @@
         "chain": [
           {
             "params": {
-              "gain": 4
+              "gain": 5
             },
             "type": "gain"
           }
@@ -271,7 +271,7 @@
         "chain": [
           {
             "params": {
-              "gain": 4
+              "gain": 5
             },
             "type": "gain"
           }
@@ -292,12 +292,12 @@
         "chain": [
           {
             "params": {
-              "gain": 4
+              "gain": 5
             },
             "type": "gain"
           }
         ],
-        "gain": 2.0
+        "gain": 1.0
       },
       "enabled": true,
       "gain": 1.0,
@@ -313,7 +313,7 @@
         "chain": [
           {
             "params": {
-              "gain": 4
+              "gain": 5
             },
             "type": "gain"
           }

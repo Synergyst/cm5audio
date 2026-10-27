@@ -1,0 +1,12 @@
+[Unit]
+Description=Dynamic ALSA Configuration Generator
+Before=alsa-state.service pipewire-root.service pipewire-pulse-root.service wireplumber-root.service
+ConditionPathExists=/proc/asound/cards
+
+[Service]
+Type=oneshot
+ExecStart=/root/Sources/cm5audio/scripts/update-asound-conf.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

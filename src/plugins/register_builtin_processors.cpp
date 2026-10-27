@@ -9,6 +9,7 @@ void register_reverb_processor(ProcessorRegistry& registry);
 void register_lush_reverb_processor(ProcessorRegistry& registry);
 void register_eq_processor(ProcessorRegistry& registry);
 void register_normalize_processor(ProcessorRegistry& registry);
+void register_noise_gate_processor(ProcessorRegistry& registry);
 
 void register_builtin_processors(ProcessorRegistry& registry) {
     register_passthrough_processor(registry);
@@ -20,4 +21,5 @@ void register_builtin_processors(ProcessorRegistry& registry) {
     register_lush_reverb_processor(registry);
     register_eq_processor(registry);
     register_normalize_processor(registry);
+    register_noise_gate_processor(registry);
 }

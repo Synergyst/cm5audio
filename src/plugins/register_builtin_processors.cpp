@@ -12,6 +12,7 @@ void register_hpf_processor(ProcessorRegistry& registry);
 void register_lpf_processor(ProcessorRegistry& registry);
 void register_deesser_processor(ProcessorRegistry& registry);
 void register_normalize_processor(ProcessorRegistry& registry);
+void register_expander_processor(ProcessorRegistry& registry);
 void register_noise_gate_processor(ProcessorRegistry& registry);
 void register_bitcrusher_processor(ProcessorRegistry& registry);
 void register_limiter_processor(ProcessorRegistry& registry);
@@ -29,6 +30,7 @@ void register_builtin_processors(ProcessorRegistry& registry) {
     register_lpf_processor(registry);
     register_deesser_processor(registry);
     register_normalize_processor(registry);
+    register_expander_processor(registry);
     register_noise_gate_processor(registry);
     register_bitcrusher_processor(registry);
     register_limiter_processor(registry);

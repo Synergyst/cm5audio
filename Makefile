@@ -8,7 +8,7 @@ APP_SRCS = src/main.cpp src/web_server.cpp src/device_manager.cpp src/dsp_engine
 	src/processor_registry.cpp src/plugins/register_builtin_processors.cpp \
 	src/plugins/passthrough.cpp src/plugins/gain.cpp src/plugins/compressor.cpp \
 	src/plugins/echo_processor.cpp src/plugins/chorus_processor.cpp src/plugins/reverb_processor.cpp \
-	src/plugins/lush_reverb_processor.cpp src/plugins/eq_processor.cpp src/plugins/normalize.cpp src/plugins/noise_gate.cpp
+	src/plugins/lush_reverb_processor.cpp src/plugins/eq_processor.cpp src/plugins/normalize.cpp src/plugins/bitcrusher.cpp src/plugins/noise_gate.cpp
 APP_OBJS = $(APP_SRCS:src/%.cpp=build/%.o)
 
 MINIAUDIO_SRC = src/miniaudio_impl.cpp
@@ -28,11 +28,15 @@ TEST_OBJ = build/alsa_bridge_test.o
 TEST_TARGET = alsa_bridge_test
 
 PLUGIN_TEST_OBJ = build/dsp_plugins_test.o
-PLUGIN_TEST_TARGET = build/dsp_plugins_test
+PLUGIN_TEST_TARGET = dsp_plugins_test
 PLUGIN_TEST_DEPS = $(filter-out build/main.o,$(APP_OBJS)) $(MINIAUDIO_OBJ) $(IX_COMPAT_OBJS)
 
 CHANNEL_TEST_OBJ = build/channel_width_test.o
-CHANNEL_TEST_TARGET = build/channel_width_test
+CHANNEL_TEST_TARGET = channel_width_test
+
+# --- Native PipeWire Channel Test Tool ---
+PIPEWIRE_CHANNEL_TEST_OBJ = build/pipewire_channel_test.o
+PIPEWIRE_CHANNEL_TEST_TARGET = pipewire_channel_test
 
 all: build $(TARGET)
 
@@ -68,6 +72,18 @@ $(CAPS_TARGET): $(CAPS_OBJ)
 
 $(TEST_TARGET): $(TEST_OBJ)
 	$(CXX) $(TEST_OBJ) -o $@ $(LDFLAGS)
+
+# Native PipeWire Channel Test Target
+$(PIPEWIRE_CHANNEL_TEST_OBJ): tests/pipewire_channel_test.cpp | build
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+$(PIPEWIRE_CHANNEL_TEST_TARGET): $(PIPEWIRE_CHANNEL_TEST_OBJ)
+	$(CXX) $^ -o $@ $(LDFLAGS)
+
+pipewiretools: $(PIPEWIRE_CHANNEL_TEST_TARGET)
+
+clean-pipewiretools:
+	rm -f $(PIPEWIRE_CHANNEL_TEST_OBJ) $(PIPEWIRE_CHANNEL_TEST_OBJ:.o=.d) $(PIPEWIRE_CHANNEL_TEST_TARGET)
 
 $(PLUGIN_TEST_OBJ): tests/dsp_plugins_test.cpp | build
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
@@ -118,4 +134,4 @@ clean-alsatools:
 
 -include $(APP_OBJS:.o=.d) $(wildcard build/*.d)
 
-.PHONY: all clean clean-miniaudio clean-alsatools alsatools test-plugins test-reliability test-channels
+.PHONY: all clean clean-miniaudio clean-alsatools clean-pipewiretools alsatools pipewiretools test-plugins test-reliability test-channels

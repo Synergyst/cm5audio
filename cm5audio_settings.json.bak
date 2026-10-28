@@ -154,6 +154,56 @@
     {
       "destination": "hardware/pipewire:77/playback",
       "destination_channel": 0,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.05,
+              "threshold": 0.01
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
+              "frequency": 6000,
+              "reduction": 0.5,
+              "speed": 0.01,
+              "threshold": 0.1
+            },
+            "type": "deesser"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "hold": 0.015,
+              "release": 0.1,
+              "threshold": 0.01
+            },
+            "type": "noise_gate"
+          },
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.15
+            },
+            "type": "normalize"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 10,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
+          }
+        ],
+        "gain": 1.0
+      },
       "enabled": true,
       "gain": 1.0,
       "id": 7,
@@ -163,6 +213,56 @@
     {
       "destination": "hardware/pipewire:77/playback",
       "destination_channel": 1,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.05,
+              "threshold": 0.01
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
+              "frequency": 6000,
+              "reduction": 0.5,
+              "speed": 0.01,
+              "threshold": 0.1
+            },
+            "type": "deesser"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "hold": 0.015,
+              "release": 0.1,
+              "threshold": 0.01
+            },
+            "type": "noise_gate"
+          },
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.15
+            },
+            "type": "normalize"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 10,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
+          }
+        ],
+        "gain": 1.0
+      },
       "enabled": true,
       "gain": 1.0,
       "id": 8,

@@ -1,0 +1,315 @@
+{
+  "activated_devices": [
+    "pipewire:77",
+    "pipewire:33",
+    "pipewire:42",
+    "pipewire:58",
+    "pipewire:43",
+    "pipewire:44",
+    "pipewire:78",
+    "pipewire:76",
+    "pipewire:75"
+  ],
+  "clients": {},
+  "device_streams": {
+    "pipewire:33": {
+      "capture_channels": 0,
+      "playback_channels": 2
+    },
+    "pipewire:42": {
+      "capture_channels": 0,
+      "playback_channels": 8
+    },
+    "pipewire:43": {
+      "capture_channels": 8,
+      "playback_channels": 0
+    },
+    "pipewire:44": {
+      "capture_channels": 2,
+      "playback_channels": 0
+    },
+    "pipewire:58": {
+      "capture_channels": 1,
+      "playback_channels": 0
+    },
+    "pipewire:75": {
+      "capture_channels": 1,
+      "playback_channels": 0
+    },
+    "pipewire:76": {
+      "capture_channels": 2,
+      "playback_channels": 0
+    },
+    "pipewire:77": {
+      "capture_channels": 0,
+      "playback_channels": 2
+    },
+    "pipewire:78": {
+      "capture_channels": 2,
+      "playback_channels": 0
+    }
+  },
+  "global_dsp": {
+    "gain": 1.0,
+    "ratio": 4.0,
+    "threshold": 0.699999988079071
+  },
+  "hardware": {
+    "capture": [],
+    "playback": []
+  },
+  "routes": [
+    {
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 0,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.25
+            },
+            "type": "normalize"
+          }
+        ],
+        "gain": 1.0
+      },
+      "enabled": true,
+      "gain": 1.0,
+      "id": 1,
+      "source": "hardware/pipewire:44/capture",
+      "source_channel": 0
+    },
+    {
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 1,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.25
+            },
+            "type": "normalize"
+          }
+        ],
+        "gain": 1.0
+      },
+      "enabled": true,
+      "gain": 1.0,
+      "id": 2,
+      "source": "hardware/pipewire:44/capture",
+      "source_channel": 1
+    },
+    {
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 4,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.25
+            },
+            "type": "normalize"
+          }
+        ],
+        "gain": 1.0
+      },
+      "enabled": true,
+      "gain": 1.0,
+      "id": 4,
+      "source": "hardware/pipewire:44/capture",
+      "source_channel": 0
+    },
+    {
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 5,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.25
+            },
+            "type": "normalize"
+          }
+        ],
+        "gain": 1.0
+      },
+      "enabled": true,
+      "gain": 1.0,
+      "id": 6,
+      "source": "hardware/pipewire:44/capture",
+      "source_channel": 1
+    },
+    {
+      "destination": "hardware/pipewire:77/playback",
+      "destination_channel": 0,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.05,
+              "threshold": 0.01
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
+              "frequency": 6000,
+              "reduction": 0.5,
+              "speed": 0.01,
+              "threshold": 0.1
+            },
+            "type": "deesser"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "hold": 0.015,
+              "release": 0.1,
+              "threshold": 0.01
+            },
+            "type": "noise_gate"
+          },
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.15
+            },
+            "type": "normalize"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 10,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
+          }
+        ],
+        "gain": 1.0
+      },
+      "enabled": true,
+      "gain": 1.0,
+      "id": 7,
+      "source": "hardware/pipewire:76/capture",
+      "source_channel": 0
+    },
+    {
+      "destination": "hardware/pipewire:77/playback",
+      "destination_channel": 1,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.05,
+              "threshold": 0.01
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
+              "frequency": 6000,
+              "reduction": 0.5,
+              "speed": 0.01,
+              "threshold": 0.1
+            },
+            "type": "deesser"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "hold": 0.015,
+              "release": 0.1,
+              "threshold": 0.01
+            },
+            "type": "noise_gate"
+          },
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.15
+            },
+            "type": "normalize"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 10,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
+          }
+        ],
+        "gain": 1.0
+      },
+      "enabled": true,
+      "gain": 1.0,
+      "id": 8,
+      "source": "hardware/pipewire:76/capture",
+      "source_channel": 1
+    },
+    {
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 0,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 9,
+      "source": "hardware/pipewire:78/capture",
+      "source_channel": 0
+    },
+    {
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 1,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 10,
+      "source": "hardware/pipewire:78/capture",
+      "source_channel": 1
+    },
+    {
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 4,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 11,
+      "source": "hardware/pipewire:78/capture",
+      "source_channel": 0
+    },
+    {
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 5,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 12,
+      "source": "hardware/pipewire:78/capture",
+      "source_channel": 1
+    }
+  ],
+  "tone": {
+    "amplitude": 0.20000000298023224,
+    "enabled": false,
+    "frequency_hz": 440.0
+  },
+  "version": 1
+}

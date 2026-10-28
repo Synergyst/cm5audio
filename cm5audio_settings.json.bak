@@ -67,11 +67,29 @@
         "chain": [
           {
             "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.1,
+              "threshold": 0.5
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
               "max_gain": 4,
               "speed": 0.1,
               "target": 0.25
             },
             "type": "normalize"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 20,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
           }
         ],
         "gain": 1.0
@@ -90,11 +108,29 @@
         "chain": [
           {
             "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.1,
+              "threshold": 0.5
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
               "max_gain": 4,
               "speed": 0.1,
               "target": 0.25
             },
             "type": "normalize"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 20,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
           }
         ],
         "gain": 1.0
@@ -113,11 +149,29 @@
         "chain": [
           {
             "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.1,
+              "threshold": 0.5
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
               "max_gain": 4,
               "speed": 0.1,
               "target": 0.25
             },
             "type": "normalize"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 20,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
           }
         ],
         "gain": 1.0
@@ -136,11 +190,29 @@
         "chain": [
           {
             "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.1,
+              "threshold": 0.5
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
               "max_gain": 4,
               "speed": 0.1,
               "target": 0.25
             },
             "type": "normalize"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 20,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
           }
         ],
         "gain": 1.0
@@ -206,8 +278,16 @@
           },
           {
             "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.5
+            },
+            "type": "normalize"
+          },
+          {
+            "params": {
               "attack": 0.005,
-              "lookahead": 10,
+              "lookahead": 20,
               "release": 0.05,
               "threshold": 0.9
             },
@@ -277,8 +357,16 @@
           },
           {
             "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.5
+            },
+            "type": "normalize"
+          },
+          {
+            "params": {
               "attack": 0.005,
-              "lookahead": 10,
+              "lookahead": 20,
               "release": 0.05,
               "threshold": 0.9
             },

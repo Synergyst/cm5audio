@@ -32,6 +32,7 @@ std::string text_id(const char (&value)[N]) {
 // ALSA/Pulse names compatible with saved configurations from earlier releases.
 std::string stable_device_id(ma_backend backend, const ma_device_id& id) {
     switch (backend) {
+        case ma_backend_pipewire: return "pipewire:" + text_id(id.coreaudio);
         case ma_backend_alsa:       return text_id(id.alsa);
         case ma_backend_pulseaudio: return text_id(id.pulse);
         case ma_backend_jack:       return "jack:" + std::to_string(id.jack);

@@ -11,3 +11,4 @@ cm5audio_settings.json
 apply.sh
 /*.patch
 /*.py
+pipewire_channel_test

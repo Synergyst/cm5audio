@@ -213,6 +213,7 @@ bool HardwareDevice::init() {
         }
         config.periodSizeInFrames = CM5_BUFFER_FRAMES;
         config.sampleRate = 48000;
+        config.autoConnect = 1;
         config.dataCallback = HardwareDevice::data_callback;
         config.pUserData = this;
         const auto initResult = ma_device_init(m_context, &config, &m_device);

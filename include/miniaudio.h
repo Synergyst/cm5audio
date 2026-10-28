@@ -17,6 +17,9 @@
 
 #include <pipewire/pipewire.h>
 #include <pipewire/filter.h>
+#include <pipewire/link.h>
+#include <pipewire/node.h>
+#include <pipewire/port.h>
 #include <pipewire/loop.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw.h>
@@ -26,6 +29,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -139,13 +143,10 @@ struct ma_context {
 };
 
 struct ma_device;
-
-typedef void (*ma_device_data_callback)(
-    ma_device* pDevice,
-    void* pOutput,
-    const void* pInput,
-    ma_uint32 frameCount
-);
+typedef void (*ma_device_data_callback)(ma_device* pDevice,
+                                        void* pOutput,
+                                        const void* pInput,
+                                        ma_uint32 frameCount);
 
 struct ma_device_channel_config {
     ma_format format;
@@ -161,7 +162,6 @@ struct ma_device_channel_config {
     int channelMap[32];
     int internalChannelMap[32];
     const char* const* customPortNames;
-
     // Optional bound for customPortNames. If zero, at most `channels` names
     // are read for compatibility with the original header.
     ma_uint32 customPortNameCount;
@@ -177,6 +177,10 @@ struct ma_device_config {
     void* pUserData;
     const char* pNodeName;
     const char* pNodeDescription;
+
+    // When nonzero, explicitly create PipeWire links to the selected device ID(s).
+    // Playback uses playback.pDeviceID; capture uses capture.pDeviceID.
+    ma_bool32 autoConnect;
 };
 
 struct ma_device {
@@ -206,6 +210,13 @@ struct ma_device {
     std::atomic<ma_uint64> processCount;
     std::atomic<ma_uint64> oversizedBlockCount;
     std::atomic<ma_uint64> nullPortBufferCount;
+
+    // Optional direct PipeWire links to selected devices.
+    ma_bool32 autoConnect;
+    ma_bool32 autoConnectPerformed;
+    ma_uint32 playbackTargetNodeId;
+    ma_uint32 captureTargetNodeId;
+    char pipewireNodeName[256];
 };
 
 // -----------------------------------------------------------------------------
@@ -226,13 +237,10 @@ inline ma_uint32 ma_get_bytes_per_sample(ma_format format)
 inline ma_uint32 ma_get_bytes_per_frame(ma_format format, ma_uint32 channels)
 {
     const ma_uint32 sampleBytes = ma_get_bytes_per_sample(format);
-
-    if (sampleBytes == 0 ||
-        channels == 0 ||
+    if (sampleBytes == 0 || channels == 0 ||
         channels > std::numeric_limits<ma_uint32>::max() / sampleBytes) {
         return 0;
     }
-
     return sampleBytes * channels;
 }
 
@@ -268,37 +276,28 @@ inline float ma_sanitize_float(float x)
     return std::isfinite(x) ? x : 0.0f;
 }
 
-inline float ma_read_sample_f32(
-    const void* src,
-    ma_format format,
-    size_t sampleIndex)
+inline float ma_read_sample_f32(const void* src, ma_format format, size_t sampleIndex)
 {
     if (!src) return 0.0f;
-
     const uint8_t* bytes = static_cast<const uint8_t*>(src);
-
     switch (format) {
         case ma_format_f32: {
             float value;
             std::memcpy(&value, bytes + sampleIndex * 4, sizeof(value));
             return ma_sanitize_float(value);
         }
-
         case ma_format_u8: {
             const int value = bytes[sampleIndex];
             return static_cast<float>(value - 128) / 128.0f;
         }
-
         case ma_format_s16: {
             int16_t value;
             std::memcpy(&value, bytes + sampleIndex * 2, sizeof(value));
             return static_cast<float>(value) / 32768.0f;
         }
-
         case ma_format_s24: {
             const uint8_t* p = bytes + sampleIndex * 3;
             int32_t value;
-
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
             value = (static_cast<int32_t>(p[0]) << 16) |
                     (static_cast<int32_t>(p[1]) << 8)  |
@@ -308,84 +307,51 @@ inline float ma_read_sample_f32(
                     (static_cast<int32_t>(p[1]) << 8) |
                     (static_cast<int32_t>(p[2]) << 16);
 #endif
-
-            if (value & 0x00800000) {
-                value |= static_cast<int32_t>(0xFF000000u);
-            }
-
+            if (value & 0x00800000) value |= static_cast<int32_t>(0xFF000000u);
             return static_cast<float>(value) / 8388608.0f;
         }
-
         case ma_format_s32: {
             int32_t value;
             std::memcpy(&value, bytes + sampleIndex * 4, sizeof(value));
-
-            return static_cast<float>(
-                static_cast<double>(value) / 2147483648.0
-            );
+            return static_cast<float>(static_cast<double>(value) / 2147483648.0);
         }
-
         default:
             return 0.0f;
     }
 }
 
-inline void ma_write_sample_from_f32(
-    void* dst,
-    ma_format format,
-    size_t sampleIndex,
-    float sample)
+inline void ma_write_sample_from_f32(void* dst, ma_format format,
+                                     size_t sampleIndex, float sample)
 {
     if (!dst) return;
-
     uint8_t* bytes = static_cast<uint8_t*>(dst);
     const double x = static_cast<double>(ma_sanitize_float(sample));
-
     switch (format) {
         case ma_format_f32: {
             const float value = static_cast<float>(x);
             std::memcpy(bytes + sampleIndex * 4, &value, sizeof(value));
             break;
         }
-
         case ma_format_u8: {
             const double clamped = std::max(-1.0, std::min(1.0, x));
-            const int value = static_cast<int>(
-                std::llround((clamped + 1.0) * 127.5)
-            );
-
-            bytes[sampleIndex] = static_cast<uint8_t>(
-                std::max(0, std::min(255, value))
-            );
+            const int value = static_cast<int>(std::llround((clamped + 1.0) * 127.5));
+            bytes[sampleIndex] = static_cast<uint8_t>(std::max(0, std::min(255, value)));
             break;
         }
-
         case ma_format_s16: {
             const double clamped = std::max(-1.0, std::min(1.0, x));
-            const double scaled = clamped < 0.0
-                ? clamped * 32768.0
-                : clamped * 32767.0;
-
+            const double scaled = clamped < 0.0 ? clamped * 32768.0 : clamped * 32767.0;
             const long value = std::lround(scaled);
-            const int16_t out = static_cast<int16_t>(
-                std::max(-32768L, std::min(32767L, value))
-            );
-
+            const int16_t out = static_cast<int16_t>(std::max(-32768L, std::min(32767L, value)));
             std::memcpy(bytes + sampleIndex * 2, &out, sizeof(out));
             break;
         }
-
         case ma_format_s24: {
             const double clamped = std::max(-1.0, std::min(1.0, x));
-            const double scaled = clamped < 0.0
-                ? clamped * 8388608.0
-                : clamped * 8388607.0;
-
+            const double scaled = clamped < 0.0 ? clamped * 8388608.0 : clamped * 8388607.0;
             int32_t value = static_cast<int32_t>(std::llround(scaled));
             value = std::max(-8388608, std::min(8388607, value));
-
             uint8_t* p = bytes + sampleIndex * 3;
-
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
             p[0] = static_cast<uint8_t>((value >> 16) & 0xFF);
             p[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
@@ -397,43 +363,29 @@ inline void ma_write_sample_from_f32(
 #endif
             break;
         }
-
         case ma_format_s32: {
             const double clamped = std::max(-1.0, std::min(1.0, x));
-
             const long double scaled = clamped < 0.0
                 ? static_cast<long double>(clamped) * 2147483648.0L
                 : static_cast<long double>(clamped) * 2147483647.0L;
-
             int64_t wide = static_cast<int64_t>(std::llround(scaled));
-            wide = std::max<int64_t>(
-                INT32_MIN,
-                std::min<int64_t>(INT32_MAX, wide)
-            );
-
+            wide = std::max<int64_t>(INT32_MIN, std::min<int64_t>(INT32_MAX, wide));
             const int32_t out = static_cast<int32_t>(wide);
             std::memcpy(bytes + sampleIndex * 4, &out, sizeof(out));
             break;
         }
-
         default:
             break;
     }
 }
 
-inline void ma_fill_silence(
-    void* dst,
-    size_t frameCount,
-    ma_format format,
-    ma_uint32 channels)
+inline void ma_fill_silence(void* dst, size_t frameCount,
+                            ma_format format, ma_uint32 channels)
 {
     if (!dst) return;
-
     const ma_uint32 bpf = ma_get_bytes_per_frame(format, channels);
     if (!bpf) return;
-
     std::memset(dst, 0, frameCount * static_cast<size_t>(bpf));
-
     // Unsigned 8-bit PCM uses 128 as digital silence, not 0.
     if (format == ma_format_u8) {
         std::memset(dst, 128, frameCount * static_cast<size_t>(bpf));
@@ -448,36 +400,23 @@ inline int ma_channel_position(const int map[32], ma_uint32 channel)
 inline void ma_fix_all_zero_channel_map(int map[32], ma_uint32 channels)
 {
     if (channels <= 1) return;
-
     const ma_uint32 n = std::min<ma_uint32>(channels, 32);
     bool allZero = true;
-
     for (ma_uint32 i = 0; i < n; ++i) {
-        if (map[i] != 0) {
-            allZero = false;
-            break;
-        }
+        if (map[i] != 0) { allZero = false; break; }
     }
-
     // Treat an all-zero map from a zero-initialized config as the default map.
     if (allZero) {
-        for (int i = 0; i < 32; ++i) {
-            map[i] = i;
-        }
+        for (int i = 0; i < 32; ++i) map[i] = i;
     }
 }
 
-inline int ma_find_channel_position(
-    const int map[32],
-    ma_uint32 channels,
-    int targetPosition)
+inline int ma_find_channel_position(const int map[32], ma_uint32 channels,
+                                   int targetPosition)
 {
     for (ma_uint32 i = 0; i < channels; ++i) {
-        if (ma_channel_position(map, i) == targetPosition) {
-            return static_cast<int>(i);
-        }
+        if (ma_channel_position(map, i) == targetPosition) return static_cast<int>(i);
     }
-
     return -1;
 }
 
@@ -494,14 +433,8 @@ struct ma_pcm_rb {
     std::vector<uint8_t> buffer;
 
     ma_pcm_rb()
-        : format(ma_format_unknown),
-          channels(0),
-          capacityFrames(0),
-          rIndex(0),
-          wIndex(0),
-          bytesPerFrame(0),
-          buffer()
-    {}
+        : format(ma_format_unknown), channels(0), capacityFrames(0),
+          rIndex(0), wIndex(0), bytesPerFrame(0), buffer() {}
 
     ma_pcm_rb(const ma_pcm_rb&) = delete;
     ma_pcm_rb& operator=(const ma_pcm_rb&) = delete;
@@ -532,14 +465,10 @@ struct ma_pcm_rb {
             channels = other.channels;
             capacityFrames = other.capacityFrames;
             bytesPerFrame = other.bytesPerFrame;
-            rIndex.store(
-                other.rIndex.load(std::memory_order_relaxed),
-                std::memory_order_relaxed
-            );
-            wIndex.store(
-                other.wIndex.load(std::memory_order_relaxed),
-                std::memory_order_relaxed
-            );
+            rIndex.store(other.rIndex.load(std::memory_order_relaxed),
+                         std::memory_order_relaxed);
+            wIndex.store(other.wIndex.load(std::memory_order_relaxed),
+                         std::memory_order_relaxed);
             buffer = std::move(other.buffer);
 
             other.format = ma_format_unknown;
@@ -549,40 +478,25 @@ struct ma_pcm_rb {
             other.rIndex.store(0, std::memory_order_relaxed);
             other.wIndex.store(0, std::memory_order_relaxed);
         }
-
         return *this;
     }
 };
 
-inline ma_result ma_pcm_rb_init(
-    ma_format format,
-    ma_uint32 channels,
-    ma_uint32 capacityFrames,
-    void*,
-    void*,
-    ma_pcm_rb* pRB)
+inline ma_result ma_pcm_rb_init(ma_format format, ma_uint32 channels,
+                                ma_uint32 capacityFrames,
+                                void*, void*, ma_pcm_rb* pRB)
 {
-    if (!pRB ||
-        !ma_is_supported_format(format) ||
-        channels == 0 ||
-        channels > MA_MAX_CHANNELS ||
-        capacityFrames == 0) {
+    if (!pRB || !ma_is_supported_format(format) || channels == 0 ||
+        channels > MA_MAX_CHANNELS || capacityFrames == 0) {
         return MA_ERROR;
     }
-
     const ma_uint32 bpf = ma_get_bytes_per_frame(format, channels);
-
-    if (bpf == 0 ||
-        static_cast<uint64_t>(capacityFrames) * bpf >
-            static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    if (bpf == 0 || static_cast<uint64_t>(capacityFrames) * bpf >
+                     static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
         return MA_ERROR;
     }
-
     try {
-        pRB->buffer.assign(
-            static_cast<size_t>(capacityFrames) * bpf,
-            0
-        );
+        pRB->buffer.assign(static_cast<size_t>(capacityFrames) * bpf, 0);
     } catch (...) {
         pRB->buffer.clear();
         pRB->format = ma_format_unknown;
@@ -591,21 +505,18 @@ inline ma_result ma_pcm_rb_init(
         pRB->wIndex.store(0, std::memory_order_relaxed);
         return MA_ERROR;
     }
-
     pRB->format = format;
     pRB->channels = channels;
     pRB->capacityFrames = capacityFrames;
     pRB->bytesPerFrame = bpf;
     pRB->rIndex.store(0, std::memory_order_relaxed);
     pRB->wIndex.store(0, std::memory_order_relaxed);
-
     return MA_SUCCESS;
 }
 
 inline void ma_pcm_rb_uninit(ma_pcm_rb* pRB)
 {
     if (!pRB) return;
-
     pRB->buffer.clear();
     pRB->format = ma_format_unknown;
     pRB->channels = pRB->capacityFrames = pRB->bytesPerFrame = 0;
@@ -616,159 +527,80 @@ inline void ma_pcm_rb_uninit(ma_pcm_rb* pRB)
 inline ma_uint32 ma_pcm_rb_available_read(ma_pcm_rb* pRB)
 {
     if (!pRB || pRB->capacityFrames == 0) return 0;
-
     const ma_uint64 r = pRB->rIndex.load(std::memory_order_relaxed);
     const ma_uint64 w = pRB->wIndex.load(std::memory_order_acquire);
     const ma_uint64 used = w - r;
-
-    return static_cast<ma_uint32>(
-        std::min<ma_uint64>(used, pRB->capacityFrames)
-    );
+    return static_cast<ma_uint32>(std::min<ma_uint64>(used, pRB->capacityFrames));
 }
 
 inline ma_uint32 ma_pcm_rb_available_write(ma_pcm_rb* pRB)
 {
     if (!pRB || pRB->capacityFrames == 0) return 0;
-
     const ma_uint32 used = ma_pcm_rb_available_read(pRB);
-
-    return used >= pRB->capacityFrames
-        ? 0
-        : pRB->capacityFrames - used;
+    return used >= pRB->capacityFrames ? 0 : pRB->capacityFrames - used;
 }
 
-inline ma_result ma_pcm_rb_acquire_read(
-    ma_pcm_rb* pRB,
-    ma_uint32* pframeCount,
-    void** ppData)
+inline ma_result ma_pcm_rb_acquire_read(ma_pcm_rb* pRB,
+                                        ma_uint32* pframeCount, void** ppData)
 {
-    if (!pRB || !pframeCount || !ppData ||
-        pRB->capacityFrames == 0 || pRB->bytesPerFrame == 0) {
-        return MA_ERROR;
-    }
-
+    if (!pRB || !pframeCount || !ppData || pRB->capacityFrames == 0 ||
+        pRB->bytesPerFrame == 0) return MA_ERROR;
     const ma_uint64 r = pRB->rIndex.load(std::memory_order_relaxed);
     const ma_uint64 w = pRB->wIndex.load(std::memory_order_acquire);
-
-    const ma_uint64 used64 = std::min<ma_uint64>(
-        w - r,
-        pRB->capacityFrames
-    );
-
+    const ma_uint64 used64 = std::min<ma_uint64>(w - r, pRB->capacityFrames);
     const ma_uint32 contiguous = pRB->capacityFrames -
         static_cast<ma_uint32>(r % pRB->capacityFrames);
-
-    const ma_uint32 count = static_cast<ma_uint32>(
-        std::min<ma_uint64>(
-            *pframeCount,
-            std::min<ma_uint64>(used64, contiguous)
-        )
-    );
-
+    const ma_uint32 count = static_cast<ma_uint32>(std::min<ma_uint64>(
+        *pframeCount, std::min<ma_uint64>(used64, contiguous)));
     *pframeCount = count;
-
-    *ppData = count
-        ? static_cast<void*>(
-            pRB->buffer.data() +
-            static_cast<size_t>(r % pRB->capacityFrames) * pRB->bytesPerFrame
-          )
-        : nullptr;
-
+    *ppData = count ? static_cast<void*>(pRB->buffer.data() +
+        static_cast<size_t>(r % pRB->capacityFrames) * pRB->bytesPerFrame) : nullptr;
     return MA_SUCCESS;
 }
 
-inline ma_result ma_pcm_rb_commit_read(
-    ma_pcm_rb* pRB,
-    ma_uint32 frameCount)
+inline ma_result ma_pcm_rb_commit_read(ma_pcm_rb* pRB, ma_uint32 frameCount)
 {
     if (!pRB || pRB->capacityFrames == 0) return MA_ERROR;
-
     const ma_uint64 r = pRB->rIndex.load(std::memory_order_relaxed);
     const ma_uint64 w = pRB->wIndex.load(std::memory_order_acquire);
-
-    const ma_uint64 used = std::min<ma_uint64>(
-        w - r,
-        pRB->capacityFrames
-    );
-
+    const ma_uint64 used = std::min<ma_uint64>(w - r, pRB->capacityFrames);
     const ma_uint32 contiguous = pRB->capacityFrames -
         static_cast<ma_uint32>(r % pRB->capacityFrames);
-
-    if (frameCount > used || frameCount > contiguous) {
-        return MA_ERROR;
-    }
-
+    if (frameCount > used || frameCount > contiguous) return MA_ERROR;
     pRB->rIndex.store(r + frameCount, std::memory_order_release);
     return MA_SUCCESS;
 }
 
-inline ma_result ma_pcm_rb_acquire_write(
-    ma_pcm_rb* pRB,
-    ma_uint32* pframeCount,
-    void** ppData)
+inline ma_result ma_pcm_rb_acquire_write(ma_pcm_rb* pRB,
+                                         ma_uint32* pframeCount, void** ppData)
 {
-    if (!pRB || !pframeCount || !ppData ||
-        pRB->capacityFrames == 0 || pRB->bytesPerFrame == 0) {
-        return MA_ERROR;
-    }
-
+    if (!pRB || !pframeCount || !ppData || pRB->capacityFrames == 0 ||
+        pRB->bytesPerFrame == 0) return MA_ERROR;
     const ma_uint64 w = pRB->wIndex.load(std::memory_order_relaxed);
     const ma_uint64 r = pRB->rIndex.load(std::memory_order_acquire);
-
-    const ma_uint64 used = std::min<ma_uint64>(
-        w - r,
-        pRB->capacityFrames
-    );
-
+    const ma_uint64 used = std::min<ma_uint64>(w - r, pRB->capacityFrames);
     const ma_uint32 available = used >= pRB->capacityFrames
-        ? 0
-        : pRB->capacityFrames - static_cast<ma_uint32>(used);
-
+        ? 0 : pRB->capacityFrames - static_cast<ma_uint32>(used);
     const ma_uint32 contiguous = pRB->capacityFrames -
         static_cast<ma_uint32>(w % pRB->capacityFrames);
-
-    const ma_uint32 count = std::min(
-        *pframeCount,
-        std::min(available, contiguous)
-    );
-
+    const ma_uint32 count = std::min(*pframeCount, std::min(available, contiguous));
     *pframeCount = count;
-
-    *ppData = count
-        ? static_cast<void*>(
-            pRB->buffer.data() +
-            static_cast<size_t>(w % pRB->capacityFrames) * pRB->bytesPerFrame
-          )
-        : nullptr;
-
+    *ppData = count ? static_cast<void*>(pRB->buffer.data() +
+        static_cast<size_t>(w % pRB->capacityFrames) * pRB->bytesPerFrame) : nullptr;
     return MA_SUCCESS;
 }
 
-inline ma_result ma_pcm_rb_commit_write(
-    ma_pcm_rb* pRB,
-    ma_uint32 frameCount)
+inline ma_result ma_pcm_rb_commit_write(ma_pcm_rb* pRB, ma_uint32 frameCount)
 {
     if (!pRB || pRB->capacityFrames == 0) return MA_ERROR;
-
     const ma_uint64 w = pRB->wIndex.load(std::memory_order_relaxed);
     const ma_uint64 r = pRB->rIndex.load(std::memory_order_acquire);
-
-    const ma_uint64 used = std::min<ma_uint64>(
-        w - r,
-        pRB->capacityFrames
-    );
-
+    const ma_uint64 used = std::min<ma_uint64>(w - r, pRB->capacityFrames);
     const ma_uint32 available = used >= pRB->capacityFrames
-        ? 0
-        : pRB->capacityFrames - static_cast<ma_uint32>(used);
-
+        ? 0 : pRB->capacityFrames - static_cast<ma_uint32>(used);
     const ma_uint32 contiguous = pRB->capacityFrames -
         static_cast<ma_uint32>(w % pRB->capacityFrames);
-
-    if (frameCount > available || frameCount > contiguous) {
-        return MA_ERROR;
-    }
-
+    if (frameCount > available || frameCount > contiguous) return MA_ERROR;
     pRB->wIndex.store(w + frameCount, std::memory_order_release);
     return MA_SUCCESS;
 }
@@ -792,73 +624,48 @@ struct ma_pw_enum_data {
     std::vector<ma_device_info>* capture;
 };
 
-inline void ma_pw_enum_registry_global(
-    void* data,
-    uint32_t id,
-    uint32_t,
-    const char* type,
-    uint32_t,
-    const struct spa_dict* props)
+inline void ma_pw_enum_registry_global(void* data, uint32_t id, uint32_t,
+                                       const char* type, uint32_t,
+                                       const struct spa_dict* props)
 {
     auto* enumData = static_cast<ma_pw_enum_data*>(data);
-
     if (!enumData || !type || !props ||
-        std::strcmp(type, PW_TYPE_INTERFACE_Node) != 0) {
-        return;
-    }
+        std::strcmp(type, PW_TYPE_INTERFACE_Node) != 0) return;
 
     const char* mediaClass = spa_dict_lookup(props, "media.class");
     const char* nodeName = spa_dict_lookup(props, PW_KEY_NODE_NAME);
     const char* description = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
     const char* channelsStr = spa_dict_lookup(props, PW_KEY_AUDIO_CHANNELS);
-
     if (!mediaClass) return;
 
     ma_uint32 channels = 2;
-
     if (channelsStr && channelsStr[0]) {
         char* end = nullptr;
         const unsigned long parsed = std::strtoul(channelsStr, &end, 10);
-
-        if (end != channelsStr && *end == '\0' &&
-            parsed > 0 && parsed <= MA_MAX_CHANNELS) {
-            channels = static_cast<ma_uint32>(parsed);
-        }
+        if (end != channelsStr && *end == '\0' && parsed > 0 &&
+            parsed <= MA_MAX_CHANNELS) channels = static_cast<ma_uint32>(parsed);
     }
 
-    const std::string klass(mediaClass);
-
-    const bool isSink =
-        klass.find("Audio/Sink") != std::string::npos ||
-        klass.find("Stream/Output/Audio") != std::string::npos;
-
-    const bool isSource =
-        klass.find("Audio/Source") != std::string::npos ||
-        klass.find("Stream/Input/Audio") != std::string::npos;
-
-    const bool isFilter =
-        klass.find("Audio/Filter") != std::string::npos;
-
-    if (!isSink && !isSource && !isFilter) return;
+    // Enumerate actual endpoints only. Audio stream nodes and arbitrary filters
+    // are not hardware playback/capture devices for device restoration.
+    const bool isSink = std::strcmp(mediaClass, "Audio/Sink") == 0;
+    const bool isSource = std::strcmp(mediaClass, "Audio/Source") == 0;
+    if (!isSink && !isSource) return;
 
     ma_device_info info{};
-    info.id.jack = id; // Store only the PipeWire node ID.
-    const char* displayName =
-        (description && description[0]) ? description :
-        ((nodeName && nodeName[0]) ? nodeName : "PipeWire Audio Node");
+    // CM5Audio's existing device-ID convention stores PipeWire IDs as decimal
+    // text in the ALSA union member. Do not write the numeric ID into the union:
+    // doing so makes strings such as pipewire:77 appear as pipewire:M.
+    std::snprintf(info.id.alsa, sizeof(info.id.alsa), "%u", id);
 
+    const char* displayName = (description && description[0]) ? description :
+                              ((nodeName && nodeName[0]) ? nodeName : "PipeWire Audio Node");
     std::snprintf(info.name, sizeof(info.name), "%s", displayName);
-
     info.nativeDataFormatCount = 1;
     info.nativeDataFormats[0] = { ma_format_f32, channels, 48000, 0 };
 
-    if ((isSink || isFilter) && enumData->playback) {
-        enumData->playback->push_back(info);
-    }
-
-    if ((isSource || isFilter) && enumData->capture) {
-        enumData->capture->push_back(info);
-    }
+    if (isSink && enumData->playback) enumData->playback->push_back(info);
+    if (isSource && enumData->capture) enumData->capture->push_back(info);
 }
 
 struct ma_pw_enum_sync {
@@ -869,9 +676,7 @@ struct ma_pw_enum_sync {
 inline void ma_pw_enum_core_done(void* data, uint32_t, int sequence)
 {
     auto* sync = static_cast<ma_pw_enum_sync*>(data);
-    if (sync && sequence == sync->sequence) {
-        sync->done = true;
-    }
+    if (sync && sequence == sync->sequence) sync->done = true;
 }
 
 inline const struct pw_registry_events* ma_pw_get_registry_events()
@@ -882,7 +687,6 @@ inline const struct pw_registry_events* ma_pw_get_registry_events()
         e.global = ma_pw_enum_registry_global;
         return e;
     }();
-
     return &events;
 }
 
@@ -894,52 +698,36 @@ inline const struct pw_core_events* ma_pw_get_core_events()
         e.done = ma_pw_enum_core_done;
         return e;
     }();
-
     return &events;
 }
 
-inline ma_result ma_context_init(
-    const ma_backend*,
-    ma_uint32,
-    const void*,
-    ma_context* pContext)
+
+inline ma_result ma_context_init(const ma_backend*, ma_uint32,
+                                 const void*, ma_context* pContext)
 {
     if (!pContext) return MA_ERROR;
-
     pContext->backend = ma_backend_pipewire;
     pContext->playbackDevices.clear();
     pContext->captureDevices.clear();
 
     ma_pipewire_init_once();
-
     struct pw_main_loop* loop = pw_main_loop_new(nullptr);
     if (!loop) return MA_ERROR;
 
-    struct pw_context* context = pw_context_new(
-        pw_main_loop_get_loop(loop),
-        nullptr,
-        0
-    );
-
+    struct pw_context* context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
     if (!context) {
         pw_main_loop_destroy(loop);
         return MA_ERROR;
     }
 
     struct pw_core* core = pw_context_connect(context, nullptr, 0);
-
     if (!core) {
         pw_context_destroy(context);
         pw_main_loop_destroy(loop);
         return MA_ERROR;
     }
 
-    struct pw_registry* registry = pw_core_get_registry(
-        core,
-        PW_VERSION_REGISTRY,
-        0
-    );
-
+    struct pw_registry* registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
     if (!registry) {
         pw_core_disconnect(core);
         pw_context_destroy(context);
@@ -947,69 +735,34 @@ inline ma_result ma_context_init(
         return MA_ERROR;
     }
 
-    ma_pw_enum_data enumData{
-        &pContext->playbackDevices,
-        &pContext->captureDevices
-    };
-
+    ma_pw_enum_data enumData{ &pContext->playbackDevices, &pContext->captureDevices };
     ma_pw_enum_sync syncData{ -1, false };
-
     struct spa_hook registryHook{};
     struct spa_hook coreHook{};
 
-    pw_registry_add_listener(
-        registry,
-        &registryHook,
-        ma_pw_get_registry_events(),
-        &enumData
-    );
-
-    pw_core_add_listener(
-        core,
-        &coreHook,
-        ma_pw_get_core_events(),
-        &syncData
-    );
-
+    pw_registry_add_listener(registry, &registryHook, ma_pw_get_registry_events(), &enumData);
+    pw_core_add_listener(core, &coreHook, ma_pw_get_core_events(), &syncData);
     syncData.sequence = pw_core_sync(core, PW_ID_CORE, 0);
-
     if (syncData.sequence < 0) {
         spa_hook_remove(&registryHook);
         spa_hook_remove(&coreHook);
-
-        pw_proxy_destroy(
-            reinterpret_cast<struct pw_proxy*>(registry)
-        );
-
+        pw_proxy_destroy(reinterpret_cast<struct pw_proxy*>(registry));
         pw_core_disconnect(core);
         pw_context_destroy(context);
         pw_main_loop_destroy(loop);
-
         return MA_ERROR;
     }
 
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(2);
-
-    while (!syncData.done &&
-           std::chrono::steady_clock::now() < deadline) {
-        const int r = pw_loop_iterate(
-            pw_main_loop_get_loop(loop),
-            20
-        );
-
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!syncData.done && std::chrono::steady_clock::now() < deadline) {
+        const int r = pw_loop_iterate(pw_main_loop_get_loop(loop), 20);
         if (r < 0) break;
     }
 
     const bool completed = syncData.done;
-
     spa_hook_remove(&registryHook);
     spa_hook_remove(&coreHook);
-
-    pw_proxy_destroy(
-        reinterpret_cast<struct pw_proxy*>(registry)
-    );
-
+    pw_proxy_destroy(reinterpret_cast<struct pw_proxy*>(registry));
     pw_core_disconnect(core);
     pw_context_destroy(context);
     pw_main_loop_destroy(loop);
@@ -1017,55 +770,67 @@ inline ma_result ma_context_init(
     return completed ? MA_SUCCESS : MA_ERROR;
 }
 
-inline ma_result ma_context_get_devices(
-    ma_context* pContext,
-    ma_device_info** ppPlaybackDeviceInfos,
-    ma_uint32* pPlaybackDeviceCount,
-    ma_device_info** ppCaptureDeviceInfos,
-    ma_uint32* pCaptureDeviceCount)
+inline ma_result ma_context_get_devices(ma_context* pContext,
+                                        ma_device_info** ppPlaybackDeviceInfos,
+                                        ma_uint32* pPlaybackDeviceCount,
+                                        ma_device_info** ppCaptureDeviceInfos,
+                                        ma_uint32* pCaptureDeviceCount)
 {
     if (!pContext) return MA_ERROR;
-
     if (ppPlaybackDeviceInfos && pPlaybackDeviceCount) {
         *ppPlaybackDeviceInfos = pContext->playbackDevices.empty()
-            ? nullptr
-            : pContext->playbackDevices.data();
-
-        *pPlaybackDeviceCount =
-            static_cast<ma_uint32>(pContext->playbackDevices.size());
+            ? nullptr : pContext->playbackDevices.data();
+        *pPlaybackDeviceCount = static_cast<ma_uint32>(pContext->playbackDevices.size());
     }
-
     if (ppCaptureDeviceInfos && pCaptureDeviceCount) {
         *ppCaptureDeviceInfos = pContext->captureDevices.empty()
-            ? nullptr
-            : pContext->captureDevices.data();
-
-        *pCaptureDeviceCount =
-            static_cast<ma_uint32>(pContext->captureDevices.size());
+            ? nullptr : pContext->captureDevices.data();
+        *pCaptureDeviceCount = static_cast<ma_uint32>(pContext->captureDevices.size());
     }
-
     return MA_SUCCESS;
 }
 
-inline ma_result ma_context_get_device_info(
-    ma_context* pContext,
-    ma_device_type type,
-    const ma_device_id* pDeviceID,
-    ma_device_info* pDeviceInfo)
+inline bool ma_pw_device_id_to_node_id(const ma_device_id* deviceId,
+                                       uint32_t* nodeId)
+{
+    if (!deviceId || !nodeId) return false;
+
+    // IDs returned by this shim are decimal text in id.alsa. Also accept the
+    // textual form used by CM5Audio's persisted identifiers: "pipewire:77".
+    const char* text = deviceId->alsa;
+    if (std::strncmp(text, "pipewire:", 9) == 0) text += 9;
+    if (!text[0]) return false;
+
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(text, &end, 10);
+    if (end == text || *end != '\0' || parsed >= PW_ID_ANY) return false;
+
+    *nodeId = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+inline ma_result ma_context_get_device_info(ma_context* pContext, ma_device_type type,
+                                            const ma_device_id* pDeviceID,
+                                            ma_device_info* pDeviceInfo)
 {
     if (!pContext || !pDeviceInfo) return MA_ERROR;
-
     const auto& list = (type & ma_device_type_capture)
-        ? pContext->captureDevices
-        : pContext->playbackDevices;
+        ? pContext->captureDevices : pContext->playbackDevices;
+
+    uint32_t wantedId = PW_ID_ANY;
+    if (pDeviceID && !ma_pw_device_id_to_node_id(pDeviceID, &wantedId)) {
+        *pDeviceInfo = ma_device_info{};
+        return MA_ERROR;
+    }
 
     for (const auto& device : list) {
-        if (!pDeviceID || device.id.jack == pDeviceID->jack) {
+        uint32_t currentId = PW_ID_ANY;
+        if (!ma_pw_device_id_to_node_id(&device.id, &currentId)) continue;
+        if (!pDeviceID || currentId == wantedId) {
             *pDeviceInfo = device;
             return MA_SUCCESS;
         }
     }
-
     *pDeviceInfo = ma_device_info{};
     return MA_ERROR;
 }
@@ -1073,141 +838,673 @@ inline ma_result ma_context_get_device_info(
 inline ma_result ma_context_uninit(ma_context* pContext)
 {
     if (!pContext) return MA_SUCCESS;
-
     pContext->playbackDevices.clear();
     pContext->captureDevices.clear();
-
     return MA_SUCCESS;
 }
 
 inline ma_device_config ma_device_config_init(ma_device_type type)
 {
     ma_device_config config{};
-
     config.type = type;
     config.sampleRate = 48000;
     config.periodSizeInFrames = 0;
-
     config.playback.format = ma_format_f32;
     config.playback.channels = 16;
-
     config.capture.format = ma_format_f32;
     config.capture.channels = 16;
-
     config.playback.shareMode = ma_share_mode_shared;
     config.capture.shareMode = ma_share_mode_shared;
-
     for (int i = 0; i < 32; ++i) {
         config.playback.channelMap[i] = i;
         config.playback.internalChannelMap[i] = i;
         config.capture.channelMap[i] = i;
         config.capture.internalChannelMap[i] = i;
     }
-
     config.pNodeName = nullptr;
     config.pNodeDescription = nullptr;
-
+    config.autoConnect = 1; // Enable direct linking by default for this shim.
     return config;
 }
 
 // -----------------------------------------------------------------------------
-// 5. PIPEWIRE FILTER PROCESSING
+// 5. OPTIONAL DIRECT PIPEWIRE LINKING HELPERS
 // -----------------------------------------------------------------------------
-inline void ma_pw_shim_on_process(
-    void* userdata,
-    struct spa_io_position* position)
+struct ma_pw_link_node {
+    uint32_t id;
+    std::string name;
+};
+
+struct ma_pw_link_port {
+    uint32_t globalId;
+    uint32_t nodeId;
+    uint32_t portId;
+    int direction; // PW_DIRECTION_INPUT / PW_DIRECTION_OUTPUT; -1 if unknown.
+    std::string name;
+    std::string alias;
+    std::string channel;
+};
+
+struct ma_pw_link_registry_data {
+    std::vector<ma_pw_link_node> nodes;
+    std::vector<ma_pw_link_port> ports;
+};
+
+struct ma_pw_link_sync {
+    int sequence;
+    bool done;
+};
+
+inline void ma_pw_link_registry_global(
+    void*, uint32_t, uint32_t, const char*, uint32_t, const struct spa_dict*);
+
+inline const struct pw_registry_events* ma_pw_get_link_registry_events()
+{
+    static const struct pw_registry_events events = [] {
+        struct pw_registry_events e{};
+        e.version = PW_VERSION_REGISTRY_EVENTS;
+        e.global = ma_pw_link_registry_global;
+        return e;
+    }();
+    return &events;
+}
+
+inline bool ma_pw_parse_u32(const char* value, uint32_t* out)
+{
+    if (!value || !*value || !out) return false;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value || *end != '\0' || parsed > UINT32_MAX) return false;
+    *out = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+inline std::string ma_pw_infer_channel(const std::string& input)
+{
+    std::string upper = input;
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+
+    static const char* roles[] = {
+        "MONO", "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR",
+        "FLC", "FRC", "RC", "RLC", "RRC"
+    };
+
+    for (const char* role : roles) {
+        size_t pos = upper.find(role);
+        while (pos != std::string::npos) {
+            const bool leftBoundary = pos == 0 ||
+                !std::isalnum(static_cast<unsigned char>(upper[pos - 1]));
+            const size_t end = pos + std::strlen(role);
+            const bool rightBoundary = end == upper.size() ||
+                !std::isalnum(static_cast<unsigned char>(upper[end]));
+            if (leftBoundary && rightBoundary) return role;
+            pos = upper.find(role, pos + 1);
+        }
+    }
+
+    return {};
+}
+
+inline std::string ma_pw_channel_for_index(
+    ma_uint32 index,
+    ma_uint32 channelCount,
+    const char* portName)
+{
+    if (portName) {
+        const std::string inferred = ma_pw_infer_channel(portName);
+        if (!inferred.empty()) return inferred;
+    }
+
+    if (channelCount == 1) return "MONO";
+
+    static const char* roles[] = {
+        "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"
+    };
+
+    if (index < sizeof(roles) / sizeof(roles[0])) return roles[index];
+    return {};
+}
+
+inline void ma_pw_link_registry_global(
+    void* data,
+    uint32_t id,
+    uint32_t,
+    const char* type,
+    uint32_t,
+    const struct spa_dict* props)
+{
+    auto* snapshot = static_cast<ma_pw_link_registry_data*>(data);
+    if (!snapshot || !type || !props) return;
+
+    if (std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+        const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+        snapshot->nodes.push_back({id, name ? name : ""});
+        return;
+    }
+
+    if (std::strcmp(type, PW_TYPE_INTERFACE_Port) != 0) return;
+
+    uint32_t nodeId = PW_ID_ANY;
+    uint32_t portId = id;
+    if (!ma_pw_parse_u32(spa_dict_lookup(props, "node.id"), &nodeId)) return;
+    ma_pw_parse_u32(spa_dict_lookup(props, PW_KEY_PORT_ID), &portId);
+
+    const char* directionText = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
+    int direction = -1;
+    if (directionText) {
+        if (std::strcmp(directionText, "in") == 0 ||
+            std::strcmp(directionText, "input") == 0) {
+            direction = PW_DIRECTION_INPUT;
+        } else if (std::strcmp(directionText, "out") == 0 ||
+                   std::strcmp(directionText, "output") == 0) {
+            direction = PW_DIRECTION_OUTPUT;
+        }
+    }
+
+    const char* name = spa_dict_lookup(props, PW_KEY_PORT_NAME);
+    const char* alias = spa_dict_lookup(props, PW_KEY_PORT_ALIAS);
+    const char* channel = spa_dict_lookup(props, "audio.channel");
+
+    ma_pw_link_port port{};
+    port.globalId = id;
+    port.nodeId = nodeId;
+    port.portId = portId;
+    port.direction = direction;
+    port.name = name ? name : "";
+    port.alias = alias ? alias : "";
+
+    // Only accept recognized standard channel roles. Values like AUX0 or
+    // UNKNOWN must not prevent index-based fallback.
+    if (channel && channel[0]) port.channel = ma_pw_infer_channel(channel);
+    if (port.channel.empty()) port.channel = ma_pw_infer_channel(port.name);
+    if (port.channel.empty()) port.channel = ma_pw_infer_channel(port.alias);
+
+    snapshot->ports.push_back(std::move(port));
+}
+
+inline void ma_pw_link_core_done(void* data, uint32_t, int sequence)
+{
+    auto* sync = static_cast<ma_pw_link_sync*>(data);
+    if (sync && sequence == sync->sequence) sync->done = true;
+}
+
+inline bool ma_pw_link_roundtrip(
+    struct pw_main_loop* loop,
+    struct pw_core* core,
+    ma_pw_link_sync* sync,
+    int timeoutMs = 2000)
+{
+    if (!loop || !core || !sync) return false;
+
+    sync->done = false;
+    sync->sequence = pw_core_sync(core, PW_ID_CORE, 0);
+    if (sync->sequence < 0) return false;
+
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeoutMs);
+
+    while (!sync->done && std::chrono::steady_clock::now() < deadline) {
+        const int result = pw_loop_iterate(pw_main_loop_get_loop(loop), 20);
+        if (result < 0) return false;
+    }
+
+    return sync->done;
+}
+
+inline bool ma_pw_create_lingering_link(
+    struct pw_core* core,
+    uint32_t outputNodeId,
+    const std::string& outputPort,
+    uint32_t inputNodeId,
+    const std::string& inputPort)
+{
+    if (!core || outputPort.empty() || inputPort.empty()) return false;
+
+    char outputNode[32];
+    char inputNode[32];
+    std::snprintf(outputNode, sizeof(outputNode), "%u", outputNodeId);
+    std::snprintf(inputNode, sizeof(inputNode), "%u", inputNodeId);
+
+    struct pw_properties* props = pw_properties_new(
+        "link.output.node", outputNode,
+        "link.output.port", outputPort.c_str(),
+        "link.input.node", inputNode,
+        "link.input.port", inputPort.c_str(),
+        "object.linger", "true",
+        nullptr);
+
+    if (!props) return false;
+
+    void* linkProxy = pw_core_create_object(
+        core,
+        "link-factory",
+        PW_TYPE_INTERFACE_Link,
+        PW_VERSION_LINK,
+        &props->dict,
+        0);
+
+    pw_properties_free(props);
+
+    // Do not destroy this proxy before disconnecting. object.linger=true asks
+    // PipeWire to retain the actual link after this temporary client disconnects.
+    return linkProxy != nullptr;
+}
+
+inline bool ma_pw_link_port_lists(
+    struct pw_core* core,
+    std::vector<ma_pw_link_port> localPorts,
+    std::vector<ma_pw_link_port> targetPorts,
+    uint32_t localNodeId,
+    uint32_t targetNodeId,
+    bool playbackDirection,
+    ma_uint32* linkedCount)
+{
+    if (linkedCount) *linkedCount = 0;
+
+    auto byPortIndex = [](const auto& a, const auto& b) {
+        return a.portId != b.portId ? a.portId < b.portId
+                                    : a.globalId < b.globalId;
+    };
+    std::sort(localPorts.begin(), localPorts.end(), byPortIndex);
+    std::sort(targetPorts.begin(), targetPorts.end(), byPortIndex);
+
+    // Match all recognized roles first so an unlabeled early port cannot take
+    // a target port that a later channel could match exactly.
+    std::vector<int> mapping(localPorts.size(), -1);
+    std::vector<bool> used(targetPorts.size(), false);
+
+    for (size_t li = 0; li < localPorts.size(); ++li) {
+        if (localPorts[li].channel.empty()) continue;
+        for (size_t ti = 0; ti < targetPorts.size(); ++ti) {
+            if (!used[ti] && !targetPorts[ti].channel.empty() &&
+                targetPorts[ti].channel == localPorts[li].channel) {
+                mapping[li] = static_cast<int>(ti);
+                used[ti] = true;
+                break;
+            }
+        }
+    }
+
+    // Fall back to index/order for any remaining ports. This is needed for
+    // devices whose channel metadata is absent or uses vendor-specific labels.
+    for (size_t li = 0; li < localPorts.size(); ++li) {
+        if (mapping[li] >= 0) continue;
+        for (size_t ti = 0; ti < targetPorts.size(); ++ti) {
+            if (!used[ti]) {
+                mapping[li] = static_cast<int>(ti);
+                used[ti] = true;
+                break;
+            }
+        }
+    }
+
+    ma_uint32 count = 0;
+    for (size_t li = 0; li < localPorts.size(); ++li) {
+        if (mapping[li] < 0) continue;
+
+        const auto& local = localPorts[li];
+        const auto& target = targetPorts[static_cast<size_t>(mapping[li])];
+
+        // PipeWire's link factory accepts port global object IDs as values for
+        // link.output.port/link.input.port. This avoids ambiguous port names.
+        const std::string localPortId = std::to_string(local.globalId);
+        const std::string targetPortId = std::to_string(target.globalId);
+
+        bool created = false;
+        if (playbackDirection) {
+            // Filter output -> selected playback device input.
+            created = ma_pw_create_lingering_link(
+                core, localNodeId, localPortId,
+                targetNodeId, targetPortId);
+        } else {
+            // Selected capture device output -> filter input.
+            created = ma_pw_create_lingering_link(
+                core, targetNodeId, targetPortId,
+                localNodeId, localPortId);
+        }
+
+        if (created) {
+            ++count;
+        } else {
+            std::fprintf(stderr,
+                "[miniaudio-pipewire] Failed to request %s link: global ports %u <-> %u.\n",
+                playbackDirection ? "playback" : "capture",
+                playbackDirection ? local.globalId : target.globalId,
+                playbackDirection ? target.globalId : local.globalId);
+        }
+    }
+
+    if (linkedCount) *linkedCount = count;
+    return count > 0;
+}
+
+inline ma_result ma_pw_auto_connect_device(ma_device* device)
+{
+    if (!device || !device->filter || !device->autoConnect) return MA_ERROR;
+
+    const bool wantsPlayback =
+        (device->type & ma_device_type_playback) != 0;
+    const bool wantsCapture =
+        (device->type & ma_device_type_capture) != 0;
+
+    const uint32_t playbackTarget = device->playbackTargetNodeId;
+    const uint32_t captureTarget = device->captureTargetNodeId;
+
+    if ((wantsPlayback && playbackTarget == PW_ID_ANY) ||
+        (wantsCapture && captureTarget == PW_ID_ANY)) {
+        std::fprintf(stderr,
+            "[miniaudio-pipewire] autoConnect requires playback/capture pDeviceID "
+            "for every enabled direction.\n");
+        return MA_ERROR;
+    }
+
+    ma_pipewire_init_once();
+
+    struct pw_main_loop* loop = pw_main_loop_new(nullptr);
+    if (!loop) return MA_ERROR;
+
+    struct pw_context* context = pw_context_new(
+        pw_main_loop_get_loop(loop), nullptr, 0);
+    if (!context) {
+        pw_main_loop_destroy(loop);
+        return MA_ERROR;
+    }
+
+    struct pw_core* core = pw_context_connect(context, nullptr, 0);
+    if (!core) {
+        pw_context_destroy(context);
+        pw_main_loop_destroy(loop);
+        return MA_ERROR;
+    }
+
+    struct pw_registry* registry = pw_core_get_registry(
+        core, PW_VERSION_REGISTRY, 0);
+    if (!registry) {
+        pw_core_disconnect(core);
+        pw_context_destroy(context);
+        pw_main_loop_destroy(loop);
+        return MA_ERROR;
+    }
+
+    ma_pw_link_registry_data snapshot;
+    ma_pw_link_sync sync{-1, false};
+    struct spa_hook registryHook{};
+    struct spa_hook coreHook{};
+
+    pw_registry_add_listener(
+        registry, &registryHook, ma_pw_get_link_registry_events(), &snapshot);
+
+    struct pw_core_events coreEvents{};
+    coreEvents.version = PW_VERSION_CORE_EVENTS;
+    coreEvents.done = ma_pw_link_core_done;
+    pw_core_add_listener(core, &coreHook, &coreEvents, &sync);
+
+    // First collect the registry snapshot. Keep the listener attached after
+    // this roundtrip, because our filter is owned by a different PipeWire
+    // connection and its node/ports may not have been announced yet.
+    const bool enumerated = ma_pw_link_roundtrip(loop, core, &sync, 2000);
+    if (!enumerated) {
+        spa_hook_remove(&registryHook);
+        spa_hook_remove(&coreHook);
+        pw_proxy_destroy(reinterpret_cast<struct pw_proxy*>(registry));
+        pw_core_disconnect(core);
+        pw_context_destroy(context);
+        pw_main_loop_destroy(loop);
+
+        std::fprintf(stderr,
+            "[miniaudio-pipewire] Timed out during initial registry enumeration.\n");
+        return MA_ERROR;
+    }
+
+    auto resolveLocalNodeId = [&]() -> uint32_t {
+        // Prefer the node ID reported by the filter object itself.
+        const uint32_t directId = pw_filter_get_node_id(device->filter);
+        if (directId != PW_ID_ANY) return directId;
+
+        // The direct ID may not be available yet. Fall back to the filter's
+        // configured PipeWire node name in the registry snapshot.
+        for (const auto& node : snapshot.nodes) {
+            if (node.name == device->pipewireNodeName) {
+                return node.id;
+            }
+        }
+
+        return PW_ID_ANY;
+    };
+
+    auto localPortsReady = [&](uint32_t nodeId) -> bool {
+        if (nodeId == PW_ID_ANY) return false;
+
+        bool havePlaybackPorts = !wantsPlayback;
+        bool haveCapturePorts = !wantsCapture;
+
+        for (const auto& port : snapshot.ports) {
+            if (port.nodeId != nodeId) continue;
+
+            if (wantsPlayback && port.direction == PW_DIRECTION_OUTPUT) {
+                havePlaybackPorts = true;
+            }
+
+            if (wantsCapture && port.direction == PW_DIRECTION_INPUT) {
+                haveCapturePorts = true;
+            }
+        }
+
+        return havePlaybackPorts && haveCapturePorts;
+    };
+
+    // Wait for the filter node and its local ports to become visible.
+    //
+    // Repeated syncs allow the registry listener to receive globals announced
+    // after the first snapshot. This avoids the startup race where the filter
+    // is connected and activated but its node/ports have not yet appeared in
+    // the separate registry client's view.
+    uint32_t localNodeId = PW_ID_ANY;
+    const auto discoveryDeadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(4);
+
+    while (std::chrono::steady_clock::now() < discoveryDeadline) {
+        localNodeId = resolveLocalNodeId();
+
+        if (localNodeId != PW_ID_ANY && localPortsReady(localNodeId)) {
+            break;
+        }
+
+        // The sync is deliberately short: repeated barriers let newly
+        // announced globals and ports arrive without blocking startup for
+        // another full two-second timeout on every attempt.
+        ma_pw_link_roundtrip(loop, core, &sync, 250);
+
+        // Check once more after the loop has processed the registry events.
+        localNodeId = resolveLocalNodeId();
+
+        if (localNodeId != PW_ID_ANY && localPortsReady(localNodeId)) {
+            break;
+        }
+    }
+
+    const bool foundLocalPorts =
+        localNodeId != PW_ID_ANY && localPortsReady(localNodeId);
+
+    if (!foundLocalPorts) {
+        const char* filterError = nullptr;
+        const enum pw_filter_state filterState =
+            pw_filter_get_state(device->filter, &filterError);
+
+        std::fprintf(stderr,
+            "[miniaudio-pipewire] Could not discover CM5Audio filter node and "
+            "ports after waiting for the PipeWire registry. "
+            "configured-name='%s', filter-node-id=%u, filter-state=%d",
+            device->pipewireNodeName,
+            static_cast<unsigned int>(pw_filter_get_node_id(device->filter)),
+            static_cast<int>(filterState));
+
+        if (filterError && filterError[0]) {
+            std::fprintf(stderr, ", filter-error='%s'", filterError);
+        }
+
+        std::fprintf(stderr, ". Registered nodes seen:\n");
+
+        for (const auto& node : snapshot.nodes) {
+            std::fprintf(stderr, "  node %u: '%s'\n",
+                         node.id, node.name.c_str());
+        }
+
+        spa_hook_remove(&registryHook);
+        spa_hook_remove(&coreHook);
+        pw_proxy_destroy(reinterpret_cast<struct pw_proxy*>(registry));
+        pw_core_disconnect(core);
+        pw_context_destroy(context);
+        pw_main_loop_destroy(loop);
+        return MA_ERROR;
+    }
+
+    // The registry is no longer needed after node/port discovery.
+    spa_hook_remove(&registryHook);
+
+    bool overallSuccess = true;
+
+    auto connectDirection = [&](bool playbackDirection,
+                                 uint32_t targetNodeId) -> bool {
+        const int localDirection = playbackDirection
+            ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT;
+        const int targetDirection = playbackDirection
+            ? PW_DIRECTION_INPUT : PW_DIRECTION_OUTPUT;
+
+        std::vector<ma_pw_link_port> localPorts;
+        std::vector<ma_pw_link_port> targetPorts;
+
+        for (const auto& port : snapshot.ports) {
+            if (port.direction == localDirection &&
+                port.nodeId == localNodeId) {
+                localPorts.push_back(port);
+            }
+
+            if (port.direction == targetDirection &&
+                port.nodeId == targetNodeId) {
+                targetPorts.push_back(port);
+            }
+        }
+
+        if (localPorts.empty() || targetPorts.empty()) {
+            std::fprintf(stderr,
+                "[miniaudio-pipewire] autoConnect found no matching %s ports "
+                "(local=%zu, target=%zu, target-node=%u).\n",
+                playbackDirection ? "playback" : "capture",
+                localPorts.size(),
+                targetPorts.size(),
+                targetNodeId);
+            return false;
+        }
+
+        ma_uint32 linked = 0;
+
+        const bool linkedAny = ma_pw_link_port_lists(
+            core,
+            std::move(localPorts),
+            std::move(targetPorts),
+            localNodeId,
+            targetNodeId,
+            playbackDirection,
+            &linked);
+
+        const size_t expectedPorts = playbackDirection
+            ? device->out_ports.size()
+            : device->in_ports.size();
+
+        if (linked < expectedPorts) {
+            std::fprintf(stderr,
+                "[miniaudio-pipewire] %s autoConnect linked %u channel(s); "
+                "filter has %zu port(s). Check channel count/roles.\n",
+                playbackDirection ? "Playback" : "Capture",
+                linked,
+                expectedPorts);
+        }
+
+        return linkedAny;
+    };
+
+    if (wantsPlayback && !connectDirection(true, playbackTarget)) {
+        overallSuccess = false;
+    }
+
+    if (wantsCapture && !connectDirection(false, captureTarget)) {
+        overallSuccess = false;
+    }
+
+    // Wait for the server to process the link-factory requests.
+    if (!ma_pw_link_roundtrip(loop, core, &sync, 2000)) {
+        overallSuccess = false;
+        std::fprintf(stderr,
+            "[miniaudio-pipewire] Timed out waiting for autoConnect link requests.\n");
+    }
+
+    spa_hook_remove(&coreHook);
+    pw_proxy_destroy(reinterpret_cast<struct pw_proxy*>(registry));
+    pw_core_disconnect(core); // object.linger=true keeps created links alive.
+    pw_context_destroy(context);
+    pw_main_loop_destroy(loop);
+
+    return overallSuccess ? MA_SUCCESS : MA_ERROR;
+}
+
+// -----------------------------------------------------------------------------
+// 6. PIPEWIRE FILTER PROCESSING
+// -----------------------------------------------------------------------------
+inline void ma_pw_shim_on_process(void* userdata, struct spa_io_position* position)
 {
     auto* device = static_cast<ma_device*>(userdata);
-
     if (!device || !position) return;
 
     const ma_uint32 frames = position->clock.duration;
     if (frames == 0) return;
-
     device->processCount.fetch_add(1, std::memory_order_relaxed);
 
     // SPA clock.rate is a period per sample (typically 1/48000).
-    if (position->clock.rate.num != 0 &&
-        position->clock.rate.denom != 0) {
-        const double rate =
-            static_cast<double>(position->clock.rate.denom) /
-            static_cast<double>(position->clock.rate.num);
-
-        const ma_uint32 graphRate =
-            (rate > 0.0 && rate < 1000000.0)
-                ? static_cast<ma_uint32>(std::llround(rate))
-                : 0;
-
+    if (position->clock.rate.num != 0 && position->clock.rate.denom != 0) {
+        const double rate = static_cast<double>(position->clock.rate.denom) /
+                            static_cast<double>(position->clock.rate.num);
+        const ma_uint32 graphRate = (rate > 0.0 && rate < 1000000.0)
+            ? static_cast<ma_uint32>(std::llround(rate)) : 0;
         if (graphRate != 0) {
-            device->graphSampleRate.store(
-                graphRate,
-                std::memory_order_relaxed
-            );
-
+            device->graphSampleRate.store(graphRate, std::memory_order_relaxed);
             device->sampleRateMismatch.store(
-                graphRate != device->sampleRate ? 1 : 0,
-                std::memory_order_relaxed
-            );
+                graphRate != device->sampleRate ? 1 : 0, std::memory_order_relaxed);
         }
     }
 
-    const bool wantsCapture =
-        (device->type & ma_device_type_capture) != 0;
-
-    const bool wantsPlayback =
-        (device->type & ma_device_type_playback) != 0;
-
+    const bool wantsCapture = (device->type & ma_device_type_capture) != 0;
+    const bool wantsPlayback = (device->type & ma_device_type_playback) != 0;
     const ma_uint32 capturePorts = wantsCapture
-        ? static_cast<ma_uint32>(device->in_ports.size())
-        : 0;
-
+        ? static_cast<ma_uint32>(device->in_ports.size()) : 0;
     const ma_uint32 playbackPorts = wantsPlayback
-        ? static_cast<ma_uint32>(device->out_ports.size())
-        : 0;
+        ? static_cast<ma_uint32>(device->out_ports.size()) : 0;
 
     // If a PipeWire quantum exceeds the preallocated capacity, emit silence and
     // skip the callback. Never resize/allocate/throw on the real-time thread.
     if (frames > device->maxProcessFrames) {
-        device->oversizedBlockCount.fetch_add(
-            1,
-            std::memory_order_relaxed
-        );
-
+        device->oversizedBlockCount.fetch_add(1, std::memory_order_relaxed);
         for (ma_uint32 c = 0; c < playbackPorts; ++c) {
-            float* out = static_cast<float*>(
-                pw_filter_get_dsp_buffer(device->out_ports[c], frames)
-            );
-
-            if (out) {
-                std::fill(out, out + frames, 0.0f);
-            }
+            float* out = static_cast<float*>(pw_filter_get_dsp_buffer(device->out_ports[c], frames));
+            if (out) std::fill(out, out + frames, 0.0f);
         }
-
         return;
     }
 
     if (wantsCapture && capturePorts != 0) {
         for (ma_uint32 c = 0; c < capturePorts; ++c) {
-            float* in = static_cast<float*>(
-                pw_filter_get_dsp_buffer(device->in_ports[c], frames)
-            );
-
+            float* in = static_cast<float*>(pw_filter_get_dsp_buffer(device->in_ports[c], frames));
             if (in) {
                 for (ma_uint32 f = 0; f < frames; ++f) {
-                    device->input_interleaved[
-                        static_cast<size_t>(f) * capturePorts + c
-                    ] = ma_sanitize_float(in[f]);
+                    device->input_interleaved[static_cast<size_t>(f) * capturePorts + c] =
+                        ma_sanitize_float(in[f]);
                 }
             } else {
-                device->nullPortBufferCount.fetch_add(
-                    1,
-                    std::memory_order_relaxed
-                );
-
+                device->nullPortBufferCount.fetch_add(1, std::memory_order_relaxed);
                 for (ma_uint32 f = 0; f < frames; ++f) {
-                    device->input_interleaved[
-                        static_cast<size_t>(f) * capturePorts + c
-                    ] = 0.0f;
+                    device->input_interleaved[static_cast<size_t>(f) * capturePorts + c] = 0.0f;
                 }
             }
         }
@@ -1217,121 +1514,60 @@ inline void ma_pw_shim_on_process(
     void* callbackOutput = nullptr;
 
     if (wantsCapture) {
-        ma_fill_silence(
-            device->callback_input.data(),
-            frames,
-            device->capture.format,
-            device->capture.channels
-        );
-
+        ma_fill_silence(device->callback_input.data(), frames,
+                        device->capture.format, device->capture.channels);
         const size_t appChannels = device->capture.channels;
-
         for (ma_uint32 f = 0; f < frames; ++f) {
-            for (ma_uint32 appC = 0;
-                 appC < device->capture.channels;
-                 ++appC) {
-                const int wantedPosition = ma_channel_position(
-                    device->capture.channelMap,
-                    appC
-                );
-
+            for (ma_uint32 appC = 0; appC < device->capture.channels; ++appC) {
+                const int wantedPosition = ma_channel_position(device->capture.channelMap, appC);
                 const int sourceC = ma_find_channel_position(
-                    device->capture.internalChannelMap,
-                    capturePorts,
-                    wantedPosition
-                );
-
-                const float value =
-                    (sourceC >= 0 &&
-                     static_cast<ma_uint32>(sourceC) < capturePorts)
-                    ? device->input_interleaved[
-                        static_cast<size_t>(f) * capturePorts +
-                        static_cast<ma_uint32>(sourceC)
-                      ]
+                    device->capture.internalChannelMap, capturePorts, wantedPosition);
+                const float value = (sourceC >= 0 && static_cast<ma_uint32>(sourceC) < capturePorts)
+                    ? device->input_interleaved[static_cast<size_t>(f) * capturePorts +
+                                                static_cast<ma_uint32>(sourceC)]
                     : 0.0f;
-
-                ma_write_sample_from_f32(
-                    device->callback_input.data(),
-                    device->capture.format,
-                    static_cast<size_t>(f) * appChannels + appC,
-                    value
-                );
+                ma_write_sample_from_f32(device->callback_input.data(), device->capture.format,
+                                         static_cast<size_t>(f) * appChannels + appC, value);
             }
         }
-
         callbackInput = device->callback_input.data();
     }
 
     if (wantsPlayback) {
-        ma_fill_silence(
-            device->callback_output.data(),
-            frames,
-            device->playback.format,
-            device->playback.channels
-        );
-
+        ma_fill_silence(device->callback_output.data(), frames,
+                        device->playback.format, device->playback.channels);
         callbackOutput = device->callback_output.data();
     }
 
     if (device->dataCallback) {
-        device->dataCallback(
-            device,
-            callbackOutput,
-            callbackInput,
-            frames
-        );
+        device->dataCallback(device, callbackOutput, callbackInput, frames);
     }
 
     if (wantsPlayback && playbackPorts != 0) {
         const size_t appChannels = device->playback.channels;
-
         for (ma_uint32 f = 0; f < frames; ++f) {
             for (ma_uint32 portC = 0; portC < playbackPorts; ++portC) {
                 const int wantedPosition = ma_channel_position(
-                    device->playback.internalChannelMap,
-                    portC
-                );
-
+                    device->playback.internalChannelMap, portC);
                 const int sourceC = ma_find_channel_position(
-                    device->playback.channelMap,
-                    device->playback.channels,
-                    wantedPosition
-                );
-
-                const float value =
-                    (sourceC >= 0 &&
-                     static_cast<ma_uint32>(sourceC) <
-                        device->playback.channels)
-                    ? ma_read_sample_f32(
-                        device->callback_output.data(),
-                        device->playback.format,
-                        static_cast<size_t>(f) * appChannels +
-                            static_cast<ma_uint32>(sourceC)
-                      )
+                    device->playback.channelMap, device->playback.channels, wantedPosition);
+                const float value = (sourceC >= 0 &&
+                                     static_cast<ma_uint32>(sourceC) < device->playback.channels)
+                    ? ma_read_sample_f32(device->callback_output.data(), device->playback.format,
+                                         static_cast<size_t>(f) * appChannels +
+                                         static_cast<ma_uint32>(sourceC))
                     : 0.0f;
-
-                device->output_interleaved[
-                    static_cast<size_t>(f) * playbackPorts + portC
-                ] = value;
+                device->output_interleaved[static_cast<size_t>(f) * playbackPorts + portC] = value;
             }
         }
-
         for (ma_uint32 c = 0; c < playbackPorts; ++c) {
-            float* out = static_cast<float*>(
-                pw_filter_get_dsp_buffer(device->out_ports[c], frames)
-            );
-
+            float* out = static_cast<float*>(pw_filter_get_dsp_buffer(device->out_ports[c], frames));
             if (out) {
                 for (ma_uint32 f = 0; f < frames; ++f) {
-                    out[f] = device->output_interleaved[
-                        static_cast<size_t>(f) * playbackPorts + c
-                    ];
+                    out[f] = device->output_interleaved[static_cast<size_t>(f) * playbackPorts + c];
                 }
             } else {
-                device->nullPortBufferCount.fetch_add(
-                    1,
-                    std::memory_order_relaxed
-                );
+                device->nullPortBufferCount.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
@@ -1345,60 +1581,46 @@ inline const struct pw_filter_events* ma_pw_get_filter_events()
         e.process = ma_pw_shim_on_process;
         return e;
     }();
-
     return &events;
 }
 
 inline void ma_pw_device_clear_resources(ma_device* pDevice)
 {
     if (!pDevice) return;
-
     if (pDevice->filter) {
         pw_filter_destroy(pDevice->filter);
         pDevice->filter = nullptr;
     }
-
     if (pDevice->loop) {
         pw_main_loop_destroy(pDevice->loop);
         pDevice->loop = nullptr;
     }
-
     pDevice->in_ports.clear();
     pDevice->out_ports.clear();
-
     pDevice->input_interleaved.clear();
     pDevice->output_interleaved.clear();
-
     pDevice->callback_input.clear();
     pDevice->callback_output.clear();
-
     pDevice->maxProcessFrames = 0;
 }
 
-inline ma_result ma_device_init(
-    ma_context* pContext,
-    const ma_device_config* pConfig,
-    ma_device* pDevice)
+inline ma_result ma_device_init(ma_context* pContext,
+                                const ma_device_config* pConfig,
+                                ma_device* pDevice)
 {
     if (!pConfig || !pDevice) return MA_ERROR;
-
     // A running/joinable loop thread cannot safely be overwritten by init.
     if (pDevice->loop_thread.joinable()) return MA_ERROR;
 
     pDevice->loop = nullptr;
     pDevice->filter = nullptr;
-
     pDevice->in_ports.clear();
     pDevice->out_ports.clear();
-
     pDevice->input_interleaved.clear();
     pDevice->output_interleaved.clear();
-
     pDevice->callback_input.clear();
     pDevice->callback_output.clear();
-
     pDevice->maxProcessFrames = 0;
-
     pDevice->graphSampleRate.store(0, std::memory_order_relaxed);
     pDevice->sampleRateMismatch.store(0, std::memory_order_relaxed);
     pDevice->processCount.store(0, std::memory_order_relaxed);
@@ -1411,152 +1633,86 @@ inline ma_result ma_device_init(
     pDevice->capture = pConfig->capture;
     pDevice->dataCallback = pConfig->dataCallback;
     pDevice->pUserData = pConfig->pUserData;
+    pDevice->autoConnect = pConfig->autoConnect != 0;
+    pDevice->autoConnectPerformed = 0;
+    pDevice->playbackTargetNodeId = PW_ID_ANY;
+    pDevice->captureTargetNodeId = PW_ID_ANY;
+    if (pDevice->playback.pDeviceID) {
+        ma_pw_device_id_to_node_id(
+            pDevice->playback.pDeviceID,
+            &pDevice->playbackTargetNodeId);
+    }
+    if (pDevice->capture.pDeviceID) {
+        ma_pw_device_id_to_node_id(
+            pDevice->capture.pDeviceID,
+            &pDevice->captureTargetNodeId);
+    }
+    pDevice->pipewireNodeName[0] = '\0';
 
-    const bool wantsPlayback =
-        (pDevice->type & ma_device_type_playback) != 0;
+    const bool wantsPlayback = (pDevice->type & ma_device_type_playback) != 0;
+    const bool wantsCapture = (pDevice->type & ma_device_type_capture) != 0;
+    if ((!wantsPlayback && !wantsCapture) || (pDevice->type & ~ma_device_type_duplex) != 0 ||
+        pDevice->sampleRate == 0) return MA_ERROR;
 
-    const bool wantsCapture =
-        (pDevice->type & ma_device_type_capture) != 0;
-
-    if ((!wantsPlayback && !wantsCapture) ||
-        (pDevice->type & ~ma_device_type_duplex) != 0 ||
-        pDevice->sampleRate == 0) {
+    if (pDevice->autoConnect &&
+        ((wantsPlayback && pDevice->playbackTargetNodeId == PW_ID_ANY) ||
+         (wantsCapture && pDevice->captureTargetNodeId == PW_ID_ANY))) {
+        std::fprintf(stderr,
+            "[miniaudio-pipewire] autoConnect requires a valid pDeviceID "
+            "for every enabled direction.\n");
         return MA_ERROR;
     }
 
     if (wantsPlayback) {
-        if (pDevice->playback.channels == 0 ||
-            pDevice->playback.channels > MA_MAX_CHANNELS ||
-            !ma_is_supported_format(pDevice->playback.format)) {
-            return MA_ERROR;
-        }
-
-        if (pDevice->playback.internalChannels == 0) {
-            pDevice->playback.internalChannels =
-                pDevice->playback.channels;
-        }
-
-        if (pDevice->playback.internalChannels > MA_MAX_CHANNELS) {
-            return MA_ERROR;
-        }
-
-        if (pDevice->playback.internalSampleRate == 0) {
+        if (pDevice->playback.channels == 0 || pDevice->playback.channels > MA_MAX_CHANNELS ||
+            !ma_is_supported_format(pDevice->playback.format)) return MA_ERROR;
+        if (pDevice->playback.internalChannels == 0)
+            pDevice->playback.internalChannels = pDevice->playback.channels;
+        if (pDevice->playback.internalChannels > MA_MAX_CHANNELS) return MA_ERROR;
+        if (pDevice->playback.internalSampleRate == 0)
             pDevice->playback.internalSampleRate = pDevice->sampleRate;
-        }
-
         // PipeWire DSP ports are always float, irrespective of callback format.
         pDevice->playback.internalFormat = ma_format_f32;
-
-        ma_fix_all_zero_channel_map(
-            pDevice->playback.channelMap,
-            pDevice->playback.channels
-        );
-
-        ma_fix_all_zero_channel_map(
-            pDevice->playback.internalChannelMap,
-            pDevice->playback.internalChannels
-        );
+        ma_fix_all_zero_channel_map(pDevice->playback.channelMap, pDevice->playback.channels);
+        ma_fix_all_zero_channel_map(pDevice->playback.internalChannelMap,
+                                    pDevice->playback.internalChannels);
     }
-
     if (wantsCapture) {
-        if (pDevice->capture.channels == 0 ||
-            pDevice->capture.channels > MA_MAX_CHANNELS ||
-            !ma_is_supported_format(pDevice->capture.format)) {
-            return MA_ERROR;
-        }
-
-        if (pDevice->capture.internalChannels == 0) {
-            pDevice->capture.internalChannels =
-                pDevice->capture.channels;
-        }
-
-        if (pDevice->capture.internalChannels > MA_MAX_CHANNELS) {
-            return MA_ERROR;
-        }
-
-        if (pDevice->capture.internalSampleRate == 0) {
+        if (pDevice->capture.channels == 0 || pDevice->capture.channels > MA_MAX_CHANNELS ||
+            !ma_is_supported_format(pDevice->capture.format)) return MA_ERROR;
+        if (pDevice->capture.internalChannels == 0)
+            pDevice->capture.internalChannels = pDevice->capture.channels;
+        if (pDevice->capture.internalChannels > MA_MAX_CHANNELS) return MA_ERROR;
+        if (pDevice->capture.internalSampleRate == 0)
             pDevice->capture.internalSampleRate = pDevice->sampleRate;
-        }
-
         pDevice->capture.internalFormat = ma_format_f32;
-
-        ma_fix_all_zero_channel_map(
-            pDevice->capture.channelMap,
-            pDevice->capture.channels
-        );
-
-        ma_fix_all_zero_channel_map(
-            pDevice->capture.internalChannelMap,
-            pDevice->capture.internalChannels
-        );
+        ma_fix_all_zero_channel_map(pDevice->capture.channelMap, pDevice->capture.channels);
+        ma_fix_all_zero_channel_map(pDevice->capture.internalChannelMap,
+                                    pDevice->capture.internalChannels);
     }
 
-    ma_uint32 maxFrames = std::max<ma_uint32>(
-        4096,
-        pConfig->periodSizeInFrames
-    );
-
-    if (maxFrames > MA_PIPEWIRE_MAX_PROCESS_FRAMES) {
-        return MA_ERROR;
-    }
-
+    ma_uint32 maxFrames = std::max<ma_uint32>(4096, pConfig->periodSizeInFrames);
+    if (maxFrames > MA_PIPEWIRE_MAX_PROCESS_FRAMES) return MA_ERROR;
     pDevice->maxProcessFrames = maxFrames;
 
-    const ma_uint32 capturePortCount = wantsCapture
-        ? pDevice->capture.internalChannels
-        : 0;
-
-    const ma_uint32 playbackPortCount = wantsPlayback
-        ? pDevice->playback.internalChannels
-        : 0;
-
+    const ma_uint32 capturePortCount = wantsCapture ? pDevice->capture.internalChannels : 0;
+    const ma_uint32 playbackPortCount = wantsPlayback ? pDevice->playback.internalChannels : 0;
     const ma_uint32 callbackInputBPF = wantsCapture
-        ? ma_get_bytes_per_frame(
-              pDevice->capture.format,
-              pDevice->capture.channels
-          )
-        : 0;
-
+        ? ma_get_bytes_per_frame(pDevice->capture.format, pDevice->capture.channels) : 0;
     const ma_uint32 callbackOutputBPF = wantsPlayback
-        ? ma_get_bytes_per_frame(
-              pDevice->playback.format,
-              pDevice->playback.channels
-          )
-        : 0;
-
+        ? ma_get_bytes_per_frame(pDevice->playback.format, pDevice->playback.channels) : 0;
     if ((wantsCapture && callbackInputBPF == 0) ||
-        (wantsPlayback && callbackOutputBPF == 0)) {
-        return MA_ERROR;
-    }
+        (wantsPlayback && callbackOutputBPF == 0)) return MA_ERROR;
 
     try {
-        if (capturePortCount) {
-            pDevice->input_interleaved.resize(
-                static_cast<size_t>(maxFrames) * capturePortCount,
-                0.0f
-            );
-        }
-
-        if (playbackPortCount) {
-            pDevice->output_interleaved.resize(
-                static_cast<size_t>(maxFrames) * playbackPortCount,
-                0.0f
-            );
-        }
-
-        if (wantsCapture) {
-            pDevice->callback_input.resize(
-                static_cast<size_t>(maxFrames) * callbackInputBPF,
-                0
-            );
-        }
-
-        if (wantsPlayback) {
-            pDevice->callback_output.resize(
-                static_cast<size_t>(maxFrames) * callbackOutputBPF,
-                0
-            );
-        }
+        if (capturePortCount)
+            pDevice->input_interleaved.resize(static_cast<size_t>(maxFrames) * capturePortCount, 0.0f);
+        if (playbackPortCount)
+            pDevice->output_interleaved.resize(static_cast<size_t>(maxFrames) * playbackPortCount, 0.0f);
+        if (wantsCapture)
+            pDevice->callback_input.resize(static_cast<size_t>(maxFrames) * callbackInputBPF, 0);
+        if (wantsPlayback)
+            pDevice->callback_output.resize(static_cast<size_t>(maxFrames) * callbackOutputBPF, 0);
     } catch (...) {
         pDevice->input_interleaved.clear();
         pDevice->output_interleaved.clear();
@@ -1567,42 +1723,32 @@ inline ma_result ma_device_init(
     }
 
     ma_pipewire_init_once();
-
     pDevice->loop = pw_main_loop_new(nullptr);
-
     if (!pDevice->loop) {
         ma_pw_device_clear_resources(pDevice);
         return MA_ERROR;
     }
 
     static std::atomic<ma_uint64> nextDefaultName{1};
-
-    std::string resolvedName =
-        "cm5audio_device_" +
-        std::to_string(
-            nextDefaultName.fetch_add(1, std::memory_order_relaxed)
-        );
-
-    std::string resolvedDescription =
-        "CM5Audio Native PipeWire Device Shim";
-
-    if (pConfig->pNodeName && pConfig->pNodeName[0]) {
-        resolvedName = pConfig->pNodeName;
-    }
-
+    std::string resolvedName = "cm5audio_device_" +
+        std::to_string(nextDefaultName.fetch_add(1, std::memory_order_relaxed));
+    std::string resolvedDescription = "CM5Audio Native PipeWire Device Shim";
+    if (pConfig->pNodeName && pConfig->pNodeName[0]) resolvedName = pConfig->pNodeName;
     if (pConfig->pNodeDescription && pConfig->pNodeDescription[0]) {
         resolvedDescription = pConfig->pNodeDescription;
     } else if (pContext) {
-        const auto& list = wantsCapture
-            ? pContext->captureDevices
-            : pContext->playbackDevices;
-
+        const auto& list = wantsCapture ? pContext->captureDevices : pContext->playbackDevices;
         const ma_device_id* targetId = wantsCapture
-            ? pDevice->capture.pDeviceID
-            : pDevice->playback.pDeviceID;
-
+            ? pDevice->capture.pDeviceID : pDevice->playback.pDeviceID;
+        uint32_t targetNodeId = PW_ID_ANY;
+        const bool haveTargetId = targetId &&
+            ma_pw_device_id_to_node_id(targetId, &targetNodeId);
         for (const auto& dev : list) {
-            if (!targetId || dev.id.jack == targetId->jack) {
+            uint32_t candidateNodeId = PW_ID_ANY;
+            if (!targetId ||
+                (haveTargetId &&
+                 ma_pw_device_id_to_node_id(&dev.id, &candidateNodeId) &&
+                 candidateNodeId == targetNodeId)) {
                 if (dev.name[0]) {
                     resolvedDescription = dev.name;
                     break;
@@ -1611,114 +1757,83 @@ inline ma_result ma_device_init(
         }
     }
 
+    std::snprintf(pDevice->pipewireNodeName,
+                  sizeof(pDevice->pipewireNodeName), "%s", resolvedName.c_str());
+
     struct pw_properties* props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Filter",
         PW_KEY_MEDIA_ROLE, "DSP",
         PW_KEY_NODE_NAME, resolvedName.c_str(),
         PW_KEY_NODE_DESCRIPTION, resolvedDescription.c_str(),
-        nullptr
-    );
-
+        nullptr);
     if (!props) {
         ma_pw_device_clear_resources(pDevice);
         return MA_ERROR;
     }
 
     pDevice->filter = pw_filter_new_simple(
-        pw_main_loop_get_loop(pDevice->loop),
-        resolvedName.c_str(),
-        props,
-        ma_pw_get_filter_events(),
-        pDevice
-    );
-
+        pw_main_loop_get_loop(pDevice->loop), resolvedName.c_str(), props,
+        ma_pw_get_filter_events(), pDevice);
     if (!pDevice->filter) {
         ma_pw_device_clear_resources(pDevice);
         return MA_ERROR;
     }
 
-    auto addPorts = [&](
-        bool isCapture,
-        ma_uint32 count,
-        const ma_device_channel_config& channelConfig) -> bool {
-
+    auto addPorts = [&](bool isCapture, ma_uint32 count,
+                        const ma_device_channel_config& channelConfig) -> bool {
         for (ma_uint32 i = 0; i < count; ++i) {
             char fallback[32];
             const char* portName = nullptr;
-
-            const ma_uint32 providedNames =
-                channelConfig.customPortNameCount
-                    ? channelConfig.customPortNameCount
-                    : channelConfig.channels;
-
-            if (channelConfig.customPortNames &&
-                i < providedNames &&
-                channelConfig.customPortNames[i] &&
-                channelConfig.customPortNames[i][0]) {
+            const ma_uint32 providedNames = channelConfig.customPortNameCount
+                ? channelConfig.customPortNameCount : channelConfig.channels;
+            if (channelConfig.customPortNames && i < providedNames &&
+                channelConfig.customPortNames[i] && channelConfig.customPortNames[i][0]) {
                 portName = channelConfig.customPortNames[i];
             } else {
-                std::snprintf(
-                    fallback,
-                    sizeof(fallback),
-                    "%s_%02u",
-                    isCapture ? "input" : "output",
-                    i
-                );
-
+                std::snprintf(fallback, sizeof(fallback), "%s_%02u",
+                              isCapture ? "input" : "output", i);
                 portName = fallback;
             }
-
             struct pw_properties* portProps = pw_properties_new(
                 PW_KEY_FORMAT_DSP, "32 bit float mono audio",
                 PW_KEY_PORT_NAME, portName,
-                nullptr
-            );
-
+                nullptr);
             if (!portProps) return false;
+
+            // Give standard channels semantic roles (FL/FR/etc.) so autoConnect
+            // can match by channel role before falling back to port index.
+            const std::string channelRole =
+                ma_pw_channel_for_index(i, count, portName);
+            if (!channelRole.empty()) {
+                pw_properties_set(portProps, "audio.channel", channelRole.c_str());
+            }
 
             void* port = pw_filter_add_port(
                 pDevice->filter,
                 isCapture ? PW_DIRECTION_INPUT : PW_DIRECTION_OUTPUT,
                 PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                0,
-                portProps,
-                nullptr,
-                0
-            );
-
+                0, portProps, nullptr, 0);
             if (!port) return false;
-
-            if (isCapture) {
-                pDevice->in_ports.push_back(port);
-            } else {
-                pDevice->out_ports.push_back(port);
-            }
+            if (isCapture) pDevice->in_ports.push_back(port);
+            else pDevice->out_ports.push_back(port);
         }
-
         return true;
     };
 
-    if (wantsCapture &&
-        !addPorts(true, capturePortCount, pDevice->capture)) {
+    if (wantsCapture && !addPorts(true, capturePortCount, pDevice->capture)) {
+        ma_pw_device_clear_resources(pDevice);
+        return MA_ERROR;
+    }
+    if (wantsPlayback && !addPorts(false, playbackPortCount, pDevice->playback)) {
         ma_pw_device_clear_resources(pDevice);
         return MA_ERROR;
     }
 
-    if (wantsPlayback &&
-        !addPorts(false, playbackPortCount, pDevice->playback)) {
-        ma_pw_device_clear_resources(pDevice);
-        return MA_ERROR;
-    }
-
-    if (pw_filter_connect(
-            pDevice->filter,
-            static_cast<pw_filter_flags>(
-                PW_FILTER_FLAG_RT_PROCESS |
-                PW_FILTER_FLAG_INACTIVE
-            ),
-            nullptr,
-            0) < 0) {
+    if (pw_filter_connect(pDevice->filter,
+                          static_cast<pw_filter_flags>(PW_FILTER_FLAG_RT_PROCESS |
+                                                       PW_FILTER_FLAG_INACTIVE),
+                          nullptr, 0) < 0) {
         ma_pw_device_clear_resources(pDevice);
         return MA_ERROR;
     }
@@ -1726,22 +1841,18 @@ inline ma_result ma_device_init(
     return MA_SUCCESS;
 }
 
-inline ma_result ma_device_init_ex(
-    const ma_backend*,
-    ma_uint32,
-    ma_context* pContext,
-    const ma_device_config* pConfig,
-    ma_device* pDevice)
+inline ma_result ma_device_init_ex(const ma_backend*, ma_uint32,
+                                   ma_context* pContext,
+                                   const ma_device_config* pConfig,
+                                   ma_device* pDevice)
 {
     return ma_device_init(pContext, pConfig, pDevice);
 }
 
 inline ma_bool32 ma_device_is_started(const ma_device* pDevice)
 {
-    return pDevice &&
-           pDevice->filter &&
-           pw_filter_get_state(pDevice->filter, nullptr) ==
-               PW_FILTER_STATE_STREAMING;
+    return pDevice && pDevice->filter &&
+        pw_filter_get_state(pDevice->filter, nullptr) == PW_FILTER_STATE_STREAMING;
 }
 
 struct ma_pw_active_request {
@@ -1751,45 +1862,28 @@ struct ma_pw_active_request {
 };
 
 inline int ma_pw_set_active_on_loop(
-    struct spa_loop*,
-    bool,
-    uint32_t,
-    const void*,
-    size_t,
-    void* userData)
+    struct spa_loop*, bool, uint32_t, const void*, size_t, void* userData)
 {
     auto* request = static_cast<ma_pw_active_request*>(userData);
-
     if (!request || !request->filter) return -1;
-
-    request->result = pw_filter_set_active(
-        request->filter,
-        request->active
-    );
-
+    request->result = pw_filter_set_active(request->filter, request->active);
     return request->result;
 }
 
-inline ma_result ma_pw_set_filter_active(
-    ma_device* pDevice,
-    bool active)
+inline ma_result ma_pw_set_filter_active(ma_device* pDevice, bool active)
 {
-    if (!pDevice || !pDevice->filter || !pDevice->loop) {
-        return MA_ERROR;
-    }
+    if (!pDevice || !pDevice->filter || !pDevice->loop) return MA_ERROR;
 
     // Before the loop thread starts, no other thread can be using the filter.
     if (!pDevice->loop_thread.joinable()) {
         return pw_filter_set_active(pDevice->filter, active) < 0
-            ? MA_ERROR
-            : MA_SUCCESS;
+            ? MA_ERROR : MA_SUCCESS;
     }
 
     // Once the main loop is running, serialize the operation on that loop.
     // pw_loop_lock() is not available in all PipeWire versions targeted by
-    // this shim; pw_loop_invoke() is the loop-thread mechanism.
+    // this shim; pw_loop_invoke() is the portable loop-thread mechanism.
     ma_pw_active_request request{pDevice->filter, active, -1};
-
     const int invokeResult = pw_loop_invoke(
         pw_main_loop_get_loop(pDevice->loop),
         ma_pw_set_active_on_loop,
@@ -1800,27 +1894,29 @@ inline ma_result ma_pw_set_filter_active(
         &request
     );
 
-    if (invokeResult < 0 || request.result < 0) {
-        return MA_ERROR;
-    }
-
+    if (invokeResult < 0 || request.result < 0) return MA_ERROR;
     return MA_SUCCESS;
 }
 
 inline ma_result ma_device_start(ma_device* pDevice)
 {
-    if (!pDevice || !pDevice->filter || !pDevice->loop) {
-        return MA_ERROR;
-    }
+    if (!pDevice || !pDevice->filter || !pDevice->loop) return MA_ERROR;
 
     if (pDevice->loop_thread.joinable()) {
-        // The main loop remains running while inactive, so reactivate in place.
-        return ma_pw_set_filter_active(pDevice, true);
+        if (ma_pw_set_filter_active(pDevice, true) != MA_SUCCESS) return MA_ERROR;
+
+        if (pDevice->autoConnect && !pDevice->autoConnectPerformed) {
+            if (ma_pw_auto_connect_device(pDevice) != MA_SUCCESS) {
+                ma_pw_set_filter_active(pDevice, false);
+                return MA_ERROR;
+            }
+            pDevice->autoConnectPerformed = 1;
+        }
+
+        return MA_SUCCESS;
     }
 
-    if (pw_filter_set_active(pDevice->filter, true) < 0) {
-        return MA_ERROR;
-    }
+    if (pw_filter_set_active(pDevice->filter, true) < 0) return MA_ERROR;
 
     try {
         pDevice->loop_thread = std::thread([pDevice]() {
@@ -1831,39 +1927,39 @@ inline ma_result ma_device_start(ma_device* pDevice)
         return MA_ERROR;
     }
 
+    if (pDevice->autoConnect && !pDevice->autoConnectPerformed) {
+        if (ma_pw_auto_connect_device(pDevice) != MA_SUCCESS) {
+            ma_pw_set_filter_active(pDevice, false);
+            return MA_ERROR;
+        }
+        pDevice->autoConnectPerformed = 1;
+    }
+
     return MA_SUCCESS;
 }
 
 inline ma_result ma_device_stop(ma_device* pDevice)
 {
-    if (!pDevice || !pDevice->filter || !pDevice->loop) {
-        return MA_SUCCESS;
-    }
-
+    if (!pDevice || !pDevice->filter || !pDevice->loop) return MA_SUCCESS;
     return ma_pw_set_filter_active(pDevice, false);
 }
 
 inline void ma_device_uninit(ma_device* pDevice)
 {
     if (!pDevice) return;
-
     ma_device_stop(pDevice);
-
-    if (pDevice->loop) {
-        pw_main_loop_quit(pDevice->loop);
-    }
-
-    if (pDevice->loop_thread.joinable()) {
-        pDevice->loop_thread.join();
-    }
-
+    if (pDevice->loop) pw_main_loop_quit(pDevice->loop);
+    if (pDevice->loop_thread.joinable()) pDevice->loop_thread.join();
     ma_pw_device_clear_resources(pDevice);
-
     pDevice->dataCallback = nullptr;
     pDevice->pUserData = nullptr;
     pDevice->type = static_cast<ma_device_type>(0);
     pDevice->sampleRate = 0;
-
+    pDevice->autoConnect = 0;
+    pDevice->autoConnectPerformed = 0;
+    pDevice->playbackTargetNodeId = PW_ID_ANY;
+    pDevice->captureTargetNodeId = PW_ID_ANY;
+    pDevice->pipewireNodeName[0] = '\0';
     pDevice->graphSampleRate.store(0, std::memory_order_relaxed);
     pDevice->sampleRateMismatch.store(0, std::memory_order_relaxed);
 }

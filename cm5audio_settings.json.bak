@@ -1,66 +1,51 @@
 {
   "activated_devices": [
-    "alsa_output.platform-1000480000.usb.pro-output-0",
-    "alsa_output.platform-1000480000.usb.2.pro-output-0",
-    "alsa_output.platform-soc_107c000000_sound.pro-output-0",
-    "alsa_input.platform-1000480000.usb.pro-input-0",
-    "alsa_input.platform-1000480000.usb.2.pro-input-0",
-    "alsa_input.platform-soc_107c000000_sound.pro-input-0",
-    "alsa_output.usb-audio-technica_AT2020USB_-00.analog-stereo",
-    "alsa_input.usb-audio-technica_AT2020USB_-00.analog-stereo",
-    "alsa_input.platform-1000480000.usb.2.stereo-fallback",
-    "alsa_input.platform-1000480000.usb.stereo-fallback",
-    "alsa_output.platform-1000480000.usb.2.stereo-fallback",
-    "alsa_output.platform-1000480000.usb.stereo-fallback"
+    "pipewire:77",
+    "pipewire:33",
+    "pipewire:42",
+    "pipewire:58",
+    "pipewire:43",
+    "pipewire:44",
+    "pipewire:78",
+    "pipewire:76",
+    "pipewire:75"
   ],
   "clients": {},
   "device_streams": {
-    "alsa_input.platform-1000480000.usb.2.pro-input-0": {
+    "pipewire:33": {
       "capture_channels": 0,
+      "playback_channels": 2
+    },
+    "pipewire:42": {
+      "capture_channels": 0,
+      "playback_channels": 8
+    },
+    "pipewire:43": {
+      "capture_channels": 8,
       "playback_channels": 0
     },
-    "alsa_input.platform-1000480000.usb.2.stereo-fallback": {
-      "capture_channels": 0,
+    "pipewire:44": {
+      "capture_channels": 2,
       "playback_channels": 0
     },
-    "alsa_input.platform-1000480000.usb.pro-input-0": {
-      "capture_channels": 0,
+    "pipewire:58": {
+      "capture_channels": 1,
       "playback_channels": 0
     },
-    "alsa_input.platform-1000480000.usb.stereo-fallback": {
-      "capture_channels": 0,
+    "pipewire:75": {
+      "capture_channels": 1,
       "playback_channels": 0
     },
-    "alsa_input.platform-soc_107c000000_sound.pro-input-0": {
-      "capture_channels": 0,
+    "pipewire:76": {
+      "capture_channels": 2,
       "playback_channels": 0
     },
-    "alsa_input.usb-audio-technica_AT2020USB_-00.analog-stereo": {
+    "pipewire:77": {
       "capture_channels": 0,
-      "playback_channels": 0
+      "playback_channels": 2
     },
-    "alsa_output.platform-1000480000.usb.2.pro-output-0": {
-      "capture_channels": 0,
-      "playback_channels": 0
-    },
-    "alsa_output.platform-1000480000.usb.2.stereo-fallback": {
-      "capture_channels": 0,
-      "playback_channels": 0
-    },
-    "alsa_output.platform-1000480000.usb.pro-output-0": {
-      "capture_channels": 0,
-      "playback_channels": 0
-    },
-    "alsa_output.platform-1000480000.usb.stereo-fallback": {
-      "capture_channels": 0,
-      "playback_channels": 0
-    },
-    "alsa_output.platform-soc_107c000000_sound.pro-output-0": {
-      "capture_channels": 0,
-      "playback_channels": 0
-    },
-    "alsa_output.usb-audio-technica_AT2020USB_-00.analog-stereo": {
-      "capture_channels": 0,
+    "pipewire:78": {
+      "capture_channels": 2,
       "playback_channels": 0
     }
   },
@@ -75,255 +60,149 @@
   },
   "routes": [
     {
-      "destination": "hardware/alsa_output.platform-1000480000.usb.pro-output-0/playback",
+      "destination": "hardware/pipewire:42/playback",
       "destination_channel": 0,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.25
+            },
+            "type": "normalize"
+          }
+        ],
+        "gain": 1.0
+      },
       "enabled": true,
       "gain": 1.0,
       "id": 1,
-      "source": "hardware/alsa_input.usb-audio-technica_AT2020USB_-00.analog-stereo/capture",
+      "source": "hardware/pipewire:44/capture",
       "source_channel": 0
     },
     {
-      "destination": "hardware/alsa_output.platform-1000480000.usb.pro-output-0/playback",
+      "destination": "hardware/pipewire:42/playback",
       "destination_channel": 1,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.25
+            },
+            "type": "normalize"
+          }
+        ],
+        "gain": 1.0
+      },
       "enabled": true,
       "gain": 1.0,
       "id": 2,
-      "source": "hardware/alsa_input.usb-audio-technica_AT2020USB_-00.analog-stereo/capture",
+      "source": "hardware/pipewire:44/capture",
       "source_channel": 1
     },
     {
-      "destination": "hardware/alsa_output.platform-1000480000.usb.2.pro-output-0/playback",
-      "destination_channel": 0,
-      "enabled": true,
-      "gain": 1.0,
-      "id": 3,
-      "source": "hardware/alsa_input.usb-audio-technica_AT2020USB_-00.analog-stereo/capture",
-      "source_channel": 0
-    },
-    {
-      "destination": "hardware/alsa_output.platform-1000480000.usb.2.pro-output-0/playback",
-      "destination_channel": 1,
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 4,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.25
+            },
+            "type": "normalize"
+          }
+        ],
+        "gain": 1.0
+      },
       "enabled": true,
       "gain": 1.0,
       "id": 4,
-      "source": "hardware/alsa_input.usb-audio-technica_AT2020USB_-00.analog-stereo/capture",
-      "source_channel": 1
+      "source": "hardware/pipewire:44/capture",
+      "source_channel": 0
     },
     {
-      "destination": "hardware/alsa_output.platform-1000480000.usb.stereo-fallback/playback",
-      "destination_channel": 0,
+      "destination": "hardware/pipewire:42/playback",
+      "destination_channel": 5,
       "dsp": {
         "active": true,
         "chain": [
           {
             "params": {
-              "attack": 0.01,
-              "ratio": 4,
-              "release": 0.001,
-              "threshold": 0.01
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.25
             },
-            "type": "compressor"
+            "type": "normalize"
           }
         ],
         "gain": 1.0
       },
+      "enabled": true,
+      "gain": 1.0,
+      "id": 6,
+      "source": "hardware/pipewire:44/capture",
+      "source_channel": 1
+    },
+    {
+      "destination": "hardware/pipewire:77/playback",
+      "destination_channel": 0,
       "enabled": true,
       "gain": 1.0,
       "id": 7,
-      "source": "hardware/alsa_input.usb-audio-technica_AT2020USB_-00.analog-stereo/capture",
+      "source": "hardware/pipewire:76/capture",
       "source_channel": 0
     },
     {
-      "destination": "hardware/alsa_output.platform-1000480000.usb.stereo-fallback/playback",
+      "destination": "hardware/pipewire:77/playback",
       "destination_channel": 1,
-      "dsp": {
-        "active": true,
-        "chain": [
-          {
-            "params": {
-              "attack": 0.01,
-              "ratio": 4,
-              "release": 0.001,
-              "threshold": 0.01
-            },
-            "type": "compressor"
-          }
-        ],
-        "gain": 1.0
-      },
       "enabled": true,
       "gain": 1.0,
       "id": 8,
-      "source": "hardware/alsa_input.usb-audio-technica_AT2020USB_-00.analog-stereo/capture",
+      "source": "hardware/pipewire:76/capture",
       "source_channel": 1
     },
     {
-      "destination": "hardware/alsa_output.platform-soc_107c000000_sound.pro-output-0/playback",
-      "destination_channel": 4,
-      "dsp": {
-        "active": true,
-        "chain": [
-          {
-            "params": {
-              "gain": 2
-            },
-            "type": "gain"
-          }
-        ],
-        "gain": 1.0
-      },
-      "enabled": true,
-      "gain": 1.0,
-      "id": 13,
-      "source": "hardware/alsa_input.platform-1000480000.usb.stereo-fallback/capture",
-      "source_channel": 0
-    },
-    {
-      "destination": "hardware/alsa_output.platform-soc_107c000000_sound.pro-output-0/playback",
-      "destination_channel": 5,
-      "dsp": {
-        "active": true,
-        "chain": [
-          {
-            "params": {
-              "gain": 2
-            },
-            "type": "gain"
-          }
-        ],
-        "gain": 1.0
-      },
-      "enabled": true,
-      "gain": 1.0,
-      "id": 17,
-      "source": "hardware/alsa_input.platform-1000480000.usb.stereo-fallback/capture",
-      "source_channel": 1
-    },
-    {
-      "destination": "hardware/alsa_output.platform-soc_107c000000_sound.pro-output-0/playback",
+      "destination": "hardware/pipewire:42/playback",
       "destination_channel": 0,
-      "dsp": {
-        "active": true,
-        "chain": [
-          {
-            "params": {
-              "gain": 2
-            },
-            "type": "gain"
-          }
-        ],
-        "gain": 1.0
-      },
       "enabled": true,
       "gain": 1.0,
-      "id": 18,
-      "source": "hardware/alsa_input.platform-1000480000.usb.stereo-fallback/capture",
+      "id": 9,
+      "source": "hardware/pipewire:78/capture",
       "source_channel": 0
     },
     {
-      "destination": "hardware/alsa_output.platform-soc_107c000000_sound.pro-output-0/playback",
+      "destination": "hardware/pipewire:42/playback",
       "destination_channel": 1,
-      "dsp": {
-        "active": true,
-        "chain": [
-          {
-            "params": {
-              "gain": 2
-            },
-            "type": "gain"
-          }
-        ],
-        "gain": 1.0
-      },
       "enabled": true,
       "gain": 1.0,
-      "id": 19,
-      "source": "hardware/alsa_input.platform-1000480000.usb.stereo-fallback/capture",
+      "id": 10,
+      "source": "hardware/pipewire:78/capture",
       "source_channel": 1
     },
     {
-      "destination": "hardware/alsa_output.platform-soc_107c000000_sound.pro-output-0/playback",
-      "destination_channel": 0,
-      "dsp": {
-        "active": true,
-        "chain": [
-          {
-            "params": {
-              "gain": 5
-            },
-            "type": "gain"
-          }
-        ],
-        "gain": 1.0
-      },
-      "enabled": true,
-      "gain": 1.0,
-      "id": 20,
-      "source": "hardware/alsa_input.platform-1000480000.usb.2.stereo-fallback/capture",
-      "source_channel": 0
-    },
-    {
-      "destination": "hardware/alsa_output.platform-soc_107c000000_sound.pro-output-0/playback",
-      "destination_channel": 1,
-      "dsp": {
-        "active": true,
-        "chain": [
-          {
-            "params": {
-              "gain": 5
-            },
-            "type": "gain"
-          }
-        ],
-        "gain": 1.0
-      },
-      "enabled": true,
-      "gain": 1.0,
-      "id": 21,
-      "source": "hardware/alsa_input.platform-1000480000.usb.2.stereo-fallback/capture",
-      "source_channel": 1
-    },
-    {
-      "destination": "hardware/alsa_output.platform-soc_107c000000_sound.pro-output-0/playback",
+      "destination": "hardware/pipewire:42/playback",
       "destination_channel": 4,
-      "dsp": {
-        "active": true,
-        "chain": [
-          {
-            "params": {
-              "gain": 5
-            },
-            "type": "gain"
-          }
-        ],
-        "gain": 1.0
-      },
       "enabled": true,
       "gain": 1.0,
-      "id": 22,
-      "source": "hardware/alsa_input.platform-1000480000.usb.2.stereo-fallback/capture",
+      "id": 11,
+      "source": "hardware/pipewire:78/capture",
       "source_channel": 0
     },
     {
-      "destination": "hardware/alsa_output.platform-soc_107c000000_sound.pro-output-0/playback",
+      "destination": "hardware/pipewire:42/playback",
       "destination_channel": 5,
-      "dsp": {
-        "active": true,
-        "chain": [
-          {
-            "params": {
-              "gain": 5
-            },
-            "type": "gain"
-          }
-        ],
-        "gain": 1.0
-      },
       "enabled": true,
       "gain": 1.0,
-      "id": 23,
-      "source": "hardware/alsa_input.platform-1000480000.usb.2.stereo-fallback/capture",
+      "id": 12,
+      "source": "hardware/pipewire:78/capture",
       "source_channel": 1
     }
   ],

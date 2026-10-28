@@ -11,11 +11,15 @@ void LpfProcessor::process(float* buffer, size_t frames, unsigned channels) {
     const float dt = 1.0f / 48000.0f;
     const float alpha = dt / (rc + dt);
 
-    for (size_t i = 0; i < frames * channels; ++i) {
-        float x = buffer[i];
-        float y = m_z + alpha * (x - m_z);
-        m_z = y;
-        buffer[i] = y;
+    if (m_z.size() != channels) m_z.assign(channels, 0.0f);
+
+    for (size_t i = 0; i < frames; ++i) {
+        for (unsigned c = 0; c < channels; ++c) {
+            float x = buffer[i * channels + c];
+            float y = m_z[c] + alpha * (x - m_z[c]);
+            m_z[c] = y;
+            buffer[i * channels + c] = y;
+        }
     }
 }
 

@@ -11,12 +11,16 @@ void HpfProcessor::process(float* buffer, size_t frames, unsigned channels) {
     const float dt = 1.0f / 48000.0f;
     const float alpha = dt / (rc + dt);
 
-    for (size_t i = 0; i < frames * channels; ++i) {
-        float x = buffer[i];
-        float y = alpha * (m_z2 + x - m_z1);
-        m_z1 = x;
-        m_z2 = y;
-        buffer[i] = y;
+    if (m_z.size() != channels) m_z.assign(channels, 0.0f);
+
+    for (size_t i = 0; i < frames; ++i) {
+        for (unsigned c = 0; c < channels; ++c) {
+            float x = buffer[i * channels + c];
+            // HPF is simply: Original - LPF(Original)
+            float lpf = m_z[c] + alpha * (x - m_z[c]);
+            m_z[c] = lpf;
+            buffer[i * channels + c] = x - lpf;
+        }
     }
 }
 

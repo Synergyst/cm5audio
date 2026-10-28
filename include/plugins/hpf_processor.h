@@ -2,6 +2,7 @@
 #define HPF_PROCESSOR_H
 #include "audio_processor.h"
 #include <atomic>
+#include <vector>
 
 class HpfProcessor : public AudioProcessor {
 public:
@@ -9,7 +10,6 @@ public:
     void process(float* buffer, size_t frames, unsigned channels) override;
 private:
     std::atomic<float> m_cutoff;
-    float m_z1 = 0.0f; // previous input
-    float m_z2 = 0.0f; // previous output
+    std::vector<float> m_z; // Per-channel LPF state
 };
 #endif

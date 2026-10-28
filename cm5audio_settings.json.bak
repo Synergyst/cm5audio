@@ -159,6 +159,27 @@
         "chain": [
           {
             "params": {
+              "cutoff": 90
+            },
+            "type": "hpf"
+          },
+          {
+            "params": {
+              "cutoff": 15000
+            },
+            "type": "lpf"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "hold": 0.015,
+              "release": 0.1,
+              "threshold": 0.01
+            },
+            "type": "noise_gate"
+          },
+          {
+            "params": {
               "attack": 0.01,
               "ratio": 4,
               "release": 0.05,
@@ -174,15 +195,6 @@
               "threshold": 0.1
             },
             "type": "deesser"
-          },
-          {
-            "params": {
-              "attack": 0.01,
-              "hold": 0.015,
-              "release": 0.1,
-              "threshold": 0.01
-            },
-            "type": "noise_gate"
           },
           {
             "params": {
@@ -218,6 +230,27 @@
         "chain": [
           {
             "params": {
+              "cutoff": 90
+            },
+            "type": "hpf"
+          },
+          {
+            "params": {
+              "cutoff": 15000
+            },
+            "type": "lpf"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "hold": 0.015,
+              "release": 0.1,
+              "threshold": 0.01
+            },
+            "type": "noise_gate"
+          },
+          {
+            "params": {
               "attack": 0.01,
               "ratio": 4,
               "release": 0.05,
@@ -233,15 +266,6 @@
               "threshold": 0.1
             },
             "type": "deesser"
-          },
-          {
-            "params": {
-              "attack": 0.01,
-              "hold": 0.015,
-              "release": 0.1,
-              "threshold": 0.01
-            },
-            "type": "noise_gate"
           },
           {
             "params": {

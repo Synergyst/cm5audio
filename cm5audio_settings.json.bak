@@ -280,7 +280,7 @@
             "params": {
               "max_gain": 4,
               "speed": 0.1,
-              "target": 0.5
+              "target": 0.15
             },
             "type": "normalize"
           },
@@ -359,7 +359,7 @@
             "params": {
               "max_gain": 4,
               "speed": 0.1,
-              "target": 0.5
+              "target": 0.15
             },
             "type": "normalize"
           },

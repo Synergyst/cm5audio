@@ -8,6 +8,8 @@ void register_chorus_processor(ProcessorRegistry& registry);
 void register_reverb_processor(ProcessorRegistry& registry);
 void register_lush_reverb_processor(ProcessorRegistry& registry);
 void register_eq_processor(ProcessorRegistry& registry);
+void register_vowel_filter_processor(ProcessorRegistry& registry);
+void register_soft_clipper_processor(ProcessorRegistry& registry);
 void register_hpf_processor(ProcessorRegistry& registry);
 void register_lpf_processor(ProcessorRegistry& registry);
 void register_deesser_processor(ProcessorRegistry& registry);
@@ -17,6 +19,7 @@ void register_noise_gate_processor(ProcessorRegistry& registry);
 void register_bitcrusher_processor(ProcessorRegistry& registry);
 void register_limiter_processor(ProcessorRegistry& registry);
 
+void register_autotune_processor(ProcessorRegistry& registry);
 void register_builtin_processors(ProcessorRegistry& registry) {
     register_passthrough_processor(registry);
     register_gain_processor(registry);
@@ -26,6 +29,9 @@ void register_builtin_processors(ProcessorRegistry& registry) {
     register_reverb_processor(registry);
     register_lush_reverb_processor(registry);
     register_eq_processor(registry);
+    register_autotune_processor(registry);
+    register_vowel_filter_processor(registry);
+    register_soft_clipper_processor(registry);
     register_hpf_processor(registry);
     register_lpf_processor(registry);
     register_deesser_processor(registry);

@@ -185,6 +185,7 @@ private:
     pw_filter* filter_ = nullptr;
     void* inputPort_ = nullptr;
     pw_proxy* linkProxy_ = nullptr;
+    cm5audio::midi::InputLinkRequest* linkRequest_ = nullptr;
 
     std::thread thread_;
 
@@ -222,6 +223,23 @@ private:
         pw_filter_queue_buffer(self->inputPort_, pwBuffer);
     }
 
+    static void onInputLinkCreated(void* userdata, pw_proxy* proxy)
+    {
+        auto* self = static_cast<MidiInputService*>(userdata);
+        if (!self)
+            return;
+
+        self->linkRequest_ = nullptr;
+        self->linkProxy_ = proxy;
+
+        if (!proxy) {
+            std::fprintf(stderr,
+                "[MIDI Pitch Shifter] Automatic MIDI link creation failed "
+                "for '%s'\n",
+                self->selectedOutput_.c_str());
+        }
+    }
+
     static void onStateChanged(void* userdata,
                                enum pw_filter_state oldState,
                                enum pw_filter_state state,
@@ -233,19 +251,31 @@ private:
         if (!self)
             return;
 
-        if (state == PW_FILTER_STATE_STREAMING) {
-            if (self->autoConnect_ && !self->linkProxy_) {
-                self->linkProxy_ =
-                    cm5audio::midi::createInputLink(
+        std::fprintf(stderr,
+            "[CM5Audio MIDI AutoConnect] filter state %d -> %d; "
+            "auto_connect=%s; output_selection=[%s]\n",
+            static_cast<int>(oldState),
+            static_cast<int>(state),
+            self->autoConnect_ ? "enabled" : "disabled",
+            self->selectedOutput_.c_str());
+
+        if (state == PW_FILTER_STATE_PAUSED ||
+            state == PW_FILTER_STATE_STREAMING) {
+            if (self->autoConnect_ &&
+                !self->linkProxy_ &&
+                !self->linkRequest_) {
+                self->linkRequest_ =
+                    cm5audio::midi::createInputLinkAsync(
                         self->filter_,
                         self->selectedOutput_,
-                        "midi_in");
+                        "midi_in",
+                        &MidiInputService::onInputLinkCreated,
+                        self);
 
-                if (!self->linkProxy_) {
+                if (!self->linkRequest_) {
                     std::fprintf(stderr,
-                        "[MIDI Pitch Shifter] "
-                        "Could not create automatic MIDI input link "
-                        "for '%s'.\\n",
+                        "[MIDI Pitch Shifter] Could not start automatic "
+                        "MIDI link request for '%s'\n",
                         self->selectedOutput_.c_str());
                 }
             }
@@ -354,6 +384,8 @@ private:
 
         if (thread_.joinable())
             thread_.join();
+
+        cm5audio::midi::cancelInputLinkRequest(linkRequest_);
 
         if (filter_ && linkProxy_)
             cm5audio::midi::destroyInputLink(filter_, linkProxy_);
@@ -756,6 +788,12 @@ void register_midi_pitch_shifter_processor(ProcessorRegistry& registry)
 
             const std::string midiOutput =
                 params.at("midi_output").get<std::string>();
+
+            std::fprintf(stderr,
+                "[CM5Audio MIDI AutoConnect] processor factory: "
+                "auto_connect=%s; output_selection=[%s]\n",
+                autoConnect ? "enabled" : "disabled",
+                midiOutput.c_str());
 
             auto midi = MidiInputService::acquire(
                 autoConnect,

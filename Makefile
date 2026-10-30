@@ -8,7 +8,7 @@ APP_SRCS = src/main.cpp src/web_server.cpp src/device_manager.cpp src/dsp_engine
 	src/processor_registry.cpp src/plugins/register_builtin_processors.cpp \
 	src/plugins/passthrough.cpp src/plugins/gain.cpp src/plugins/compressor.cpp \
 	src/plugins/echo_processor.cpp src/plugins/chorus_processor.cpp src/plugins/reverb_processor.cpp \
-	src/plugins/lush_reverb_processor.cpp src/plugins/eq_processor.cpp src/plugins/normalize.cpp src/plugins/autotune.cpp src/plugins/vowel_filter.cpp src/plugins/soft_clipper.cpp src/plugins/expander.cpp src/plugins/hpf_processor.cpp src/plugins/lpf_processor.cpp src/plugins/deesser.cpp src/plugins/bitcrusher.cpp src/plugins/noise_gate.cpp src/plugins/limiter.cpp
+	src/plugins/lush_reverb_processor.cpp src/plugins/eq_processor.cpp src/plugins/normalize.cpp src/plugins/autotune.cpp src/plugins/vowel_filter.cpp src/plugins/soft_clipper.cpp src/plugins/expander.cpp src/plugins/hpf_processor.cpp src/plugins/lpf_processor.cpp src/plugins/deesser.cpp src/plugins/bitcrusher.cpp src/plugins/noise_gate.cpp src/plugins/limiter.cpp src/plugins/midi_pitch_shifter.cpp
 APP_OBJS = $(APP_SRCS:src/%.cpp=build/%.o)
 
 MINIAUDIO_SRC = src/miniaudio_impl.cpp

@@ -278,14 +278,6 @@
           },
           {
             "params": {
-              "max_gain": 4,
-              "speed": 0.1,
-              "target": 0.15
-            },
-            "type": "normalize"
-          },
-          {
-            "params": {
               "attack": 0.005,
               "lookahead": 20,
               "release": 0.05,
@@ -357,14 +349,6 @@
           },
           {
             "params": {
-              "max_gain": 4,
-              "speed": 0.1,
-              "target": 0.15
-            },
-            "type": "normalize"
-          },
-          {
-            "params": {
               "attack": 0.005,
               "lookahead": 20,
               "release": 0.05,
@@ -384,6 +368,19 @@
     {
       "destination": "hardware/pipewire:42/playback",
       "destination_channel": 0,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "ceiling": 1,
+              "drive": 1
+            },
+            "type": "soft_clipper"
+          }
+        ],
+        "gain": 1.0
+      },
       "enabled": true,
       "gain": 1.0,
       "id": 9,
@@ -393,6 +390,19 @@
     {
       "destination": "hardware/pipewire:42/playback",
       "destination_channel": 1,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "ceiling": 1,
+              "drive": 1
+            },
+            "type": "soft_clipper"
+          }
+        ],
+        "gain": 1.0
+      },
       "enabled": true,
       "gain": 1.0,
       "id": 10,
@@ -402,6 +412,19 @@
     {
       "destination": "hardware/pipewire:42/playback",
       "destination_channel": 4,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "ceiling": 1,
+              "drive": 1
+            },
+            "type": "soft_clipper"
+          }
+        ],
+        "gain": 1.0
+      },
       "enabled": true,
       "gain": 1.0,
       "id": 11,
@@ -411,10 +434,67 @@
     {
       "destination": "hardware/pipewire:42/playback",
       "destination_channel": 5,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "ceiling": 1,
+              "drive": 1
+            },
+            "type": "soft_clipper"
+          }
+        ],
+        "gain": 1.0
+      },
       "enabled": true,
       "gain": 1.0,
       "id": 12,
       "source": "hardware/pipewire:78/capture",
+      "source_channel": 1
+    },
+    {
+      "destination": "hardware/pipewire:33/playback",
+      "destination_channel": 0,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "listen_channel": 1,
+              "pitch_range": 24
+            },
+            "type": "midi_pitch_shifter"
+          }
+        ],
+        "gain": 1.0
+      },
+      "enabled": true,
+      "gain": 1.0,
+      "id": 13,
+      "source": "hardware/pipewire:76/capture",
+      "source_channel": 0
+    },
+    {
+      "destination": "hardware/pipewire:33/playback",
+      "destination_channel": 1,
+      "dsp": {
+        "active": true,
+        "chain": [
+          {
+            "params": {
+              "listen_channel": 1,
+              "pitch_range": 24
+            },
+            "type": "midi_pitch_shifter"
+          }
+        ],
+        "gain": 1.0
+      },
+      "enabled": true,
+      "gain": 1.0,
+      "id": 14,
+      "source": "hardware/pipewire:76/capture",
       "source_channel": 1
     }
   ],

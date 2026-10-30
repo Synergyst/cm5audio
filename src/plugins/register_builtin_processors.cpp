@@ -18,8 +18,9 @@ void register_expander_processor(ProcessorRegistry& registry);
 void register_noise_gate_processor(ProcessorRegistry& registry);
 void register_bitcrusher_processor(ProcessorRegistry& registry);
 void register_limiter_processor(ProcessorRegistry& registry);
-
 void register_autotune_processor(ProcessorRegistry& registry);
+void register_midi_pitch_shifter_processor(ProcessorRegistry& registry);
+
 void register_builtin_processors(ProcessorRegistry& registry) {
     register_passthrough_processor(registry);
     register_gain_processor(registry);
@@ -40,4 +41,5 @@ void register_builtin_processors(ProcessorRegistry& registry) {
     register_noise_gate_processor(registry);
     register_bitcrusher_processor(registry);
     register_limiter_processor(registry);
+    register_midi_pitch_shifter_processor(registry);
 }

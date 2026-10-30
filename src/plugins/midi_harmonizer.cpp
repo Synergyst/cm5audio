@@ -1,0 +1,982 @@
+#include "audio_processor.h"
+#include "processor_registry.h"
+#include "midi_device_selector.h"
+
+#include <pipewire/filter.h>
+#include <pipewire/pipewire.h>
+
+#include <spa/buffer/buffer.h>
+#include <spa/control/control.h>
+#include <spa/pod/iter.h>
+#include <spa/pod/pod.h>
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace {
+
+constexpr unsigned MIDI_CHANNELS = 16;
+constexpr unsigned MIDI_NOTES = 128;
+constexpr unsigned NOTE_WORDS = MIDI_NOTES / 32;
+
+constexpr unsigned MAX_HARMONY_VOICES = 8;
+constexpr unsigned MAX_AUDIO_CHANNELS = 8;
+
+constexpr uint32_t DELAY_RING_SIZE = 8192;
+constexpr uint32_t DELAY_RING_MASK = DELAY_RING_SIZE - 1;
+
+constexpr float SAMPLE_RATE = 48000.0f;
+constexpr float MIN_DELAY_MS = 20.0f;
+constexpr float DELAY_SPAN_MS = 100.0f;
+
+constexpr float MIN_DELAY_SAMPLES =
+    SAMPLE_RATE * MIN_DELAY_MS / 1000.0f;
+
+constexpr float DELAY_SPAN_SAMPLES =
+    SAMPLE_RATE * DELAY_SPAN_MS / 1000.0f;
+
+constexpr float GAIN_RAMP_SAMPLES =
+    SAMPLE_RATE * 0.010f;
+
+constexpr unsigned FADE_TABLE_SIZE = 1024;
+
+static_assert((DELAY_RING_SIZE & DELAY_RING_MASK) == 0,
+              "Delay ring size must be a power of two");
+
+static size_t umpMessageWords(uint8_t messageType) noexcept
+{
+    switch (messageType & 0x0f) {
+    case 0x0:
+    case 0x1:
+    case 0x2:
+    case 0x6:
+    case 0x7:
+        return 1;
+
+    case 0x3:
+    case 0x4:
+    case 0x8:
+    case 0x9:
+    case 0xa:
+        return 2;
+
+    case 0xb:
+    case 0xc:
+        return 3;
+
+    case 0x5:
+    case 0xd:
+    case 0xe:
+    case 0xf:
+        return 4;
+
+    default:
+        return 0;
+    }
+}
+
+static std::vector<ProcessorChoice> makeMidiOutputChoices()
+{
+    std::vector<ProcessorChoice> result;
+
+    const auto choices = cm5audio::midi::makeOutputChoices();
+    result.reserve(choices.size());
+
+    for (const auto& item : choices) {
+        ProcessorChoice choice;
+        choice.label = item.first;
+        choice.value = item.second;
+        result.emplace_back(std::move(choice));
+    }
+
+    return result;
+}
+
+class MidiInputService final {
+public:
+    static std::shared_ptr<MidiInputService> acquire(
+        bool autoConnect,
+        const std::string& selectedOutput)
+    {
+        static std::mutex cacheMutex;
+        static std::map<std::string, std::weak_ptr<MidiInputService>> cache;
+
+        const std::string key = autoConnect
+            ? std::string("auto:") + selectedOutput
+            : std::string("manual");
+
+        std::lock_guard<std::mutex> lock(cacheMutex);
+
+        const auto it = cache.find(key);
+        if (it != cache.end()) {
+            std::shared_ptr<MidiInputService> existing = it->second.lock();
+            if (existing)
+                return existing;
+        }
+
+        std::shared_ptr<MidiInputService> created(
+            new MidiInputService(autoConnect, selectedOutput));
+
+        cache[key] = created;
+        return created;
+    }
+
+    ~MidiInputService()
+    {
+        stop();
+    }
+
+    MidiInputService(const MidiInputService&) = delete;
+    MidiInputService& operator=(const MidiInputService&) = delete;
+
+    bool noteIsDown(unsigned channelZeroBased,
+                    unsigned note) const noexcept
+    {
+        if (channelZeroBased >= MIDI_CHANNELS || note >= MIDI_NOTES)
+            return false;
+
+        const uint32_t mask = 1u << (note & 31u);
+
+        const uint32_t bits =
+            heldNotes_[channelZeroBased][note >> 5u]
+                .load(std::memory_order_acquire);
+
+        return (bits & mask) != 0;
+    }
+
+private:
+    struct InputPortData {
+        MidiInputService* owner = nullptr;
+    };
+
+    std::array<std::array<std::atomic<uint32_t>, NOTE_WORDS>,
+               MIDI_CHANNELS> heldNotes_{};
+
+    bool autoConnect_ = false;
+    std::string selectedOutput_;
+
+    pw_main_loop* loop_ = nullptr;
+    pw_filter* filter_ = nullptr;
+    void* inputPort_ = nullptr;
+    pw_proxy* linkProxy_ = nullptr;
+
+    std::thread thread_;
+
+    MidiInputService(bool autoConnect,
+                     const std::string& selectedOutput)
+        : autoConnect_(autoConnect),
+          selectedOutput_(selectedOutput)
+    {
+        clearNotes();
+
+        try {
+            start();
+        } catch (...) {
+            stop();
+            throw;
+        }
+    }
+
+    static void onProcess(void* userdata, spa_io_position* position)
+    {
+        (void)position;
+
+        auto* self = static_cast<MidiInputService*>(userdata);
+        if (!self || !self->inputPort_)
+            return;
+
+        pw_buffer* pwBuffer =
+            pw_filter_dequeue_buffer(self->inputPort_);
+
+        if (!pwBuffer)
+            return;
+
+        self->processInputBuffer(pwBuffer);
+        pw_filter_queue_buffer(self->inputPort_, pwBuffer);
+    }
+
+    static void onStateChanged(void* userdata,
+                               enum pw_filter_state oldState,
+                               enum pw_filter_state state,
+                               const char* error)
+    {
+        (void)oldState;
+
+        auto* self = static_cast<MidiInputService*>(userdata);
+        if (!self)
+            return;
+
+        if (state == PW_FILTER_STATE_STREAMING) {
+            if (self->autoConnect_ && !self->linkProxy_) {
+                self->linkProxy_ =
+                    cm5audio::midi::createInputLink(
+                        self->filter_,
+                        self->selectedOutput_,
+                        "midi_in");
+
+                if (!self->linkProxy_) {
+                    std::fprintf(stderr,
+                        "[MIDI Harmonizer] "
+                        "Could not create automatic MIDI input link "
+                        "for '%s'.\\n",
+                        self->selectedOutput_.c_str());
+                }
+            }
+        }
+
+        if (state == PW_FILTER_STATE_UNCONNECTED ||
+            state == PW_FILTER_STATE_ERROR) {
+            self->clearNotes();
+        }
+
+        if (state == PW_FILTER_STATE_ERROR) {
+            std::fprintf(stderr,
+                "[MIDI Harmonizer] PipeWire filter error: %s\\n",
+                error ? error : "unknown error");
+        }
+    }
+
+    static const pw_filter_events& filterEvents() noexcept
+    {
+        static const pw_filter_events events = [] {
+            pw_filter_events value{};
+            value.version = PW_VERSION_FILTER_EVENTS;
+            value.process = &MidiInputService::onProcess;
+            value.state_changed = &MidiInputService::onStateChanged;
+            return value;
+        }();
+
+        return events;
+    }
+
+    void start()
+    {
+        loop_ = pw_main_loop_new(nullptr);
+        if (!loop_)
+            throw std::runtime_error(
+                "MIDI Harmonizer: pw_main_loop_new failed");
+
+        pw_properties* nodeProperties = pw_properties_new(
+            PW_KEY_MEDIA_TYPE, "Midi",
+            PW_KEY_MEDIA_CATEGORY, "Capture",
+            PW_KEY_MEDIA_ROLE, "Production",
+            PW_KEY_APP_NAME, "CM5Audio",
+            PW_KEY_NODE_NAME, "cm5audio-midi-harmonizer",
+            PW_KEY_NODE_DESCRIPTION, "CM5Audio MIDI Harmonizer",
+            PW_KEY_NODE_AUTOCONNECT, "false",
+            nullptr);
+
+        if (!nodeProperties)
+            throw std::runtime_error(
+                "MIDI Harmonizer: pw_properties_new failed");
+
+        filter_ = pw_filter_new_simple(
+            pw_main_loop_get_loop(loop_),
+            "CM5Audio MIDI Harmonizer",
+            nodeProperties,
+            &filterEvents(),
+            this);
+
+        if (!filter_)
+            throw std::runtime_error(
+                "MIDI Harmonizer: pw_filter_new_simple failed");
+
+        pw_properties* portProperties = pw_properties_new(
+            PW_KEY_FORMAT_DSP, "32 bit raw UMP",
+            PW_KEY_PORT_NAME, "midi_in",
+            nullptr);
+
+        if (!portProperties)
+            throw std::runtime_error(
+                "MIDI Harmonizer: MIDI port properties allocation failed");
+
+        inputPort_ = pw_filter_add_port(
+            filter_,
+            PW_DIRECTION_INPUT,
+            PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+            sizeof(InputPortData),
+            portProperties,
+            nullptr,
+            0);
+
+        if (!inputPort_)
+            throw std::runtime_error(
+                "MIDI Harmonizer: pw_filter_add_port failed");
+
+        static_cast<InputPortData*>(inputPort_)->owner = this;
+
+        const int result = pw_filter_connect(
+            filter_,
+            PW_FILTER_FLAG_RT_PROCESS,
+            nullptr,
+            0);
+
+        if (result < 0)
+            throw std::runtime_error(
+                "MIDI Harmonizer: pw_filter_connect failed");
+
+        thread_ = std::thread([this] {
+            pw_main_loop_run(loop_);
+        });
+    }
+
+    void stop() noexcept
+    {
+        if (loop_)
+            pw_main_loop_quit(loop_);
+
+        if (thread_.joinable())
+            thread_.join();
+
+        if (filter_ && linkProxy_)
+            cm5audio::midi::destroyInputLink(filter_, linkProxy_);
+
+        if (filter_) {
+            pw_filter_destroy(filter_);
+            filter_ = nullptr;
+        }
+
+        inputPort_ = nullptr;
+        linkProxy_ = nullptr;
+
+        if (loop_) {
+            pw_main_loop_destroy(loop_);
+            loop_ = nullptr;
+        }
+    }
+
+    void clearNotes() noexcept
+    {
+        for (auto& channel : heldNotes_) {
+            for (auto& word : channel)
+                word.store(0, std::memory_order_release);
+        }
+    }
+
+    void setNote(unsigned channelZeroBased,
+                 unsigned note,
+                 bool down) noexcept
+    {
+        if (channelZeroBased >= MIDI_CHANNELS || note >= MIDI_NOTES)
+            return;
+
+        const uint32_t mask = 1u << (note & 31u);
+        auto& word = heldNotes_[channelZeroBased][note >> 5u];
+
+        if (down)
+            word.fetch_or(mask, std::memory_order_release);
+        else
+            word.fetch_and(~mask, std::memory_order_release);
+    }
+
+    void handleMidi1(const uint8_t* bytes, size_t size) noexcept
+    {
+        if (!bytes || size < 3)
+            return;
+
+        const uint8_t status = bytes[0];
+
+        if (status < 0x80 || status >= 0xf0)
+            return;
+
+        const uint8_t command = status & 0xf0u;
+
+        if (command != 0x80u && command != 0x90u)
+            return;
+
+        const unsigned channel = status & 0x0fu;
+        const unsigned note = bytes[1] & 0x7fu;
+        const unsigned velocity = bytes[2] & 0x7fu;
+
+        const bool down =
+            command == 0x90u && velocity != 0;
+
+        setNote(channel, note, down);
+    }
+
+    void handleUmp(const uint32_t* words, size_t wordCount) noexcept
+    {
+        size_t index = 0;
+
+        while (index < wordCount) {
+            const uint32_t first = words[index];
+
+            const uint8_t messageType =
+                static_cast<uint8_t>(first >> 28u);
+
+            const size_t packetWords = umpMessageWords(messageType);
+
+            if (packetWords == 0 || packetWords > wordCount - index)
+                break;
+
+            if (messageType == 0x2 && packetWords == 1) {
+                // MIDI 1.0 Channel Voice UMP.
+                const uint8_t status =
+                    static_cast<uint8_t>((first >> 16u) & 0xffu);
+
+                const uint8_t command = status & 0xf0u;
+
+                if (command == 0x80u || command == 0x90u) {
+                    const unsigned channel = status & 0x0fu;
+                    const unsigned note = (first >> 8u) & 0x7fu;
+                    const unsigned velocity = first & 0x7fu;
+
+                    const bool down =
+                        command == 0x90u && velocity != 0;
+
+                    setNote(channel, note, down);
+                }
+            } else if (messageType == 0x4 && packetWords == 2) {
+                // MIDI 2.0 Channel Voice UMP.
+                const unsigned status = (first >> 20u) & 0x0fu;
+                const unsigned channel = (first >> 16u) & 0x0fu;
+                const unsigned note = (first >> 8u) & 0x7fu;
+
+                const uint16_t velocity =
+                    static_cast<uint16_t>(words[index + 1] >> 16u);
+
+                if (status == 0x8u || status == 0x9u) {
+                    const bool down =
+                        status == 0x9u && velocity != 0;
+
+                    setNote(channel, note, down);
+                }
+            }
+
+            index += packetWords;
+        }
+    }
+
+    void processInputBuffer(pw_buffer* pwBuffer) noexcept
+    {
+        if (!pwBuffer || !pwBuffer->buffer ||
+            pwBuffer->buffer->n_datas < 1)
+            return;
+
+        spa_data* data = &pwBuffer->buffer->datas[0];
+
+        if (!data->data || !data->chunk)
+            return;
+
+        const size_t offset = data->chunk->offset;
+        const size_t size = data->chunk->size;
+
+        if (offset > data->maxsize ||
+            size > data->maxsize - offset ||
+            size < sizeof(spa_pod_sequence))
+            return;
+
+        const auto* base =
+            static_cast<const uint8_t*>(data->data) + offset;
+
+        const auto* sequence =
+            reinterpret_cast<const spa_pod_sequence*>(base);
+
+        if (sequence->pod.type != SPA_TYPE_Sequence ||
+            SPA_POD_SIZE(&sequence->pod) > size)
+            return;
+
+        spa_pod_control* control = nullptr;
+
+        SPA_POD_SEQUENCE_FOREACH(sequence, control) {
+            if (control->value.type != SPA_TYPE_Bytes)
+                continue;
+
+            const size_t payloadSize =
+                SPA_POD_BODY_SIZE(&control->value);
+
+            const auto* payload = static_cast<const uint8_t*>(
+                SPA_POD_BODY(&control->value));
+
+            if (!payload || payloadSize == 0)
+                continue;
+
+            if (control->type == SPA_CONTROL_UMP &&
+                payloadSize % sizeof(uint32_t) == 0 &&
+                payloadSize <= 1024) {
+                std::array<uint32_t, 256> alignedWords{};
+
+                std::memcpy(
+                    alignedWords.data(),
+                    payload,
+                    payloadSize);
+
+                handleUmp(
+                    alignedWords.data(),
+                    payloadSize / sizeof(uint32_t));
+            } else if (control->type == SPA_CONTROL_Midi) {
+                handleMidi1(payload, payloadSize);
+            }
+        }
+    }
+};
+
+struct HarmonyVoice {
+    int note = -1;
+    float gain = 0.0f;
+    float targetGain = 0.0f;
+    float phase = 0.0f;
+    float phaseStep = 0.0f;
+};
+
+class MidiHarmonizerProcessor final : public AudioProcessor {
+public:
+    MidiHarmonizerProcessor(
+        std::shared_ptr<MidiInputService> midi,
+        unsigned midiChannel,
+        unsigned referenceNote,
+        unsigned maxVoices,
+        unsigned pitchRange,
+        float mix)
+        : midi_(std::move(midi)),
+          midiChannel_(midiChannel - 1u),
+          referenceNote_(referenceNote),
+          maxVoices_(maxVoices),
+          pitchRange_(pitchRange),
+          mix_(mix),
+          delayLine_(
+              static_cast<size_t>(MAX_AUDIO_CHANNELS) *
+              DELAY_RING_SIZE,
+              0.0f)
+    {
+        for (int semitones = -24; semitones <= 24; ++semitones) {
+            ratioTable_[static_cast<size_t>(semitones + 24)] =
+                std::pow(
+                    2.0f,
+                    static_cast<float>(semitones) / 12.0f);
+        }
+
+        for (unsigned i = 0; i <= FADE_TABLE_SIZE; ++i) {
+            const float phase =
+                static_cast<float>(i) /
+                static_cast<float>(FADE_TABLE_SIZE);
+
+            fadeTable_[i] = 0.5f - 0.5f *
+                std::cos(phase * 6.2831853071795864769f);
+        }
+    }
+
+    void process(float* buffer,
+                 size_t frames,
+                 unsigned channels) override
+    {
+        if (!buffer || frames == 0 || channels == 0)
+            return;
+
+        synchronizeVoices();
+
+        const unsigned processChannels =
+            std::min(channels, MAX_AUDIO_CHANNELS);
+
+        for (size_t frame = 0; frame < frames; ++frame) {
+            std::array<float, MAX_AUDIO_CHANNELS> input{};
+            std::array<float, MAX_AUDIO_CHANNELS> harmony{};
+
+            for (unsigned channel = 0;
+                 channel < processChannels;
+                 ++channel) {
+                const size_t sampleIndex =
+                    frame * channels + channel;
+
+                input[channel] = buffer[sampleIndex];
+
+                delayLine_[
+                    static_cast<size_t>(channel) * DELAY_RING_SIZE +
+                    writePosition_] = input[channel];
+            }
+
+            unsigned activeVoices = 0;
+
+            for (HarmonyVoice& voice : voices_) {
+                if (voice.note < 0)
+                    continue;
+
+                if (voice.gain < voice.targetGain) {
+                    voice.gain += 1.0f / GAIN_RAMP_SAMPLES;
+
+                    if (voice.gain > voice.targetGain)
+                        voice.gain = voice.targetGain;
+                } else if (voice.gain > voice.targetGain) {
+                    voice.gain -= 1.0f / GAIN_RAMP_SAMPLES;
+
+                    if (voice.gain < voice.targetGain)
+                        voice.gain = voice.targetGain;
+                }
+
+                if (voice.gain <= 0.00001f &&
+                    voice.targetGain <= 0.0f) {
+                    voice.gain = 0.0f;
+                    voice.note = -1;
+                    voice.phaseStep = 0.0f;
+                    continue;
+                }
+
+                if (voice.gain <= 0.0f)
+                    continue;
+
+                ++activeVoices;
+
+                if (voice.note == static_cast<int>(referenceNote_)) {
+                    for (unsigned channel = 0;
+                         channel < processChannels;
+                         ++channel) {
+                        harmony[channel] +=
+                            input[channel] * voice.gain;
+                    }
+
+                    continue;
+                }
+
+                float phaseA = voice.phase;
+                float phaseB = phaseA + 0.5f;
+
+                if (phaseB >= 1.0f)
+                    phaseB -= 1.0f;
+
+                const float delayA =
+                    MIN_DELAY_SAMPLES +
+                    phaseA * DELAY_SPAN_SAMPLES;
+
+                const float delayB =
+                    MIN_DELAY_SAMPLES +
+                    phaseB * DELAY_SPAN_SAMPLES;
+
+                const float tablePosition =
+                    phaseA * static_cast<float>(FADE_TABLE_SIZE);
+
+                const unsigned tableIndex =
+                    static_cast<unsigned>(tablePosition);
+
+                const float tableFraction =
+                    tablePosition - static_cast<float>(tableIndex);
+
+                const float fadeA =
+                    fadeTable_[tableIndex] +
+                    (fadeTable_[tableIndex + 1] -
+                     fadeTable_[tableIndex]) * tableFraction;
+
+                const float fadeB = 1.0f - fadeA;
+
+                for (unsigned channel = 0;
+                     channel < processChannels;
+                     ++channel) {
+                    const float sampleA =
+                        readDelay(channel, delayA);
+
+                    const float sampleB =
+                        readDelay(channel, delayB);
+
+                    const float shifted =
+                        sampleA * fadeA + sampleB * fadeB;
+
+                    harmony[channel] += shifted * voice.gain;
+                }
+
+                voice.phase += voice.phaseStep;
+
+                if (voice.phase >= 1.0f)
+                    voice.phase -= 1.0f;
+                else if (voice.phase < 0.0f)
+                    voice.phase += 1.0f;
+            }
+
+            if (activeVoices == 0) {
+                for (unsigned channel = 0;
+                     channel < processChannels;
+                     ++channel) {
+                    buffer[frame * channels + channel] =
+                        input[channel];
+                }
+            } else {
+                const float voiceScale =
+                    mix_ / static_cast<float>(activeVoices);
+
+                const float dryScale = 1.0f - mix_;
+
+                for (unsigned channel = 0;
+                     channel < processChannels;
+                     ++channel) {
+                    buffer[frame * channels + channel] =
+                        input[channel] * dryScale +
+                        harmony[channel] * voiceScale;
+                }
+            }
+
+            // Audio channels beyond the fixed DSP capacity remain passthrough.
+            writePosition_ =
+                (writePosition_ + 1u) & DELAY_RING_MASK;
+        }
+    }
+
+private:
+    std::shared_ptr<MidiInputService> midi_;
+
+    unsigned midiChannel_ = 9;
+    unsigned referenceNote_ = 60;
+    unsigned maxVoices_ = 4;
+    unsigned pitchRange_ = 24;
+
+    float mix_ = 0.75f;
+
+    std::vector<float> delayLine_;
+
+    std::array<HarmonyVoice, MAX_HARMONY_VOICES> voices_{};
+    std::array<float, 49> ratioTable_{};
+    std::array<float, FADE_TABLE_SIZE + 1> fadeTable_{};
+
+    uint32_t writePosition_ = 0;
+
+    float readDelay(unsigned channel, float delay) const noexcept
+    {
+        float position =
+            static_cast<float>(writePosition_) - delay;
+
+        if (position < 0.0f)
+            position += static_cast<float>(DELAY_RING_SIZE);
+
+        const uint32_t indexA =
+            static_cast<uint32_t>(position);
+
+        const uint32_t indexB =
+            (indexA + 1u) & DELAY_RING_MASK;
+
+        const float fraction =
+            position - static_cast<float>(indexA);
+
+        const size_t base =
+            static_cast<size_t>(channel) * DELAY_RING_SIZE;
+
+        const float a = delayLine_[base + indexA];
+        const float b = delayLine_[base + indexB];
+
+        return a + (b - a) * fraction;
+    }
+
+    void synchronizeVoices() noexcept
+    {
+        std::array<int, MAX_HARMONY_VOICES> desiredNotes{};
+        std::array<bool, MAX_HARMONY_VOICES> matched{};
+
+        unsigned desiredCount = 0;
+
+        for (unsigned note = 0;
+             note < MIDI_NOTES && desiredCount < maxVoices_;
+             ++note) {
+            if (!midi_->noteIsDown(midiChannel_, note))
+                continue;
+
+            const int semitones =
+                static_cast<int>(note) -
+                static_cast<int>(referenceNote_);
+
+            if (std::abs(semitones) >
+                static_cast<int>(pitchRange_))
+                continue;
+
+            desiredNotes[desiredCount++] =
+                static_cast<int>(note);
+        }
+
+        for (HarmonyVoice& voice : voices_) {
+            if (voice.note < 0) {
+                voice.targetGain = 0.0f;
+                continue;
+            }
+
+            bool stillHeld = false;
+
+            for (unsigned i = 0; i < desiredCount; ++i) {
+                if (desiredNotes[i] == voice.note) {
+                    matched[i] = true;
+                    stillHeld = true;
+                    break;
+                }
+            }
+
+            voice.targetGain = stillHeld ? 1.0f : 0.0f;
+        }
+
+        for (unsigned i = 0; i < desiredCount; ++i) {
+            if (matched[i])
+                continue;
+
+            int freeSlot = -1;
+
+            for (unsigned v = 0; v < voices_.size(); ++v) {
+                if (voices_[v].note < 0 &&
+                    voices_[v].gain <= 0.00001f) {
+                    freeSlot = static_cast<int>(v);
+                    break;
+                }
+            }
+
+            if (freeSlot < 0)
+                continue;
+
+            HarmonyVoice& voice =
+                voices_[static_cast<size_t>(freeSlot)];
+
+            const int note = desiredNotes[i];
+
+            const int semitones =
+                note - static_cast<int>(referenceNote_);
+
+            voice.note = note;
+            voice.gain = 0.0f;
+            voice.targetGain = 1.0f;
+            voice.phase = 0.0f;
+
+            voice.phaseStep =
+                (1.0f -
+                 ratioTable_[static_cast<size_t>(semitones + 24)]) /
+                DELAY_SPAN_SAMPLES;
+        }
+    }
+};
+
+} // namespace
+
+void register_midi_harmonizer_processor(ProcessorRegistry& registry)
+{
+    registry.register_processor({
+        "midi_harmonizer",
+        "MIDI Harmonizer",
+        "MIDI note-controlled polyphonic audio harmonizer. "
+        "Held MIDI notes create shifted voices relative to "
+        "the configured reference note.",
+        {
+            {
+                "midi_channel",
+                "MIDI Channel",
+                "integer",
+                10,
+                1.0,
+                16.0,
+                1.0,
+                "",
+                {}
+            },
+            {
+                "reference_note",
+                "Reference Note",
+                "integer",
+                60,
+                0.0,
+                127.0,
+                1.0,
+                "MIDI note",
+                {}
+            },
+            {
+                "max_voices",
+                "Maximum Voices",
+                "integer",
+                4,
+                1.0,
+                8.0,
+                1.0,
+                "voices",
+                {}
+            },
+            {
+                "pitch_range",
+                "Pitch Range",
+                "integer",
+                24,
+                1.0,
+                24.0,
+                1.0,
+                "semitones",
+                {}
+            },
+            {
+                "mix",
+                "Harmony Mix",
+                "number",
+                0.75,
+                0.0,
+                1.0,
+                0.01,
+                "",
+                {}
+            },
+            {
+                "auto_connect",
+                "Auto Connect",
+                "enum",
+                "disabled",
+                {},
+                {},
+                {},
+                "",
+                {
+                    {"Disabled", "disabled"},
+                    {"Enabled", "enabled"}
+                }
+            },
+            {
+                "midi_output",
+                "MIDI Output",
+                "enum",
+                "manual",
+                {},
+                {},
+                {},
+                "",
+                makeMidiOutputChoices()
+            }
+        },
+        [](const nlohmann::json& params)
+            -> std::unique_ptr<AudioProcessor> {
+            const unsigned midiChannel =
+                params.at("midi_channel").get<unsigned>();
+
+            const unsigned referenceNote =
+                params.at("reference_note").get<unsigned>();
+
+            const unsigned maxVoices =
+                params.at("max_voices").get<unsigned>();
+
+            const unsigned pitchRange =
+                params.at("pitch_range").get<unsigned>();
+
+            const float mix =
+                params.at("mix").get<float>();
+
+            const bool autoConnect =
+                params.at("auto_connect").get<std::string>() ==
+                "enabled";
+
+            const std::string midiOutput =
+                params.at("midi_output").get<std::string>();
+
+            auto midi = MidiInputService::acquire(
+                autoConnect,
+                midiOutput);
+
+            return std::make_unique<MidiHarmonizerProcessor>(
+                std::move(midi),
+                midiChannel,
+                referenceNote,
+                maxVoices,
+                pitchRange,
+                mix);
+        }
+    });
+}

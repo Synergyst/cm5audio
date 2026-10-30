@@ -284,6 +284,15 @@
               "threshold": 0.9
             },
             "type": "limiter"
+          },
+          {
+            "params": {
+              "auto_connect": "enabled",
+              "listen_channel": 1,
+              "midi_output": "Midi-Bridge\u001fMPK mini Plus MIDI 1 (capture)",
+              "pitch_range": 8
+            },
+            "type": "midi_pitch_shifter"
           }
         ],
         "gain": 1.0
@@ -355,6 +364,15 @@
               "threshold": 0.9
             },
             "type": "limiter"
+          },
+          {
+            "params": {
+              "auto_connect": "enabled",
+              "listen_channel": 1,
+              "midi_output": "Midi-Bridge\u001fMPK mini Plus MIDI 1 (capture)",
+              "pitch_range": 8
+            },
+            "type": "midi_pitch_shifter"
           }
         ],
         "gain": 1.0
@@ -461,10 +479,78 @@
         "chain": [
           {
             "params": {
+              "cutoff": 80
+            },
+            "type": "hpf"
+          },
+          {
+            "params": {
+              "cutoff": 15000
+            },
+            "type": "lpf"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "hold": 0.05,
+              "release": 0.1,
+              "threshold": 0.01
+            },
+            "type": "noise_gate"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.1,
+              "threshold": 0.5
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
+              "auto_connect": "enabled",
               "listen_channel": 1,
-              "pitch_range": 24
+              "midi_output": "Midi-Bridge\u001fMPK mini Plus MIDI 1 (capture)",
+              "pitch_range": 8
             },
             "type": "midi_pitch_shifter"
+          },
+          {
+            "params": {
+              "auto_connect": "enabled",
+              "max_voices": 8,
+              "midi_channel": 1,
+              "midi_output": "Midi-Bridge\u001fMPK mini Plus MIDI 1 (capture)",
+              "mix": 0.75,
+              "pitch_range": 24,
+              "reference_note": 60
+            },
+            "type": "midi_harmonizer"
+          },
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.5
+            },
+            "type": "normalize"
+          },
+          {
+            "params": {
+              "ceiling": 1,
+              "drive": 1
+            },
+            "type": "soft_clipper"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 10,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
           }
         ],
         "gain": 1.0
@@ -483,10 +569,78 @@
         "chain": [
           {
             "params": {
+              "cutoff": 80
+            },
+            "type": "hpf"
+          },
+          {
+            "params": {
+              "cutoff": 15000
+            },
+            "type": "lpf"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "hold": 0.05,
+              "release": 0.1,
+              "threshold": 0.01
+            },
+            "type": "noise_gate"
+          },
+          {
+            "params": {
+              "attack": 0.01,
+              "ratio": 4,
+              "release": 0.1,
+              "threshold": 0.5
+            },
+            "type": "compressor"
+          },
+          {
+            "params": {
+              "auto_connect": "enabled",
               "listen_channel": 1,
-              "pitch_range": 24
+              "midi_output": "Midi-Bridge\u001fMPK mini Plus MIDI 1 (capture)",
+              "pitch_range": 8
             },
             "type": "midi_pitch_shifter"
+          },
+          {
+            "params": {
+              "auto_connect": "enabled",
+              "max_voices": 8,
+              "midi_channel": 1,
+              "midi_output": "Midi-Bridge\u001fMPK mini Plus MIDI 1 (capture)",
+              "mix": 0.75,
+              "pitch_range": 24,
+              "reference_note": 60
+            },
+            "type": "midi_harmonizer"
+          },
+          {
+            "params": {
+              "max_gain": 4,
+              "speed": 0.1,
+              "target": 0.5
+            },
+            "type": "normalize"
+          },
+          {
+            "params": {
+              "ceiling": 1,
+              "drive": 1
+            },
+            "type": "soft_clipper"
+          },
+          {
+            "params": {
+              "attack": 0.005,
+              "lookahead": 10,
+              "release": 0.05,
+              "threshold": 0.9
+            },
+            "type": "limiter"
           }
         ],
         "gain": 1.0

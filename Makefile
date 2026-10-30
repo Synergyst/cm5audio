@@ -1,14 +1,14 @@
 CXX = g++
 NLOHMANN_JSON_INCLUDE ?= ../json/include
 CXXFLAGS = -std=c++17 -O3 -Iinclude -I/usr/local/include -I$(NLOHMANN_JSON_INCLUDE) -I/usr/include/pipewire-0.3 -I/usr/include/spa-0.2 -Wall -pthread
-LDFLAGS = -L/usr/local/lib -lasound -lpipewire-0.3 -lixwebsocket -lssl -lcrypto -lz -lpthread
+LDFLAGS = -L/usr/local/lib -lasound -lpipewire-0.3 -lixwebsocket -lssl -lcrypto -lz -lrnnoise -lpthread
 
 # Separate fast-changing app sources from rarely-changed miniaudio
 APP_SRCS = src/main.cpp src/web_server.cpp src/device_manager.cpp src/dsp_engine.cpp \
 	src/processor_registry.cpp src/plugins/register_builtin_processors.cpp \
 	src/plugins/passthrough.cpp src/plugins/gain.cpp src/plugins/compressor.cpp \
 	src/plugins/echo_processor.cpp src/plugins/chorus_processor.cpp src/plugins/reverb_processor.cpp \
-	src/plugins/lush_reverb_processor.cpp src/plugins/eq_processor.cpp src/plugins/normalize.cpp src/plugins/autotune.cpp src/plugins/vowel_filter.cpp src/plugins/soft_clipper.cpp src/plugins/expander.cpp src/plugins/hpf_processor.cpp src/plugins/lpf_processor.cpp src/plugins/deesser.cpp src/plugins/bitcrusher.cpp src/plugins/noise_gate.cpp src/plugins/limiter.cpp src/plugins/midi_pitch_shifter.cpp
+	src/plugins/lush_reverb_processor.cpp src/plugins/eq_processor.cpp src/plugins/normalize.cpp src/plugins/autotune.cpp src/plugins/vowel_filter.cpp src/plugins/soft_clipper.cpp src/plugins/expander.cpp src/plugins/hpf_processor.cpp src/plugins/lpf_processor.cpp src/plugins/deesser.cpp src/plugins/bitcrusher.cpp src/plugins/noise_gate.cpp src/plugins/limiter.cpp src/plugins/midi_pitch_shifter.cpp src/plugins/midi_harmonizer.cpp src/plugins/rnnoise_processor.cpp
 APP_OBJS = $(APP_SRCS:src/%.cpp=build/%.o)
 
 MINIAUDIO_SRC = src/miniaudio_impl.cpp

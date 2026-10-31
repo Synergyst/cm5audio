@@ -3785,6 +3785,9 @@ function autoOrganizeLayout() {
                         const pluginMeters = data.plugins && data.plugins[m.pluginId];
                         const portMeters = pluginMeters && pluginMeters[m.portId];
                         if (Array.isArray(portMeters)) meter = portMeters[m.ch] || null;
+                    } else if (m.epId === 'tone/generator') {
+                        const toneMeters = data.tone;
+                        if (Array.isArray(toneMeters)) meter = toneMeters[m.ch] || null;
                     } else if (m.epId.startsWith('pw-node/')) {
                         const nodeId = m.epId.slice('pw-node/'.length);
                         const node = pwGraph.nodes[nodeId];
@@ -3812,9 +3815,23 @@ function autoOrganizeLayout() {
             } catch (e) { console.error("Meter update error:", e); }
         }
 
+        async function loadToneSettings() {
+            try {
+                const tone = await fetchAPI('/api/tone', { cache: 'no-store' });
+                if ($('tone-enabled')) $('tone-enabled').value = tone.enabled ? '1' : '0';
+                if ($('tone-freq')) $('tone-freq').value = String(tone.frequency_hz);
+                if ($('tone-amp')) $('tone-amp').value = String(tone.amplitude);
+            } catch (e) {
+                console.error('Could not load backend tone-generator settings:', e);
+            }
+        }
+
         async function applyTone() {
             try {
-                await fetchAPI(`/api/tone?enabled=${$('tone-enabled').value}&frequency=${$('tone-freq').value}&amplitude=${$('tone-amp').value}`, { method: 'POST' });
+                const result = await fetchAPI(`/api/tone?enabled=${$('tone-enabled').value}&frequency=${$('tone-freq').value}&amplitude=${$('tone-amp').value}`, { method: 'POST' });
+                if (!result.adopted || !result.persisted) {
+                    throw new Error(result.message || 'Tone settings were applied but persistence was not confirmed');
+                }
             } catch (e) { alert(e.message); }
         }
 
@@ -3850,7 +3867,8 @@ function autoOrganizeLayout() {
                 loadDevices(),
                 loadGraph(),
                 loadPipewireGraph(),
-                loadDspAvailable()
+                loadDspAvailable(),
+                loadToneSettings()
             ]).then(() => {
                 if ($('status')) $('status').textContent = 'Ready';
             });

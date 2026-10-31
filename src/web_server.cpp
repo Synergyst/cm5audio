@@ -689,9 +689,9 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
         }
         if (settings.contains("tone") && settings["tone"].is_object()) {
             const auto& value = settings["tone"];
-            tone.enabled.store(value.value("enabled", false), std::memory_order_relaxed);
-            tone.frequency_hz.store(std::clamp(value.value("frequency_hz", 440.0f), 1.0f, 20000.0f), std::memory_order_relaxed);
-            tone.amplitude.store(std::clamp(value.value("amplitude", 0.0f), 0.0f, 1.0f), std::memory_order_relaxed);
+            tone.enabled.store(value.value("enabled", tone.enabled.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+            tone.frequency_hz.store(std::clamp(value.value("frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)), 1.0f, 20000.0f), std::memory_order_relaxed);
+            tone.amplitude.store(std::clamp(value.value("amplitude", tone.amplitude.load(std::memory_order_relaxed)), 0.0f, 1.0f), std::memory_order_relaxed);
         }
         if (settings.contains("hardware") && settings["hardware"].is_object()) {
             const auto& hardware = settings["hardware"];
@@ -2026,6 +2026,7 @@ bool WebServer::start() {
                     body["message"] = "Configuration accepted, but engine adoption was not confirmed; refresh before retrying";
                 } else {
                     const bool persistMutation =
+                        path == "/api/tone" ||
                         path == "/api/devices/activate" ||
                         path == "/api/devices/deactivate" ||
                         path.find("/api/plugin-chain-presets") == 0 ||
@@ -2086,6 +2087,10 @@ bool WebServer::start() {
             nlohmann::json j;
             j["capture"] = nlohmann::json::object();
             j["playback"] = nlohmann::json::object();
+            // Tone generator is an internal one-channel graph source rather
+            // than a hardware capture endpoint. Publish it separately while
+            // using the same meter JSON shape as all other endpoints.
+            j["tone"] = build_meter_json(&m_tone.meter, 1);
             {
                 std::lock_guard<std::mutex> metersLock(m_metrics.lock);
                 for (auto const& [id, meters_array] : m_metrics.capture) {

@@ -9,34 +9,40 @@
 #include <queue>
 #include <cstring>
 
+static void update_channel_meter(ChannelMeter& meter, const float* buffer,
+                                 unsigned channel, unsigned stride,
+                                 size_t frames) {
+    if (!buffer || stride <= channel || frames == 0) return;
+
+    double sumSq = 0.0;
+    float peak = 0.0f;
+    for (size_t frame = 0; frame < frames; ++frame) {
+        const float sample = buffer[frame * stride + channel];
+        const float magnitude = std::abs(sample);
+        sumSq += static_cast<double>(sample) * sample;
+        if (magnitude > peak) peak = magnitude;
+    }
+
+    const float rms = static_cast<float>(std::sqrt(sumSq / frames));
+    const float rmsDb = rms > 0.00001f ? 20.0f * std::log10(rms) : -60.0f;
+    const float peakDb = peak > 0.00001f ? 20.0f * std::log10(peak) : -60.0f;
+    meter.raw_value.store(rms, std::memory_order_relaxed);
+    meter.raw_peak.store(peak, std::memory_order_relaxed);
+    meter.rms_db.store(rmsDb, std::memory_order_relaxed);
+    meter.peak_db.store(peakDb, std::memory_order_relaxed);
+    meter.peak_hold_db.store(std::max(peakDb,
+        meter.peak_hold_db.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+    meter.clipped.store(peak > 1.0f, std::memory_order_relaxed);
+}
+
 static void update_plugin_port_meter(const float* buffer, unsigned channels,
                                       unsigned stride, size_t frames,
                                       const std::shared_ptr<PluginPortMeterBank>& bank) {
     if (!buffer || !bank || !bank->meters || channels == 0 ||
         channels > bank->channels || stride < channels || frames == 0) return;
 
-    for (unsigned channel = 0; channel < channels; ++channel) {
-        double sumSq = 0.0;
-        float peak = 0.0f;
-        for (size_t frame = 0; frame < frames; ++frame) {
-            const float sample = buffer[frame * stride + channel];
-            const float magnitude = std::abs(sample);
-            sumSq += static_cast<double>(sample) * sample;
-            if (magnitude > peak) peak = magnitude;
-        }
-
-        const float rms = static_cast<float>(std::sqrt(sumSq / frames));
-        const float rmsDb = rms > 0.00001f ? 20.0f * std::log10(rms) : -60.0f;
-        const float peakDb = peak > 0.00001f ? 20.0f * std::log10(peak) : -60.0f;
-        auto& meter = bank->meters[channel];
-        meter.raw_value.store(rms, std::memory_order_relaxed);
-        meter.raw_peak.store(peak, std::memory_order_relaxed);
-        meter.rms_db.store(rmsDb, std::memory_order_relaxed);
-        meter.peak_db.store(peakDb, std::memory_order_relaxed);
-        meter.peak_hold_db.store(std::max(peakDb,
-            meter.peak_hold_db.load(std::memory_order_relaxed)), std::memory_order_relaxed);
-        meter.clipped.store(peak > 1.0f, std::memory_order_relaxed);
-    }
+    for (unsigned channel = 0; channel < channels; ++channel)
+        update_channel_meter(bank->meters[channel], buffer, channel, stride, frames);
 }
 
 #define CM5_ENABLE_PROBES 0
@@ -559,14 +565,19 @@ void DspEngine::process_audio() {
 
         if (handler.type == NodeHandler::Type::TONE) {
             if (m_tone.enabled) {
-                float freq = m_tone.frequency_hz, amp = m_tone.amplitude;
+                const float freq = m_tone.frequency_hz.load(std::memory_order_relaxed);
+                const float amp = m_tone.amplitude.load(std::memory_order_relaxed);
                 for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
-                    float sample = std::sin(m_tonePhase * 2.0 * M_PI) * amp;
+                    const float sample = std::sin(m_tonePhase * 2.0 * M_PI) * amp;
                     buf[f] += sample;
                     m_tonePhase += freq / m_engineSampleRate;
                     if (m_tonePhase > 1.0) m_tonePhase -= 1.0;
                 }
             }
+            // The tone endpoint is a source, so meter the generated block here
+            // even when disabled (which publishes silence and lets the meter
+            // return to its floor). This is lock-free and allocation-free.
+            update_channel_meter(m_tone.meter, buf, 0, 1, CM5_BUFFER_FRAMES);
         } else if (handler.type == NodeHandler::Type::HARDWARE_CAPTURE) {
             auto* dev = static_cast<HardwareDevice*>(handler.ptr);
             const unsigned chs = handler.channels;

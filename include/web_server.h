@@ -55,6 +55,10 @@ struct ToneControls {
     std::atomic<bool> enabled{false};
     std::atomic<float> frequency_hz{440.0f};
     std::atomic<float> amplitude{0.2f};
+    // The tone generator is a graph source with one output channel. Keep its
+    // meter alongside the atomic controls so the DSP thread can publish levels
+    // without taking AudioMetrics locks or allocating a separate meter bank.
+    ChannelMeter meter;
 };
 
 struct WebClientSession {

@@ -2827,14 +2827,17 @@ bool WebServer::start() {
 
         m_httpServer->Get("/api/pipewire/graph", [this](const httplib::Request&, httplib::Response& response) {
             if (!m_pwEnabled) {
-                response.status = 404;
-                response.set_content("{\"error\": \"PipeWire patchbay not enabled via CLI\"}", "application/json");
+                nlohmann::json disabled;
+                disabled["enabled"] = false;
+                disabled["nodes"] = nlohmann::json::array();
+                disabled["links"] = nlohmann::json::array();
+                response.set_content(disabled.dump(), "application/json");
                 return;
             }
 
             const auto graph = m_deviceMgr.get_pipewire_graph();
             nlohmann::json j;
-
+            j["enabled"] = true;
             j["nodes"] = nlohmann::json::array();
             for (const auto& [id, node] : graph.nodes) {
                 j["nodes"].push_back({

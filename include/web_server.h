@@ -215,6 +215,9 @@ public:
     bool save_plugin_chain_preset(const std::string& name, const nlohmann::json& chain,
                             float chainGain, bool active, uint32_t requestedId,
                             PluginChainPreset& saved, std::string& error);
+    bool update_plugin_chain_preset(uint32_t id, const std::string& name,
+                            const nlohmann::json& chain, float chainGain, bool active,
+                            PluginChainPreset& updated, std::string& error);
     bool delete_plugin_chain_preset(uint32_t id, std::string& error);
     bool remove_plugin_node(uint32_t id, std::string& error);
     std::shared_ptr<const std::vector<MidiRoute>> midi_route_snapshot() const;

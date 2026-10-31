@@ -1152,6 +1152,37 @@ bool ClientManager::save_plugin_chain_preset(
     }
 }
 
+bool ClientManager::update_plugin_chain_preset(
+    uint32_t id, const std::string& name, const nlohmann::json& chain,
+    float chainGain, bool active, PluginChainPreset& updated, std::string& error) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    try {
+        if (id == 0) throw std::invalid_argument("Plugin chain preset ID must be nonzero");
+        std::string cleanName = name;
+        const auto first = cleanName.find_first_not_of(" \t\r\n");
+        const auto last = cleanName.find_last_not_of(" \t\r\n");
+        cleanName = first == std::string::npos ? std::string() : cleanName.substr(first, last - first + 1);
+        if (cleanName.empty() || cleanName.size() > 80)
+            throw std::invalid_argument("Preset name must contain 1 to 80 characters");
+
+        // Validate and normalize every processor and parameter before replacing
+        // the stored preset, so a bad edit never partially mutates the library.
+        auto normalizedChain = normalize_plugin_chain_definition(chain, chainGain);
+        std::lock_guard<std::mutex> lock(m_chain_preset_lock);
+        const auto found = std::find_if(m_pluginChainPresets.begin(), m_pluginChainPresets.end(),
+            [id](const PluginChainPreset& item) { return item.id == id; });
+        if (found == m_pluginChainPresets.end())
+            throw std::invalid_argument("Plugin chain preset not found");
+
+        updated = {id, cleanName, std::move(normalizedChain), chainGain, active};
+        *found = updated;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
 bool ClientManager::delete_plugin_chain_preset(uint32_t id, std::string& error) {
     std::lock_guard<std::recursive_mutex> control(m_control_lock);
     std::lock_guard<std::mutex> lock(m_chain_preset_lock);
@@ -2149,6 +2180,32 @@ bool WebServer::start() {
             } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
         });
 
+        post(R"(/api/plugin-chain-presets/(\d+)/update)", [this](const httplib::Request& request, httplib::Response& response) {
+            uint32_t presetId = 0;
+            try {
+                if (!parse_plugin_instance_id(request, presetId))
+                    throw std::invalid_argument("invalid plugin chain preset ID");
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object()) throw std::invalid_argument("Preset update must be an object");
+                PluginChainPreset current;
+                if (!m_clientMgr.get_plugin_chain_preset(presetId, current))
+                    throw std::invalid_argument("Plugin chain preset not found");
+                const std::string name = body.value("name", current.name);
+                const nlohmann::json chain = body.value("chain", current.chain);
+                const float chainGain = body.value("chain_gain", current.chain_gain);
+                const bool active = body.value("active", current.active);
+                PluginChainPreset updated;
+                std::string error;
+                if (!m_clientMgr.update_plugin_chain_preset(presetId, name, chain,
+                        chainGain, active, updated, error))
+                    throw std::invalid_argument(error);
+                response.set_content(nlohmann::json({{"status", "ok"},
+                    {"preset", chain_preset_json(updated)}}).dump(2), "application/json");
+            } catch (const std::exception& error) {
+                dsp_error(response, 400, error.what());
+            }
+        });
+
         post(R"(/api/plugin-chain-presets/(\d+)/instantiate)", [this](const httplib::Request& request, httplib::Response& response) {
             uint32_t presetId = 0;
             try {
@@ -2208,6 +2265,46 @@ bool WebServer::start() {
                     throw std::invalid_argument(error);
                 response.set_content(nlohmann::json({{"status", "ok"}, {"plugin", plugin_node_json(*updated)}}).dump(2), "application/json");
             } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        });
+
+        post(R"(/api/plugins/(\d+)/replace-chain-preset)", [this](const httplib::Request& request, httplib::Response& response) {
+            uint32_t pluginId = 0;
+            try {
+                if (!parse_plugin_instance_id(request, pluginId))
+                    throw std::invalid_argument("invalid plugin chain instance ID");
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object() || !body.contains("preset_id") || !body["preset_id"].is_number_integer())
+                    throw std::invalid_argument("preset_id is required");
+                const int64_t rawPresetId = body["preset_id"].get<int64_t>();
+                if (rawPresetId <= 0 || static_cast<uint64_t>(rawPresetId) > std::numeric_limits<uint32_t>::max())
+                    throw std::invalid_argument("invalid plugin chain preset ID");
+
+                const auto nodes = m_clientMgr.get_plugin_nodes();
+                const auto nodeIt = std::find_if(nodes.begin(), nodes.end(),
+                    [pluginId](const auto& item) { return item && item->id == pluginId; });
+                if (nodeIt == nodes.end()) throw std::invalid_argument("Plugin chain node not found");
+                if ((*nodeIt)->type != "plugin_chain")
+                    throw std::invalid_argument("Target plugin node is not a composite chain");
+
+                PluginChainPreset preset;
+                if (!m_clientMgr.get_plugin_chain_preset(static_cast<uint32_t>(rawPresetId), preset))
+                    throw std::invalid_argument("Plugin chain preset not found");
+
+                // update_plugin_chain_node retains the live node ID, port IDs,
+                // meter banks, and existing graph cables.
+                std::shared_ptr<const PluginNodeInstance> updated;
+                std::string error;
+                if (!m_clientMgr.update_plugin_chain_node(pluginId, (*nodeIt)->name,
+                        preset.chain, preset.chain_gain, preset.active, updated, error))
+                    throw std::invalid_argument(error);
+
+                response.set_content(nlohmann::json({{"status", "ok"},
+                    {"plugin", plugin_node_json(*updated)},
+                    {"replaced_from_preset_id", preset.id},
+                    {"replaced_from_preset_name", preset.name}}).dump(2), "application/json");
+            } catch (const std::exception& error) {
+                dsp_error(response, 400, error.what());
+            }
         });
 
         post("/api/plugins", [this](const httplib::Request& request, httplib::Response& response) {

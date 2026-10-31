@@ -224,10 +224,23 @@
         .plugin-chain-action { border-color: #8f78b7; color: #c6b3e8; }
         #chain-presets-modal, #chain-node-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(620px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; display: none; z-index: 1002; background: var(--panel-bg); border: 1px solid #8f78b7; border-radius: 10px; padding: 20px; box-shadow: 0 15px 60px rgba(0,0,0,.75); }
         #chain-presets-modal h2, #chain-node-modal h2 { margin: 0 0 14px; font-size: 16px; color: #c6b3e8; }
-        .chain-preset-item { display: flex; align-items: center; gap: 10px; padding: 9px; border: 1px solid var(--border-color); border-radius: 6px; margin: 7px 0; }
-        .chain-preset-info { flex: 1; min-width: 0; }
+        .chain-preset-item { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 9px; border: 1px solid var(--border-color); border-radius: 6px; margin: 7px 0; }
+        .chain-preset-info { flex: 1 1 180px; min-width: 0; }
         .chain-preset-info strong { display: block; overflow: hidden; text-overflow: ellipsis; }
         .chain-preset-info small { color: var(--text-dim); }
+        #chain-preset-editor-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(760px, calc(100vw - 32px)); max-height: 90vh; overflow: auto; display: none; z-index: 1004; background: var(--panel-bg); border: 1px solid #8f78b7; border-radius: 10px; padding: 20px; box-shadow: 0 15px 60px rgba(0,0,0,.75); }
+        #chain-preset-editor-modal h2 { margin: 0 0 14px; font-size: 16px; color: #c6b3e8; }
+        .chain-preset-editor-fields { display: grid; grid-template-columns: minmax(180px, 1fr) 140px auto; gap: 10px; align-items: end; }
+        .chain-preset-editor-fields label { display: flex; flex-direction: column; gap: 5px; color: var(--text-dim); font-size: 12px; }
+        .chain-preset-editor-fields input, .chain-preset-editor-fields select { width: 100%; box-sizing: border-box; }
+        .chain-preset-add-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+        .chain-preset-add-row select { flex: 1; min-width: 180px; }
+        .chain-step-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+        .chain-step-actions { display: flex; gap: 5px; flex-wrap: wrap; }
+        .chain-node-replace { border: 1px solid #8f78b7; border-radius: 7px; padding: 10px; margin: 10px 0; }
+        .chain-node-replace .control-row { align-items: center; }
+        .chain-node-replace select { width: min(100%, 320px); }
+        @media (max-width: 620px) { .chain-preset-editor-fields { grid-template-columns: 1fr; } }
         .chain-modal-steps { max-height: 42vh; overflow: auto; margin: 12px 0; }
         .chain-modal-step { border: 1px solid var(--border-color); border-radius: 6px; padding: 9px; margin: 6px 0; }
         .chain-modal-step strong { display: block; margin-bottom: 5px; }
@@ -686,9 +699,29 @@
 
     <div id="chain-presets-modal" role="dialog" aria-modal="true" aria-labelledby="chain-presets-title">
         <h2 id="chain-presets-title">Plugin Chain Presets</h2>
-        <div class="dsp-help">Saved presets live in cm5audio_settings.json and remain available after their chain nodes are deleted.</div>
+        <div class="dsp-help">Edit saved processor order and every parameter. Presets are independent of live nodes; deleting a preset never deletes nodes already created from it.</div>
         <div id="chain-presets-list" aria-live="polite"></div>
         <div class="chain-modal-actions"><button type="button" onclick="closeChainPresetsModal()">CLOSE</button></div>
+    </div>
+
+    <div id="chain-preset-editor-modal" role="dialog" aria-modal="true" aria-labelledby="chain-preset-editor-title">
+        <h2 id="chain-preset-editor-title">Edit Plugin Chain Preset</h2>
+        <div class="chain-preset-editor-fields">
+            <label for="chain-preset-edit-name">Preset Name<input id="chain-preset-edit-name" type="text" maxlength="80"></label>
+            <label for="chain-preset-edit-gain">Chain Gain<input id="chain-preset-edit-gain" type="number" min="0" max="8" step="any"></label>
+            <label for="chain-preset-edit-active"><span>Enabled</span><input id="chain-preset-edit-active" type="checkbox" checked></label>
+        </div>
+        <div class="chain-preset-add-row">
+            <select id="chain-preset-add-type" aria-label="Processor to add"></select>
+            <button type="button" onclick="addProcessorToPreset()">ADD PROCESSOR</button>
+        </div>
+        <div class="dsp-help">Processors execute from top to bottom. Use UP/DOWN to change order, REMOVE to delete a processor, and edit each parameter directly.</div>
+        <div id="chain-preset-edit-steps" class="chain-modal-steps"></div>
+        <div id="chain-preset-edit-status" role="status" class="dsp-help"></div>
+        <div class="chain-modal-actions">
+            <button type="button" onclick="closeChainPresetEditor()">CANCEL</button>
+            <button type="button" class="primary" id="chain-preset-edit-save" onclick="saveEditedChainPreset()">SAVE PRESET</button>
+        </div>
     </div>
 
     <div id="chain-node-modal" role="dialog" aria-modal="true" aria-labelledby="chain-node-title">
@@ -696,6 +729,15 @@
         <div class="control-row"><label for="chain-node-name">Node Name</label><input id="chain-node-name" type="text" maxlength="80"></div>
         <div class="control-row"><label for="chain-node-gain">Chain Gain</label><input id="chain-node-gain" type="number" min="0" max="8" step="any"></div>
         <div class="dsp-help">Processors execute from top to bottom. Processor parameters are retained from the original Route Inspector chain.</div>
+        <div class="chain-node-replace">
+            <strong>Replace this node from a saved preset</strong>
+            <div class="control-row" style="margin-top:8px;">
+                <label for="chain-node-replace-preset">Saved preset</label>
+                <select id="chain-node-replace-preset"><option value="">Loading presets…</option></select>
+            </div>
+            <button type="button" id="chain-node-replace-button" onclick="replaceChainNodeFromPreset()" style="margin-top:8px;">REPLACE NODE FROM PRESET</button>
+            <div class="dsp-help">The live node ID, cables, and viewport position are retained. Only its processor chain and chain settings are replaced.</div>
+        </div>
         <div id="chain-node-steps" class="chain-modal-steps"></div>
         <div id="chain-node-status" role="status" class="dsp-help"></div>
         <div class="chain-modal-actions">
@@ -726,6 +768,9 @@
         let editingChainNodeId = null;
         let chainNodeDraft = null;
         let chainNodeModalBusy = false;
+        let editingChainPresetId = null;
+        let chainPresetDraft = null;
+        let chainPresetEditorBusy = false;
 
         let dspDiscovery = { status: 'idle', processors: [], maxChainLength: null, error: '' };
         let dspDiscoveryRequest = 0;
@@ -2346,7 +2391,8 @@ function autoOrganizeLayout() {
         }
 
         function closeActiveModal() {
-            if ($('chain-node-modal').style.display === 'block') closeChainNodeModal();
+            if ($('chain-preset-editor-modal').style.display === 'block') closeChainPresetEditor();
+            else if ($('chain-node-modal').style.display === 'block') closeChainNodeModal();
             else if ($('chain-presets-modal').style.display === 'block') closeChainPresetsModal();
             else if ($('plugin-modal').style.display === 'block') closePluginModal();
             else closeModal();
@@ -2490,7 +2536,8 @@ function autoOrganizeLayout() {
 
         function closeChainPresetsModal() {
             $('chain-presets-modal').style.display = 'none';
-            if ($('route-modal').style.display !== 'block' && $('plugin-modal').style.display !== 'block' && $('chain-node-modal').style.display !== 'block')
+            if ($('route-modal').style.display !== 'block' && $('plugin-modal').style.display !== 'block' &&
+                $('chain-node-modal').style.display !== 'block' && $('chain-preset-editor-modal').style.display !== 'block')
                 $('overlay').style.display = 'none';
         }
 
@@ -2510,7 +2557,12 @@ function autoOrganizeLayout() {
                     const info = dspText('div', '', 'chain-preset-info');
                     info.append(dspText('strong', preset.name || `Preset #${preset.id}`),
                         dspText('small', `${preset.processor_count ?? (preset.chain || []).length} processors · Gain ${Number(preset.chain_gain ?? 1).toFixed(2)}${preset.active === false ? ' · Bypassed' : ''}`));
-                    const restore = dspButton('RESTORE', async () => {
+                    const edit = dspButton('EDIT', async () => {
+                        edit.disabled = true;
+                        try { await openChainPresetEditor(preset.id); }
+                        catch (error) { showError('Opening preset editor failed: ' + error.message); edit.disabled = false; }
+                    });
+                    const restore = dspButton('RESTORE AS NODE', async () => {
                         restore.disabled = true;
                         try {
                             const result = await fetchAPI(`/api/plugin-chain-presets/${encodeURIComponent(preset.id)}/instantiate`, {
@@ -2532,11 +2584,171 @@ function autoOrganizeLayout() {
                             await refreshChainPresets();
                         } catch (error) { showError('Preset deletion failed: ' + error.message); remove.disabled = false; }
                     }, 'remove-btn');
-                    row.append(info, restore, remove);
+                    row.append(info, edit, restore, remove);
                     container.appendChild(row);
                 });
             } catch (error) {
                 container.replaceChildren(dspText('div', 'Could not load presets: ' + error.message, 'dsp-warning'));
+            }
+        }
+
+        async function openChainPresetEditor(presetId) {
+            if (dspDiscovery.status !== 'ready') await loadDspAvailable();
+            if (dspDiscovery.status !== 'ready') throw new Error(dspDiscovery.error || 'Processor discovery is unavailable');
+            const data = await fetchAPI('/api/plugin-chain-presets', { cache: 'no-store' });
+            const preset = (data.presets || []).find(item => Number(item.id) === Number(presetId));
+            if (!preset) throw new Error('Preset no longer exists');
+            editingChainPresetId = Number(preset.id);
+            chainPresetDraft = cloneJson(preset);
+            dspParameterBindings = [];
+            $('chain-presets-modal').style.display = 'none';
+            $('chain-preset-editor-title').textContent = `Edit Preset #${preset.id}`;
+            $('chain-preset-edit-name').value = preset.name || '';
+            $('chain-preset-edit-gain').value = Number(preset.chain_gain ?? 1);
+            $('chain-preset-edit-active').checked = preset.active !== false;
+            $('chain-preset-edit-status').textContent = '';
+            const addType = $('chain-preset-add-type');
+            addType.replaceChildren();
+            for (const descriptor of dspDiscovery.processors) {
+                const option = dspText('option', descriptor.name || descriptor.type);
+                option.value = descriptor.type;
+                option.title = descriptor.description || '';
+                addType.appendChild(option);
+            }
+            renderChainPresetEditorSteps();
+            $('chain-preset-editor-modal').style.display = 'block';
+            $('overlay').style.display = 'block';
+        }
+
+        function closeChainPresetEditor() {
+            if (chainPresetEditorBusy) return;
+            editingChainPresetId = null;
+            chainPresetDraft = null;
+            dspParameterBindings = [];
+            $('chain-preset-editor-modal').style.display = 'none';
+            $('chain-presets-modal').style.display = 'block';
+            refreshChainPresets();
+        }
+
+        function renderChainPresetEditorSteps() {
+            const container = $('chain-preset-edit-steps');
+            container.replaceChildren();
+            dspParameterBindings = [];
+            if (!chainPresetDraft || !Array.isArray(chainPresetDraft.chain)) return;
+            chainPresetDraft.chain.forEach((step, index) => {
+                const card = dspText('div', '', 'chain-modal-step');
+                const heading = dspText('div', '', 'chain-step-heading');
+                const descriptor = getProcessorDescriptor(step.type);
+                heading.appendChild(dspText('strong', `${index + 1}. ${descriptor?.name || step.type}`));
+                const actions = dspText('div', '', 'chain-step-actions');
+                const up = dspButton('UP', () => movePresetProcessor(index, -1));
+                up.disabled = index === 0;
+                const down = dspButton('DOWN', () => movePresetProcessor(index, 1));
+                down.disabled = index === chainPresetDraft.chain.length - 1;
+                const remove = dspButton('REMOVE', () => removePresetProcessor(index), 'remove-btn');
+                actions.append(up, down, remove);
+                heading.appendChild(actions);
+                card.appendChild(heading);
+                if (descriptor && isObject(step.params)) {
+                    const params = dspText('div', '', 'dsp-processor-params');
+                    descriptor.parameters.forEach(parameter =>
+                        renderDspParameter(step, descriptor, parameter, params, index));
+                    const known = new Set(descriptor.parameters.map(parameter => parameter.id));
+                    const unknown = Object.keys(step.params).filter(key => !known.has(key));
+                    if (unknown.length)
+                        params.appendChild(dspText('div', `Unknown parameters preserved: ${unknown.join(', ')}`, 'dsp-help dsp-warning'));
+                    if (!params.children.length) params.appendChild(dspText('div', 'No parameters.', 'dsp-help'));
+                    card.appendChild(params);
+                } else {
+                    card.appendChild(dspText('pre', displayJson(step.params || {})));
+                    card.appendChild(dspText('div', 'Processor metadata is unavailable. This step can be reordered or removed, but its parameters cannot be edited.', 'dsp-help dsp-warning'));
+                }
+                container.appendChild(card);
+            });
+            if (!chainPresetDraft.chain.length)
+                container.appendChild(dspText('div', 'The chain is empty. Add at least one processor before saving.', 'dsp-help dsp-warning'));
+        }
+
+        function addProcessorToPreset() {
+            if (!chainPresetDraft || dspDiscovery.status !== 'ready') return;
+            const maximum = Number(dspDiscovery.maxChainLength || 16);
+            if (chainPresetDraft.chain.length >= maximum) {
+                $('chain-preset-edit-status').textContent = `Maximum chain length is ${maximum} processors.`;
+                return;
+            }
+            const type = $('chain-preset-add-type').value;
+            const descriptor = getProcessorDescriptor(type);
+            if (!descriptor) return;
+            const params = {};
+            for (const parameter of (descriptor.parameters || [])) {
+                const value = parameter.default !== undefined ? parameter.default : descriptor.defaults?.[parameter.id];
+                if (value !== undefined) params[parameter.id] = cloneJson(value);
+            }
+            chainPresetDraft.chain.push({ type, params });
+            $('chain-preset-edit-status').textContent = '';
+            renderChainPresetEditorSteps();
+        }
+
+        function movePresetProcessor(index, delta) {
+            if (!chainPresetDraft) return;
+            const target = index + delta;
+            if (target < 0 || target >= chainPresetDraft.chain.length) return;
+            const chain = chainPresetDraft.chain;
+            [chain[index], chain[target]] = [chain[target], chain[index]];
+            renderChainPresetEditorSteps();
+        }
+
+        function removePresetProcessor(index) {
+            if (!chainPresetDraft || index < 0 || index >= chainPresetDraft.chain.length) return;
+            chainPresetDraft.chain.splice(index, 1);
+            renderChainPresetEditorSteps();
+        }
+
+        async function saveEditedChainPreset() {
+            if (chainPresetEditorBusy || editingChainPresetId === null || !chainPresetDraft) return;
+            const name = $('chain-preset-edit-name').value.trim();
+            const gain = $('chain-preset-edit-gain').value.trim() === '' ? NaN : Number($('chain-preset-edit-gain').value);
+            if (!name || name.length > 80) {
+                $('chain-preset-edit-status').textContent = 'Preset name must contain 1 to 80 characters.';
+                return;
+            }
+            if (!Number.isFinite(gain) || gain < 0 || gain > 8) {
+                $('chain-preset-edit-status').textContent = 'Chain gain must be between 0 and 8.';
+                return;
+            }
+            if (!chainPresetDraft.chain.length) {
+                $('chain-preset-edit-status').textContent = 'A preset must contain at least one processor.';
+                return;
+            }
+            for (const binding of dspParameterBindings) {
+                if (!binding.validate()) {
+                    binding.control.reportValidity();
+                    $('chain-preset-edit-status').textContent = 'Correct the highlighted processor parameter before saving.';
+                    return;
+                }
+            }
+            dspParameterBindings.forEach(binding => binding.commit());
+            chainPresetEditorBusy = true;
+            $('chain-preset-edit-save').disabled = true;
+            try {
+                const result = await fetchAPI(`/api/plugin-chain-presets/${encodeURIComponent(editingChainPresetId)}/update`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, chain: chainPresetDraft.chain, chain_gain: gain,
+                        active: $('chain-preset-edit-active').checked })
+                });
+                if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
+                    throw new Error(result.message || 'Preset update was not adopted and persisted');
+                editingChainPresetId = null;
+                chainPresetDraft = null;
+                dspParameterBindings = [];
+                $('chain-preset-editor-modal').style.display = 'none';
+                $('chain-presets-modal').style.display = 'block';
+                await refreshChainPresets();
+            } catch (error) {
+                $('chain-preset-edit-status').textContent = error.message;
+            } finally {
+                chainPresetEditorBusy = false;
+                $('chain-preset-edit-save').disabled = false;
             }
         }
 
@@ -2550,6 +2762,7 @@ function autoOrganizeLayout() {
             $('chain-node-name').value = plugin.name || 'Plugin Chain';
             $('chain-node-gain').value = Number(plugin.chain_gain ?? 1);
             $('chain-node-status').textContent = '';
+            populateChainNodePresetOptions();
             const list = $('chain-node-steps');
             list.replaceChildren();
             chainNodeDraft.forEach((step, index) => {
@@ -2576,13 +2789,82 @@ function autoOrganizeLayout() {
             $('overlay').style.display = 'block';
         }
 
+        async function populateChainNodePresetOptions() {
+            const select = $('chain-node-replace-preset');
+            const button = $('chain-node-replace-button');
+            select.replaceChildren(dspText('option', 'Loading presets…'));
+            select.firstChild.value = '';
+            button.disabled = true;
+            try {
+                const data = await fetchAPI('/api/plugin-chain-presets', { cache: 'no-store' });
+                select.replaceChildren();
+                const presets = Array.isArray(data.presets) ? data.presets : [];
+                if (!presets.length) {
+                    const option = dspText('option', 'No saved presets');
+                    option.value = '';
+                    select.appendChild(option);
+                    return;
+                }
+                const placeholder = dspText('option', 'Choose a saved preset…');
+                placeholder.value = '';
+                select.appendChild(placeholder);
+                presets.forEach(preset => {
+                    const option = dspText('option', `${preset.name} · ${preset.processor_count ?? (preset.chain || []).length} processors`);
+                    option.value = String(preset.id);
+                    select.appendChild(option);
+                });
+                button.disabled = false;
+            } catch (error) {
+                select.replaceChildren();
+                const option = dspText('option', 'Could not load presets');
+                option.value = '';
+                select.appendChild(option);
+                $('chain-node-status').textContent = 'Could not load saved presets: ' + error.message;
+            }
+        }
+
+        async function replaceChainNodeFromPreset() {
+            if (chainNodeModalBusy || editingChainNodeId === null) return;
+            const select = $('chain-node-replace-preset');
+            const presetId = Number(select.value);
+            if (!Number.isInteger(presetId) || presetId <= 0) {
+                $('chain-node-status').textContent = 'Choose a saved preset first.';
+                return;
+            }
+            const presetName = select.options[select.selectedIndex]?.textContent || `Preset #${presetId}`;
+            if (!confirm(`Replace the processor chain inside this live node with ${presetName}? Its node ID and existing audio connections will be preserved.`)) return;
+            const nodeId = editingChainNodeId;
+            chainNodeModalBusy = true;
+            $('chain-node-replace-button').disabled = true;
+            $('chain-node-apply').disabled = true;
+            try {
+                const result = await fetchAPI(`/api/plugins/${encodeURIComponent(nodeId)}/replace-chain-preset`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ preset_id: presetId })
+                });
+                if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
+                    throw new Error(result.message || 'Preset replacement was not adopted and persisted');
+                await loadGraph();
+                chainNodeModalBusy = false;
+                openChainNodeModal(nodeId);
+                $('chain-node-status').textContent = `Replaced this node's chain with preset “${result.replaced_from_preset_name || presetName}”. Existing connections were retained.`;
+            } catch (error) {
+                $('chain-node-status').textContent = 'Preset replacement failed: ' + error.message;
+            } finally {
+                chainNodeModalBusy = false;
+                $('chain-node-replace-button').disabled = false;
+                $('chain-node-apply').disabled = false;
+            }
+        }
+
         function closeChainNodeModal() {
             if (chainNodeModalBusy) return;
             editingChainNodeId = null;
             chainNodeDraft = null;
             dspParameterBindings = [];
             $('chain-node-modal').style.display = 'none';
-            if ($('route-modal').style.display !== 'block' && $('plugin-modal').style.display !== 'block' && $('chain-presets-modal').style.display !== 'block')
+            if ($('route-modal').style.display !== 'block' && $('plugin-modal').style.display !== 'block' &&
+                $('chain-presets-modal').style.display !== 'block' && $('chain-preset-editor-modal').style.display !== 'block')
                 $('overlay').style.display = 'none';
         }
 

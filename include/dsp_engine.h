@@ -25,12 +25,14 @@
 class ClientManager;
 
 struct NodeHandler {
-    enum class Type { HARDWARE_CAPTURE, HARDWARE_PLAYBACK, CLIENT_CAPTURE, CLIENT_PLAYBACK, TONE, VIRTUAL };
+    enum class Type { HARDWARE_CAPTURE, HARDWARE_PLAYBACK, CLIENT_CAPTURE, CLIENT_PLAYBACK,
+                       PLUGIN_INPUT, PLUGIN_OUTPUT, TONE, VIRTUAL };
     Type type;
     void* ptr;
     unsigned channels;
     std::string endpointId;
     bool active = false;
+    const PluginNodeInstance* plugin = nullptr;
 };
 
 class DspEngine {
@@ -111,7 +113,8 @@ private:
     struct EndpointOwners {
         std::vector<std::shared_ptr<HardwareDevice>> hardware;
         std::vector<std::shared_ptr<WebClientSession>> sessions;
-        bool empty() const { return hardware.empty() && sessions.empty(); }
+        std::shared_ptr<const std::vector<std::shared_ptr<const PluginNodeInstance>>> plugins;
+        bool empty() const { return hardware.empty() && sessions.empty() && (!plugins || plugins->empty()); }
     };
     EndpointOwners m_endpointOwners;
     std::mutex m_retiredEndpointsLock;

@@ -14,6 +14,8 @@
 #include <utility>
 #include "ring_buffer.h"
 #include "constants.h"
+#include "audio_processor.h"
+#include <nlohmann/json.hpp>
 
 namespace ix { class WebSocket; class WebSocketServer; }
 namespace httplib { class Server; class SSLServer; }
@@ -93,6 +95,25 @@ struct AudioRoute {
     bool enabled = true;
 };
 
+// A graph-native processor instance owns two virtual endpoints: a destination
+// for its audio input bus and a source for its audio output bus. This lets the
+// existing channel-to-channel route representation remain the patchbay cable
+// model while the DSP engine executes the processor between those endpoints.
+struct PluginNodeInstance {
+    uint32_t id = 0;
+    std::string name;
+    std::string type;
+    std::string input_endpoint;
+    std::string output_endpoint;
+    NodeId input_node = NODE_INVALID;
+    NodeId output_node = NODE_INVALID;
+    unsigned input_channels = 1;
+    unsigned output_channels = 1;
+    bool active = true;
+    nlohmann::json params = nlohmann::json::object();
+    std::shared_ptr<AudioProcessor> processor;
+};
+
 class DeviceManager;
 class DspEngine;
 
@@ -117,6 +138,20 @@ public:
     std::shared_ptr<const std::vector<AudioRoute>> route_snapshot() const;
     std::vector<AudioRoute> get_routes() const;
     bool add_route(AudioRoute route, uint32_t& assignedId, std::string& error);
+
+    std::shared_ptr<const std::vector<std::shared_ptr<const PluginNodeInstance>>> plugin_node_snapshot() const;
+    std::vector<std::shared_ptr<const PluginNodeInstance>> get_plugin_nodes() const;
+    bool create_plugin_node(const std::string& type, const std::string& name,
+                            unsigned inputChannels, unsigned outputChannels,
+                            const nlohmann::json& params, uint32_t requestedId,
+                            std::shared_ptr<const PluginNodeInstance>& created,
+                            std::string& error);
+    bool update_plugin_node(uint32_t id, const std::string& name,
+                            unsigned inputChannels, unsigned outputChannels,
+                            const nlohmann::json& params, bool active,
+                            std::shared_ptr<const PluginNodeInstance>& updated,
+                            std::string& error);
+    bool remove_plugin_node(uint32_t id, std::string& error);
     bool remove_route(uint32_t routeId);
     bool update_route(uint32_t routeId, float gain, bool enabled);
     void update_activated_device(const std::string& id, bool active);
@@ -141,6 +176,9 @@ private:
     std::vector<std::string> m_activatedDevices;
     std::unordered_map<std::string, std::pair<unsigned, unsigned>> m_deviceChannels;
     std::atomic<uint32_t> m_next_route_id{1};
+    mutable std::mutex m_plugin_lock;
+    std::shared_ptr<const std::vector<std::shared_ptr<const PluginNodeInstance>>> m_pluginNodes;
+    std::atomic<uint32_t> m_next_plugin_id{1};
     DeviceManager* m_deviceManager = nullptr;
     DspEngine* m_dspEngine = nullptr;
 

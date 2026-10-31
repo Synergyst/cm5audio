@@ -64,7 +64,7 @@ void LimiterProcessor::process(float* buffer, size_t frames, unsigned channels) 
 }
 
 void register_limiter_processor(ProcessorRegistry& registry) {
-    registry.register_processor({
+    ProcessorDescriptor descriptor{
         "limiter", "Look-ahead Limiter", "Prevents clipping by analyzing peaks before they hit the output.",
         {
             {"threshold", "Threshold", "number", 0.9, 0.0, 1.0, 0.01, "linear", {}},
@@ -80,5 +80,8 @@ void register_limiter_processor(ProcessorRegistry& registry) {
                 params.at("lookahead").get<float>()
             );
         }
-    });
+    };
+    descriptor.audio_input = {1, 8, 2};
+    descriptor.audio_output = {1, 8, 2};
+    registry.register_processor(std::move(descriptor));
 }

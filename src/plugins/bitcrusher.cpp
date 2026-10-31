@@ -37,7 +37,7 @@ void BitcrusherProcessor::process(float* buffer, size_t frames, unsigned channel
 }
 
 void register_bitcrusher_processor(ProcessorRegistry& registry) {
-    registry.register_processor({
+    ProcessorDescriptor descriptor{
         "bitcrusher", "Bitcrusher", "Reduce bit-depth and sample rate for lo-fi effects.",
         {
             {"bits", "Bit Depth", "number", 16.0, 1.0, 32.0, 0.1, "bits", {}},
@@ -49,5 +49,8 @@ void register_bitcrusher_processor(ProcessorRegistry& registry) {
                 params.at("sample_rate").get<float>()
             );
         }
-    });
+    };
+    descriptor.audio_input = {1, 8, 2};
+    descriptor.audio_output = {1, 8, 2};
+    registry.register_processor(std::move(descriptor));
 }

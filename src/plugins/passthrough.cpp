@@ -3,7 +3,10 @@
 #include <memory>
 
 void register_passthrough_processor(ProcessorRegistry& registry) {
-    registry.register_processor({"passthrough", "Passthrough",
+    ProcessorDescriptor descriptor{"passthrough", "Passthrough",
         "Passes audio through unchanged.", {},
-        [](const nlohmann::json&) { return std::make_unique<PassthroughProcessor>(); }});
+        [](const nlohmann::json&) { return std::make_unique<PassthroughProcessor>(); }};
+    descriptor.audio_input = {1, 8, 2};
+    descriptor.audio_output = {1, 8, 2};
+    registry.register_processor(std::move(descriptor));
 }

@@ -324,7 +324,7 @@ private:
 
 void register_rnnoise_processor(ProcessorRegistry& registry)
 {
-    registry.register_processor({
+    ProcessorDescriptor descriptor{
         "rnnoise",
         "RNNoise",
         "RNNoise speech noise suppression with optional VAD gating "
@@ -508,5 +508,8 @@ void register_rnnoise_processor(ProcessorRegistry& registry)
                 modelMode,
                 modelPath);
         }
-    });
+    };
+    descriptor.audio_input = {1, 8, 1};
+    descriptor.audio_output = {1, 8, 1};
+    registry.register_processor(std::move(descriptor));
 }

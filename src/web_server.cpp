@@ -1,6 +1,7 @@
 #include "web_server.h"
 #include "dsp_engine.h"
 #include "device_manager.h"
+#include "processor_registry.h"
 #include "reliable_websocket_server.h"
 #include <fcntl.h>
 #include <unistd.h>
@@ -199,6 +200,18 @@ bool parse_route_dsp_id(const httplib::Request& request, uint32_t& routeId) {
     } catch (...) { return false; }
 }
 
+bool parse_plugin_instance_id(const httplib::Request& request, uint32_t& pluginId) {
+    if (request.matches.size() <= 1) return false;
+    try {
+        const std::string text = request.matches[1];
+        size_t consumed = 0;
+        const auto value = std::stoull(text, &consumed);
+        if (consumed != text.size() || value == 0 || value > std::numeric_limits<uint32_t>::max()) return false;
+        pluginId = static_cast<uint32_t>(value);
+        return true;
+    } catch (...) { return false; }
+}
+
 bool parse_persisted_route_id(const nlohmann::json& value, uint32_t& routeId) {
     if (!value.is_number_integer()) return false;
     if (!value.is_number_unsigned() && value.get<int64_t>() <= 0) return false;
@@ -268,7 +281,8 @@ void WebClientSession::stop_sender() {
 }
 
 ClientManager::ClientManager()
-    : m_routes(std::make_shared<const std::vector<AudioRoute>>()) {
+    : m_routes(std::make_shared<const std::vector<AudioRoute>>()),
+      m_pluginNodes(std::make_shared<const std::vector<std::shared_ptr<const PluginNodeInstance>>>()) {
 }
 
 ClientManager::~ClientManager() { stop_sessions(); }
@@ -316,8 +330,23 @@ NodeId ClientManager::register_node(const std::string& endpoint) {
     auto it = m_endpoint_to_id.find(endpoint);
     if (it != m_endpoint_to_id.end()) return it->second;
     
-    if (m_next_node_id.load() >= 256) return NODE_INVALID;
-    NodeId id = m_next_node_id.fetch_add(1);
+    // Persistent hardware/client endpoint IDs remain allocated while offline,
+    // but deleted plugin endpoints are released and can be reused. Search the
+    // bounded ID space instead of monotonically exhausting it after node edits.
+    NodeId start = m_next_node_id.load(std::memory_order_relaxed);
+    if (start < 1 || start >= 256) start = 1;
+    NodeId id = NODE_INVALID;
+    for (NodeId offset = 0; offset < 255; ++offset) {
+        const NodeId candidate = 1 + ((start - 1 + offset) % 255);
+        if (m_id_to_endpoint.find(candidate) == m_id_to_endpoint.end()) {
+            id = candidate;
+            NodeId next = candidate + 1;
+            if (next >= 256) next = 1;
+            m_next_node_id.store(next, std::memory_order_relaxed);
+            break;
+        }
+    }
+    if (id == NODE_INVALID) return NODE_INVALID;
     m_endpoint_to_id[endpoint] = id;
     m_id_to_endpoint[id] = endpoint;
     
@@ -495,6 +524,34 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                 }
             }
         }
+        if (settings.contains("plugin_nodes") && settings["plugin_nodes"].is_array()) {
+            for (const auto& value : settings["plugin_nodes"]) {
+                try {
+                    if (!value.is_object() || !value.contains("id") || !value["id"].is_number_unsigned())
+                        continue;
+                    const uint64_t rawId = value["id"].get<uint64_t>();
+                    if (rawId == 0 || rawId > std::numeric_limits<uint32_t>::max()) continue;
+                    std::shared_ptr<const PluginNodeInstance> restored;
+                    std::string error;
+                    const std::string type = value.value("type", std::string());
+                    const std::string name = value.value("name", std::string());
+                    const unsigned inputChannels = value.value("input_channels", 1u);
+                    const unsigned outputChannels = value.value("output_channels", 1u);
+                    const nlohmann::json params = value.value("params", nlohmann::json::object());
+                    if (!create_plugin_node(type, name, inputChannels, outputChannels, params,
+                                            static_cast<uint32_t>(rawId), restored, error))
+                        std::cerr << "[Plugin] Restore skipped for instance " << rawId << ": " << error << std::endl;
+                    else if (value.contains("active") && value["active"].is_boolean() && !value["active"].get<bool>()) {
+                        std::shared_ptr<const PluginNodeInstance> updated;
+                        if (!update_plugin_node(static_cast<uint32_t>(rawId), name, inputChannels,
+                                                outputChannels, params, false, updated, error))
+                            std::cerr << "[Plugin] Restore bypass state failed for instance " << rawId << ": " << error << std::endl;
+                    }
+                } catch (const std::exception& error) {
+                    std::cerr << "[Plugin] Invalid saved plugin node: " << error.what() << std::endl;
+                }
+            }
+        }
         {
             std::lock_guard<std::mutex> routeLock(m_route_lock);
             std::lock_guard<std::mutex> sessionLock(m_lock);
@@ -593,6 +650,14 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
         {"frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)},
         {"amplitude", tone.amplitude.load(std::memory_order_relaxed)}
     };
+    settings["plugin_nodes"] = nlohmann::json::array();
+    for (const auto& plugin : get_plugin_nodes()) {
+        settings["plugin_nodes"].push_back({
+            {"id", plugin->id}, {"name", plugin->name}, {"type", plugin->type},
+            {"input_channels", plugin->input_channels}, {"output_channels", plugin->output_channels},
+            {"active", plugin->active}, {"params", plugin->params}
+        });
+    }
     settings["hardware"]["capture"] = nlohmann::json::array();
     for (auto const& [id, bank] : controls.capture) {
         for (unsigned i = 0; i < CM5_MAX_CONTROL_CHANNELS; ++i) {
@@ -700,6 +765,202 @@ std::vector<AudioRoute> ClientManager::get_routes() const {
     return *routes;
 }
 
+std::shared_ptr<const std::vector<std::shared_ptr<const PluginNodeInstance>>>
+ClientManager::plugin_node_snapshot() const {
+    return std::atomic_load(&m_pluginNodes);
+}
+
+std::vector<std::shared_ptr<const PluginNodeInstance>> ClientManager::get_plugin_nodes() const {
+    const auto snapshot = plugin_node_snapshot();
+    return snapshot ? *snapshot : std::vector<std::shared_ptr<const PluginNodeInstance>>{};
+}
+
+bool ClientManager::create_plugin_node(
+    const std::string& type, const std::string& name,
+    unsigned inputChannels, unsigned outputChannels,
+    const nlohmann::json& params, uint32_t requestedId,
+    std::shared_ptr<const PluginNodeInstance>& created, std::string& error) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    try {
+        const ProcessorDescriptor* descriptor = ProcessorRegistry::instance().find(type);
+        if (!descriptor) throw std::invalid_argument("Unknown plugin type: " + type);
+        if (inputChannels < descriptor->audio_input.minimum || inputChannels > descriptor->audio_input.maximum)
+            throw std::invalid_argument("Audio input channel count is outside the plugin's declared range");
+        if (outputChannels < descriptor->audio_output.minimum || outputChannels > descriptor->audio_output.maximum)
+            throw std::invalid_argument("Audio output channel count is outside the plugin's declared range");
+
+        uint32_t id = requestedId;
+        const auto existing = plugin_node_snapshot();
+        if (id == 0) {
+            id = m_next_plugin_id.fetch_add(1, std::memory_order_relaxed);
+            if (id == 0 || id == std::numeric_limits<uint32_t>::max())
+                throw std::runtime_error("Plugin instance ID space exhausted");
+        } else {
+            if (std::any_of(existing->begin(), existing->end(), [id](const auto& node) { return node->id == id; }))
+                throw std::invalid_argument("Plugin instance ID already exists");
+        }
+
+        nlohmann::json normalized;
+        auto processor = ProcessorRegistry::instance().create(type, params, normalized);
+        auto node = std::make_shared<PluginNodeInstance>();
+        node->id = id;
+        node->name = name.empty() ? descriptor->name : name;
+        node->type = type;
+        node->input_endpoint = "plugin/" + std::to_string(id) + "/input";
+        node->output_endpoint = "plugin/" + std::to_string(id) + "/output";
+        node->input_node = register_node(node->input_endpoint);
+        node->output_node = register_node(node->output_endpoint);
+        if (node->input_node == NODE_INVALID || node->output_node == NODE_INVALID) {
+            std::lock_guard<std::mutex> nodeLock(m_node_lock);
+            for (const auto& endpoint : {node->input_endpoint, node->output_endpoint}) {
+                const auto found = m_endpoint_to_id.find(endpoint);
+                if (found == m_endpoint_to_id.end()) continue;
+                m_id_to_endpoint.erase(found->second);
+                m_endpoint_to_id.erase(found);
+            }
+            throw std::runtime_error("Patchbay node capacity exhausted (each plugin node requires two graph node IDs)");
+        }
+        node->input_channels = inputChannels;
+        node->output_channels = outputChannels;
+        node->active = true;
+        node->params = std::move(normalized);
+        node->processor = std::shared_ptr<AudioProcessor>(std::move(processor));
+
+        auto next = std::make_shared<std::vector<std::shared_ptr<const PluginNodeInstance>>>(
+            existing ? *existing : std::vector<std::shared_ptr<const PluginNodeInstance>>{});
+        next->push_back(node);
+        {
+            std::lock_guard<std::mutex> lock(m_plugin_lock);
+            std::atomic_store(&m_pluginNodes,
+                std::static_pointer_cast<const std::vector<std::shared_ptr<const PluginNodeInstance>>>(next));
+        }
+        if (id >= m_next_plugin_id.load(std::memory_order_relaxed) && id < std::numeric_limits<uint32_t>::max())
+            m_next_plugin_id.store(id + 1, std::memory_order_relaxed);
+        if (m_dspEngine) m_dspEngine->mark_graph_dirty();
+        created = node;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+bool ClientManager::update_plugin_node(
+    uint32_t id, const std::string& name,
+    unsigned inputChannels, unsigned outputChannels,
+    const nlohmann::json& params, bool active,
+    std::shared_ptr<const PluginNodeInstance>& updated, std::string& error) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    try {
+        const auto current = plugin_node_snapshot();
+        const auto found = std::find_if(current->begin(), current->end(),
+            [id](const auto& node) { return node->id == id; });
+        if (found == current->end()) throw std::invalid_argument("Plugin instance not found");
+
+        const auto& old = *found;
+        const ProcessorDescriptor* descriptor = ProcessorRegistry::instance().find(old->type);
+        if (!descriptor) throw std::invalid_argument("Plugin type is no longer registered: " + old->type);
+        if (inputChannels < descriptor->audio_input.minimum || inputChannels > descriptor->audio_input.maximum)
+            throw std::invalid_argument("Audio input channel count is outside the plugin's declared range");
+        if (outputChannels < descriptor->audio_output.minimum || outputChannels > descriptor->audio_output.maximum)
+            throw std::invalid_argument("Audio output channel count is outside the plugin's declared range");
+
+        const auto routes = route_snapshot();
+        for (const auto& route : *routes) {
+            if (route.destination_node == old->input_node && route.destination_channel >= inputChannels)
+                throw std::invalid_argument("Cannot reduce audio input channels while a connected cable uses a removed channel");
+            if (route.source_node == old->output_node && route.source_channel >= outputChannels)
+                throw std::invalid_argument("Cannot reduce audio output channels while a connected cable uses a removed channel");
+        }
+
+        nlohmann::json normalized;
+        auto processor = ProcessorRegistry::instance().create(old->type, params, normalized);
+        auto node = std::make_shared<PluginNodeInstance>();
+        node->id = old->id;
+        node->name = name.empty() ? old->name : name;
+        node->type = old->type;
+        node->input_endpoint = old->input_endpoint;
+        node->output_endpoint = old->output_endpoint;
+        node->input_node = old->input_node;
+        node->output_node = old->output_node;
+        node->input_channels = inputChannels;
+        node->output_channels = outputChannels;
+        node->active = active;
+        node->params = std::move(normalized);
+        node->processor = std::shared_ptr<AudioProcessor>(std::move(processor));
+
+        auto next = std::make_shared<std::vector<std::shared_ptr<const PluginNodeInstance>>>(*current);
+        const size_t index = static_cast<size_t>(std::distance(current->begin(), found));
+        (*next)[index] = node;
+        {
+            std::lock_guard<std::mutex> lock(m_plugin_lock);
+            std::atomic_store(&m_pluginNodes,
+                std::static_pointer_cast<const std::vector<std::shared_ptr<const PluginNodeInstance>>>(next));
+        }
+        if (m_dspEngine) m_dspEngine->mark_graph_dirty();
+        updated = node;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+bool ClientManager::remove_plugin_node(uint32_t id, std::string& error) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    const auto current = plugin_node_snapshot();
+    const auto found = std::find_if(current->begin(), current->end(),
+        [id](const auto& node) { return node->id == id; });
+    if (found == current->end()) {
+        error = "Plugin instance not found";
+        return false;
+    }
+    const auto removed = *found;
+    auto nextPlugins = std::make_shared<std::vector<std::shared_ptr<const PluginNodeInstance>>>(*current);
+    nextPlugins->erase(nextPlugins->begin() + std::distance(current->begin(), found));
+    {
+        std::lock_guard<std::mutex> lock(m_plugin_lock);
+        std::atomic_store(&m_pluginNodes,
+            std::static_pointer_cast<const std::vector<std::shared_ptr<const PluginNodeInstance>>>(nextPlugins));
+    }
+
+    std::vector<uint32_t> removedRoutes;
+    {
+        std::lock_guard<std::mutex> routeLock(m_route_lock);
+        auto routes = *std::atomic_load(&m_routes);
+        routes.erase(std::remove_if(routes.begin(), routes.end(), [&](const AudioRoute& route) {
+            const bool connected = route.source_node == removed->input_node ||
+                                   route.destination_node == removed->input_node ||
+                                   route.source_node == removed->output_node ||
+                                   route.destination_node == removed->output_node;
+            if (connected) removedRoutes.push_back(route.id);
+            return connected;
+        }), routes.end());
+        std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
+    }
+    if (m_dspEngine) {
+        for (uint32_t routeId : removedRoutes) {
+            if (m_dspEngine->supports_route_dsp(routeId))
+                m_dspEngine->update_route_dsp(routeId, {}, 1.0f, false);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
+        for (uint32_t routeId : removedRoutes) g_dspSettingsCache.erase(routeId);
+    }
+    {
+        std::lock_guard<std::mutex> nodeLock(m_node_lock);
+        for (const auto& endpoint : {removed->input_endpoint, removed->output_endpoint}) {
+            const auto found = m_endpoint_to_id.find(endpoint);
+            if (found == m_endpoint_to_id.end()) continue;
+            m_id_to_endpoint.erase(found->second);
+            m_endpoint_to_id.erase(found);
+        }
+    }
+    if (m_dspEngine) m_dspEngine->mark_graph_dirty();
+    return true;
+}
+
 bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) const {
     if (source && endpoint == "tone/generator") return true;
     if (endpoint.compare(0, 9, "hardware/") == 0) {
@@ -738,6 +999,12 @@ bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::strin
     if (source.empty() || destination.empty()) { error = "unregistered endpoint"; return false; }
     auto check = [&](const std::string& endpoint, unsigned channel, bool isSource) {
         if (endpoint == "tone/generator") return isSource && channel == 0;
+        for (const auto& plugin : get_plugin_nodes()) {
+            if (endpoint == plugin->input_endpoint)
+                return !isSource && channel < plugin->input_channels;
+            if (endpoint == plugin->output_endpoint)
+                return isSource && channel < plugin->output_channels;
+        }
         if (m_deviceManager) for (const auto& dev : m_deviceManager->get_active_devices()) {
             const auto id = "hardware/" + dev->get_original_id() +
                             (dev->get_info().is_capture ? "/capture" : "/playback");
@@ -787,6 +1054,10 @@ bool ClientManager::remove_route(uint32_t routeId) {
         std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
         if (m_dspEngine) m_dspEngine->mark_graph_dirty();
     }
+    // Retire any processor chain associated with the now-deleted route. The
+    // engine's three-slot publication keeps an in-flight audio reader safe.
+    if (m_dspEngine && m_dspEngine->supports_route_dsp(routeId))
+        m_dspEngine->update_route_dsp(routeId, {}, 1.0f, false);
     // Never acquire the route/session locks while holding the DSP cache lock.
     // POST rechecks the immutable route snapshot under this same cache lock.
     std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
@@ -1079,6 +1350,217 @@ bool WebServer::start() {
             response.set_content(ProcessorRegistry::instance().discovery().dump(2), "application/json");
         });
 
+        m_httpServer->Get("/api/plugins", [this](const httplib::Request&, httplib::Response& response) {
+            nlohmann::json nodes = nlohmann::json::array();
+            for (const auto& plugin : m_clientMgr.get_plugin_nodes()) {
+                nodes.push_back({
+                    {"id", plugin->id}, {"name", plugin->name}, {"type", plugin->type},
+                    {"input_endpoint", plugin->input_endpoint}, {"output_endpoint", plugin->output_endpoint},
+                    {"input_channels", plugin->input_channels}, {"output_channels", plugin->output_channels},
+                    {"active", plugin->active}, {"params", plugin->params}
+                });
+            }
+            response.set_header("Cache-Control", "no-store");
+            response.set_content(nlohmann::json({{"plugin_nodes", nodes}}).dump(2), "application/json");
+        });
+
+        post("/api/plugins", [this](const httplib::Request& request, httplib::Response& response) {
+            try {
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object() || !body.contains("type") || !body["type"].is_string())
+                    throw std::invalid_argument("type is required and must be a string");
+                const std::string type = body["type"].get<std::string>();
+                const auto* descriptor = ProcessorRegistry::instance().find(type);
+                if (!descriptor) throw std::invalid_argument("Unknown plugin type: " + type);
+                const unsigned inputChannels = body.value("input_channels", descriptor->audio_input.default_channels);
+                const unsigned outputChannels = body.value("output_channels", descriptor->audio_output.default_channels);
+                const std::string name = body.value("name", descriptor->name);
+                const nlohmann::json params = body.value("params", nlohmann::json::object());
+                std::shared_ptr<const PluginNodeInstance> created;
+                std::string error;
+                if (!m_clientMgr.create_plugin_node(type, name, inputChannels, outputChannels,
+                                                     params, 0, created, error))
+                    throw std::invalid_argument(error);
+                response.set_content(nlohmann::json({{"status", "ok"}, {"plugin", {
+                    {"id", created->id}, {"name", created->name}, {"type", created->type},
+                    {"input_endpoint", created->input_endpoint}, {"output_endpoint", created->output_endpoint},
+                    {"input_channels", created->input_channels}, {"output_channels", created->output_channels},
+                    {"active", created->active}, {"params", created->params}
+                }}}).dump(2), "application/json");
+            } catch (const std::exception& error) {
+                dsp_error(response, 400, error.what());
+            }
+        });
+
+        post(R"(/api/plugins/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
+            uint32_t id = 0;
+            if (!parse_plugin_instance_id(request, id)) { dsp_error(response, 400, "invalid plugin instance ID"); return; }
+            try {
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object()) throw std::invalid_argument("Plugin update must be an object");
+                const auto current = m_clientMgr.get_plugin_nodes();
+                const auto found = std::find_if(current.begin(), current.end(),
+                    [id](const auto& item) { return item->id == id; });
+                if (found == current.end()) throw std::invalid_argument("Plugin instance not found");
+                const auto& old = *found;
+                const std::string name = body.value("name", old->name);
+                const unsigned inputChannels = body.value("input_channels", old->input_channels);
+                const unsigned outputChannels = body.value("output_channels", old->output_channels);
+                const bool active = body.value("active", old->active);
+                const nlohmann::json params = body.value("params", old->params);
+                std::shared_ptr<const PluginNodeInstance> updated;
+                std::string error;
+                if (!m_clientMgr.update_plugin_node(id, name, inputChannels, outputChannels,
+                                                    params, active, updated, error))
+                    throw std::invalid_argument(error);
+                response.set_content(nlohmann::json({{"status", "ok"}, {"plugin", {
+                    {"id", updated->id}, {"name", updated->name}, {"type", updated->type},
+                    {"input_endpoint", updated->input_endpoint}, {"output_endpoint", updated->output_endpoint},
+                    {"input_channels", updated->input_channels}, {"output_channels", updated->output_channels},
+                    {"active", updated->active}, {"params", updated->params}
+                }}}).dump(2), "application/json");
+            } catch (const std::exception& error) {
+                dsp_error(response, 400, error.what());
+            }
+        });
+
+        post("/api/plugins/extract", [this](const httplib::Request& request, httplib::Response& response) {
+            uint32_t routeId = 0;
+            try {
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object() || !body.contains("route_id") || !body["route_id"].is_number_integer() ||
+                    !body.contains("processor_index") || !body["processor_index"].is_number_unsigned())
+                    throw std::invalid_argument("route_id and processor_index are required");
+                const uint64_t rawRouteId = body["route_id"].get<uint64_t>();
+                const uint64_t rawIndex = body["processor_index"].get<uint64_t>();
+                if (rawRouteId == 0 || rawRouteId > std::numeric_limits<uint32_t>::max())
+                    throw std::invalid_argument("invalid route ID");
+                routeId = static_cast<uint32_t>(rawRouteId);
+                const auto routes = m_clientMgr.route_snapshot();
+                const auto routeIt = std::find_if(routes->begin(), routes->end(),
+                    [routeId](const AudioRoute& route) { return route.id == routeId; });
+                if (routeIt == routes->end()) throw std::invalid_argument("Route not found");
+                const AudioRoute originalRoute = *routeIt;
+                RouteDspState originalDsp;
+                {
+                    std::lock_guard<std::mutex> lock(g_dspCacheLock);
+                    const auto cached = g_dspSettingsCache.find(routeId);
+                    if (cached != g_dspSettingsCache.end()) originalDsp = cached->second;
+                }
+                if (!originalDsp.warning.empty())
+                    throw std::invalid_argument("Cannot extract from a route with invalid saved DSP state: " + originalDsp.warning);
+                if (!originalDsp.chain.is_array() || rawIndex >= originalDsp.chain.size())
+                    throw std::invalid_argument("Selected processor index is outside the saved route chain");
+
+                const auto selected = originalDsp.chain[static_cast<size_t>(rawIndex)];
+                if (!selected.is_object() || !selected.contains("type") || !selected["type"].is_string() ||
+                    !selected.contains("params") || !selected["params"].is_object())
+                    throw std::invalid_argument("Selected processor has invalid saved data");
+
+                nlohmann::json beforeChain = nlohmann::json::array();
+                nlohmann::json afterChain = nlohmann::json::array();
+                for (size_t i = 0; i < originalDsp.chain.size(); ++i) {
+                    if (i < rawIndex) beforeChain.push_back(originalDsp.chain[i]);
+                    else if (i > rawIndex) afterChain.push_back(originalDsp.chain[i]);
+                }
+                auto beforePrepared = prepare_route_dsp({{"active", originalDsp.active}, {"gain", 1.0}, {"chain", beforeChain}});
+                auto afterPrepared = prepare_route_dsp({{"active", originalDsp.active}, {"gain", originalDsp.gain}, {"chain", afterChain}});
+
+                std::shared_ptr<const PluginNodeInstance> plugin;
+                std::string error;
+                const std::string type = selected["type"].get<std::string>();
+                const auto* descriptor = ProcessorRegistry::instance().find(type);
+                if (!descriptor) throw std::invalid_argument("Selected processor is no longer registered: " + type);
+                if (!m_clientMgr.create_plugin_node(type, descriptor->name, 1, 1,
+                        selected["params"], 0, plugin, error))
+                    throw std::invalid_argument(error);
+                if (!originalDsp.active) {
+                    std::shared_ptr<const PluginNodeInstance> bypassed;
+                    if (!m_clientMgr.update_plugin_node(plugin->id, plugin->name, 1, 1,
+                            plugin->params, false, bypassed, error)) {
+                        m_clientMgr.remove_plugin_node(plugin->id, error);
+                        throw std::invalid_argument(error);
+                    }
+                    plugin = bypassed;
+                }
+
+                AudioRoute beforeRoute;
+                beforeRoute.source_node = originalRoute.source_node;
+                beforeRoute.source_channel = originalRoute.source_channel;
+                beforeRoute.destination_node = plugin->input_node;
+                beforeRoute.destination_channel = 0;
+                beforeRoute.gain = 1.0f;
+                beforeRoute.enabled = originalRoute.enabled;
+                uint32_t beforeId = 0;
+                if (!m_clientMgr.add_route(beforeRoute, beforeId, error)) {
+                    m_clientMgr.remove_plugin_node(plugin->id, error);
+                    throw std::invalid_argument("Could not create upstream connection: " + error);
+                }
+                if (!m_dspEngine.supports_route_dsp(beforeId)) {
+                    m_clientMgr.remove_route(beforeId);
+                    m_clientMgr.remove_plugin_node(plugin->id, error);
+                    throw std::invalid_argument("New route ID exceeds the current route-DSP capacity");
+                }
+
+                AudioRoute afterRoute;
+                afterRoute.source_node = plugin->output_node;
+                afterRoute.source_channel = 0;
+                afterRoute.destination_node = originalRoute.destination_node;
+                afterRoute.destination_channel = originalRoute.destination_channel;
+                afterRoute.gain = originalRoute.gain;
+                afterRoute.enabled = originalRoute.enabled;
+                uint32_t afterId = 0;
+                if (!m_clientMgr.add_route(afterRoute, afterId, error)) {
+                    m_clientMgr.remove_route(beforeId);
+                    m_clientMgr.remove_plugin_node(plugin->id, error);
+                    throw std::invalid_argument("Could not create downstream connection: " + error);
+                }
+                if (!m_dspEngine.supports_route_dsp(afterId)) {
+                    m_clientMgr.remove_route(afterId);
+                    m_clientMgr.remove_route(beforeId);
+                    m_clientMgr.remove_plugin_node(plugin->id, error);
+                    throw std::invalid_argument("New route ID exceeds the current route-DSP capacity");
+                }
+
+                m_dspEngine.update_route_dsp(beforeId, std::move(beforePrepared.chain),
+                                             beforePrepared.state.gain, beforePrepared.state.active);
+                m_dspEngine.update_route_dsp(afterId, std::move(afterPrepared.chain),
+                                             afterPrepared.state.gain, afterPrepared.state.active);
+                {
+                    std::lock_guard<std::mutex> lock(g_dspCacheLock);
+                    g_dspSettingsCache[beforeId] = beforePrepared.state;
+                    g_dspSettingsCache[afterId] = afterPrepared.state;
+                }
+                if (!m_clientMgr.remove_route(routeId)) {
+                    m_clientMgr.remove_route(afterId);
+                    m_clientMgr.remove_route(beforeId);
+                    m_clientMgr.remove_plugin_node(plugin->id, error);
+                    throw std::runtime_error("The original route could not be removed; extraction was rolled back");
+                }
+
+                response.set_content(nlohmann::json({{"status", "ok"}, {"plugin_id", plugin->id},
+                    {"input_endpoint", plugin->input_endpoint}, {"output_endpoint", plugin->output_endpoint},
+                    {"upstream_route_id", beforeId}, {"downstream_route_id", afterId}}).dump(2), "application/json");
+            } catch (const std::exception& error) {
+                dsp_error(response, 400, error.what());
+            }
+        });
+
+        m_httpServer->Delete(R"(/api/plugins/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            if (!m_running.load()) { dsp_error(response, 503, "server is stopping"); return; }
+            uint32_t id = 0;
+            if (!parse_plugin_instance_id(request, id)) { dsp_error(response, 400, "invalid plugin instance ID"); return; }
+            std::string error;
+            if (!m_clientMgr.remove_plugin_node(id, error)) { dsp_error(response, 404, error); return; }
+            const uint64_t target = m_dspEngine.request_adoption();
+            const bool adopted = m_dspEngine.wait_for_revision(target, std::chrono::milliseconds(1500));
+            response.status = adopted ? 200 : 503;
+            response.set_content(nlohmann::json({{"status", adopted ? "ok" : "pending"},
+                {"accepted_revision", target}, {"adopted_revision", m_dspEngine.adopted_revision()},
+                {"adopted", adopted}, {"persisted", false}}).dump(), "application/json");
+        });
+
         m_httpServer->Get("/api/dsp", [this](const httplib::Request&, httplib::Response& response) {
             auto* gainProc = m_dspEngine.get_gain_processor();
             auto* compProc = m_dspEngine.get_compressor();
@@ -1227,6 +1709,29 @@ bool WebServer::start() {
                     endpointsMap[playId] = playEp;
                 }
             }
+
+            nlohmann::json pluginNodes = nlohmann::json::array();
+            for (const auto& plugin : m_clientMgr.get_plugin_nodes()) {
+                nlohmann::json inputEndpoint = {
+                    {"id", plugin->input_endpoint}, {"name", plugin->name + " — Input"},
+                    {"direction", "destination"}, {"channels", plugin->input_channels},
+                    {"kind", "plugin_input"}, {"plugin_id", plugin->id}
+                };
+                nlohmann::json outputEndpoint = {
+                    {"id", plugin->output_endpoint}, {"name", plugin->name + " — Output"},
+                    {"direction", "source"}, {"channels", plugin->output_channels},
+                    {"kind", "plugin_output"}, {"plugin_id", plugin->id}
+                };
+                endpointsMap[plugin->input_endpoint] = std::move(inputEndpoint);
+                endpointsMap[plugin->output_endpoint] = std::move(outputEndpoint);
+                pluginNodes.push_back({
+                    {"id", plugin->id}, {"name", plugin->name}, {"type", plugin->type},
+                    {"input_endpoint", plugin->input_endpoint}, {"output_endpoint", plugin->output_endpoint},
+                    {"input_channels", plugin->input_channels}, {"output_channels", plugin->output_channels},
+                    {"active", plugin->active}, {"params", plugin->params}
+                });
+            }
+            j["plugin_nodes"] = std::move(pluginNodes);
 
             nlohmann::json endpoints = nlohmann::json::array();
             for (auto const& [id, ep] : endpointsMap) endpoints.push_back(ep);

@@ -187,9 +187,11 @@ void DspEngine::update_meters(float* buffer, unsigned channels, unsigned stride,
 
 void DspEngine::rebuild_graph() {
     const auto routes_ptr = m_clientManager.route_snapshot();
+    const auto pluginNodes = m_clientManager.plugin_node_snapshot();
     EndpointOwners nextOwners;
     nextOwners.hardware = m_deviceManager.get_active_devices();
     nextOwners.sessions = m_clientManager.get_active_sessions();
+    nextOwners.plugins = pluginNodes;
 
     const auto validNode = [](NodeId node) {
         return node >= 0 && static_cast<size_t>(node) < MAX_NODES;
@@ -237,6 +239,20 @@ void DspEngine::rebuild_graph() {
             m_nodeWidths[route.destination_node] = std::max(m_nodeWidths[route.destination_node], route.destination_channel + 1);
     }
 
+    std::unordered_map<NodeId, const PluginNodeInstance*> pluginInputs;
+    std::unordered_map<NodeId, const PluginNodeInstance*> pluginOutputs;
+    if (pluginNodes) for (const auto& plugin : *pluginNodes) {
+        if (!plugin || !validNode(plugin->input_node) || !validNode(plugin->output_node)) continue;
+        m_nodeWidths[plugin->input_node] = plugin->input_channels;
+        m_nodeWidths[plugin->output_node] = plugin->output_channels;
+        fixedWidth[plugin->input_node] = true;
+        fixedWidth[plugin->output_node] = true;
+        direction[plugin->input_node] = -1;
+        direction[plugin->output_node] = 1;
+        pluginInputs[plugin->input_node] = plugin.get();
+        pluginOutputs[plugin->output_node] = plugin.get();
+    }
+
     const auto validRoute = [&](const AudioRoute& route) {
         if (!route.enabled || !validNode(route.source_node) || !validNode(route.destination_node)) return false;
         const unsigned sourceWidth = m_nodeWidths[route.source_node];
@@ -256,6 +272,17 @@ void DspEngine::rebuild_graph() {
         activeNodes.insert(route.destination_node);
         adj[route.source_node].push_back(route.destination_node);
         inDegree[route.destination_node]++;
+    }
+
+    // A plugin is represented by an input endpoint and an output endpoint.
+    // This synthetic dependency places the plugin's processing operation between
+    // incoming and outgoing patchbay cables in the topological schedule.
+    if (pluginNodes) for (const auto& plugin : *pluginNodes) {
+        if (!plugin || !validNode(plugin->input_node) || !validNode(plugin->output_node)) continue;
+        activeNodes.insert(plugin->input_node);
+        activeNodes.insert(plugin->output_node);
+        adj[plugin->input_node].push_back(plugin->output_node);
+        inDegree[plugin->output_node]++;
     }
     for (const auto& dev : nextOwners.hardware) {
         const std::string endpoint = "hardware/" + dev->get_original_id() +
@@ -299,6 +326,12 @@ void DspEngine::rebuild_graph() {
         const std::string endpoint = m_clientManager.get_endpoint_from_id(node);
         if (node == NODE_TONE_GENERATOR) {
             m_nodeHandlers[node] = {NodeHandler::Type::TONE, nullptr, 1, "tone/generator", true};
+        } else if (const auto plugin = pluginInputs.find(node); plugin != pluginInputs.end()) {
+            m_nodeHandlers[node] = {NodeHandler::Type::PLUGIN_INPUT, nullptr,
+                (*plugin).second->input_channels, (*plugin).second->input_endpoint, true, (*plugin).second};
+        } else if (const auto plugin = pluginOutputs.find(node); plugin != pluginOutputs.end()) {
+            m_nodeHandlers[node] = {NodeHandler::Type::PLUGIN_OUTPUT, nullptr,
+                (*plugin).second->output_channels, (*plugin).second->output_endpoint, true, (*plugin).second};
         } else {
             // Original hardware IDs and client keys may contain arbitrary '/'.
             // Match complete endpoint strings rather than splitting at a slash.
@@ -438,6 +471,36 @@ void DspEngine::process_audio() {
                     for (unsigned ch = 0; ch < chs; ++ch)
                         buf[f * chs + ch] += session->io_buffer[f * chs + ch];
                 update_meters(buf, chs, chs, handler.endpointId, true);
+            }
+        } else if (handler.type == NodeHandler::Type::PLUGIN_OUTPUT) {
+            const PluginNodeInstance* plugin = handler.plugin;
+            if (plugin) {
+                float* input = get_buffer(plugin->input_node);
+                const unsigned inputChannels = plugin->input_channels;
+                const unsigned outputChannels = plugin->output_channels;
+                if (input && inputChannels > 0 && outputChannels > 0 &&
+                    inputChannels <= CM5_MAX_CHANNELS && outputChannels <= CM5_MAX_CHANNELS) {
+                    if (plugin->active && plugin->processor) {
+                        AudioProcessContext context;
+                        context.input = input;
+                        context.output = buf;
+                        context.frames = CM5_BUFFER_FRAMES;
+                        context.input_channels = inputChannels;
+                        context.output_channels = outputChannels;
+                        context.sample_rate = m_engineSampleRate;
+                        plugin->processor->process(context);
+                    } else {
+                        const unsigned copyChannels = std::min(inputChannels, outputChannels);
+                        for (size_t frame = 0; frame < CM5_BUFFER_FRAMES; ++frame) {
+                            const float* source = input + frame * inputChannels;
+                            float* destination = buf + frame * outputChannels;
+                            for (unsigned channel = 0; channel < copyChannels; ++channel)
+                                destination[channel] = source[channel];
+                            for (unsigned channel = copyChannels; channel < outputChannels; ++channel)
+                                destination[channel] = 0.0f;
+                        }
+                    }
+                }
             }
         }
 

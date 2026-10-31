@@ -2,8 +2,9 @@
 #include "processor_registry.h"
 #include <cmath>
 #include <memory>
+#include <utility>
 
-HpfProcessor::HpfProcessor(float cutoff) : m_cutoff(cutoff) {}
+HpfProcessor::HpfProcessor(float cutoff) : m_cutoff(cutoff), m_z(8, 0.0f) {}
 
 void HpfProcessor::process(float* buffer, size_t frames, unsigned channels) {
     const float cutoff = m_cutoff.load(std::memory_order_relaxed);
@@ -25,9 +26,12 @@ void HpfProcessor::process(float* buffer, size_t frames, unsigned channels) {
 }
 
 void register_hpf_processor(ProcessorRegistry& registry) {
-    registry.register_processor({"hpf", "High-Pass Filter", "Removes low-frequency rumble.",
+    ProcessorDescriptor descriptor{"hpf", "High-Pass Filter", "Removes low-frequency rumble.",
         {{"cutoff", "Cutoff Frequency", "number", 80.0, 20.0, 2000.0, 1.0, "Hz", {}}},
         [](const nlohmann::json& params) {
             return std::make_unique<HpfProcessor>(params.at("cutoff").get<float>());
-        }});
+        }};
+    descriptor.audio_input = {1, 8, 2};
+    descriptor.audio_output = {1, 8, 2};
+    registry.register_processor(std::move(descriptor));
 }

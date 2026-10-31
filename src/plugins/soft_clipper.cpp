@@ -24,7 +24,7 @@ void SoftClipperProcessor::process(float* buffer, size_t frames, unsigned channe
 }
 
 void register_soft_clipper_processor(ProcessorRegistry& registry) {
-    registry.register_processor({
+    ProcessorDescriptor descriptor{
         "soft_clipper", "Soft Clipper", "Smooth saturation to prevent harsh digital peaking.",
         {
             {"drive", "Drive", "number", 1.0, 0.1, 20.0, 0.1, "linear", {}},
@@ -36,5 +36,8 @@ void register_soft_clipper_processor(ProcessorRegistry& registry) {
                 params.at("ceiling").get<float>()
             );
         }
-    });
+    };
+    descriptor.audio_input = {1, 8, 2};
+    descriptor.audio_output = {1, 8, 2};
+    registry.register_processor(std::move(descriptor));
 }

@@ -51,6 +51,15 @@ bool ProcessorRegistry::register_processor(ProcessorDescriptor descriptor) {
         }
         validate_value(parameter, parameter.default_value);
     }
+    const auto validLayout = [](const ProcessorChannelLayout& layout) {
+        return layout.minimum >= 1 && layout.maximum >= layout.minimum &&
+               layout.maximum <= CM5_MAX_CHANNELS &&
+               layout.default_channels >= layout.minimum &&
+               layout.default_channels <= layout.maximum;
+    };
+    if (!validLayout(descriptor.audio_input) || !validLayout(descriptor.audio_output))
+        throw std::invalid_argument("Invalid audio channel layout: " + descriptor.type);
+
     const auto type = descriptor.type;
     m_processors.emplace(type, std::move(descriptor));
     return true;
@@ -81,6 +90,11 @@ std::unique_ptr<AudioProcessor> ProcessorRegistry::create(
     return processor;
 }
 
+const ProcessorDescriptor* ProcessorRegistry::find(const std::string& type) const {
+    const auto it = m_processors.find(type);
+    return it == m_processors.end() ? nullptr : &it->second;
+}
+
 nlohmann::json ProcessorRegistry::discovery() const {
     nlohmann::json processors = nlohmann::json::array();
     for (const auto& item : m_processors) {
@@ -102,9 +116,25 @@ nlohmann::json ProcessorRegistry::discovery() const {
             parameters.push_back(std::move(value));
             defaults[parameter.id] = parameter.default_value;
         }
+        nlohmann::json audioInputs = nlohmann::json::array();
+        audioInputs.push_back({
+            {"id", "audio_in"}, {"name", "Audio Input"},
+            {"min_channels", descriptor.audio_input.minimum},
+            {"max_channels", descriptor.audio_input.maximum},
+            {"default_channels", descriptor.audio_input.default_channels}
+        });
+        nlohmann::json audioOutputs = nlohmann::json::array();
+        audioOutputs.push_back({
+            {"id", "audio_out"}, {"name", "Audio Output"},
+            {"min_channels", descriptor.audio_output.minimum},
+            {"max_channels", descriptor.audio_output.maximum},
+            {"default_channels", descriptor.audio_output.default_channels}
+        });
         processors.push_back({{"type", descriptor.type}, {"name", descriptor.name},
                               {"description", descriptor.description}, {"defaults", defaults},
-                              {"parameters", parameters}});
+                              {"parameters", parameters},
+                              {"audio", {{"inputs", std::move(audioInputs)},
+                                         {"outputs", std::move(audioOutputs)}}}});
     }
     return {{"schema_version", 1}, {"max_chain_length", CM5_MAX_PROCESSORS_PER_ROUTE},
             {"processors", processors}};

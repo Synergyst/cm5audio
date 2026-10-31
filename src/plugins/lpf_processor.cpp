@@ -2,8 +2,9 @@
 #include "processor_registry.h"
 #include <cmath>
 #include <memory>
+#include <utility>
 
-LpfProcessor::LpfProcessor(float cutoff) : m_cutoff(cutoff) {}
+LpfProcessor::LpfProcessor(float cutoff) : m_cutoff(cutoff), m_z(8, 0.0f) {}
 
 void LpfProcessor::process(float* buffer, size_t frames, unsigned channels) {
     const float cutoff = m_cutoff.load(std::memory_order_relaxed);
@@ -24,9 +25,12 @@ void LpfProcessor::process(float* buffer, size_t frames, unsigned channels) {
 }
 
 void register_lpf_processor(ProcessorRegistry& registry) {
-    registry.register_processor({"lpf", "Low-Pass Filter", "Removes high-frequency hiss.",
+    ProcessorDescriptor descriptor{"lpf", "Low-Pass Filter", "Removes high-frequency hiss.",
         {{"cutoff", "Cutoff Frequency", "number", 15000.0, 1000.0, 20000.0, 1.0, "Hz", {}}},
         [](const nlohmann::json& params) {
             return std::make_unique<LpfProcessor>(params.at("cutoff").get<float>());
-        }});
+        }};
+    descriptor.audio_input = {1, 8, 2};
+    descriptor.audio_output = {1, 8, 2};
+    registry.register_processor(std::move(descriptor));
 }

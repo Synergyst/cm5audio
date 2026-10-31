@@ -44,12 +44,15 @@ ProcessorParameter release_parameter() {
 }
 
 void register_compressor_processor(ProcessorRegistry& registry) {
-    registry.register_processor({"compressor", "Compressor",
-        "Hard-knee compressor. Threshold is linear amplitude, not dBFS.",
+    ProcessorDescriptor descriptor{"compressor", "Compressor",
+        "Hard-knee compressor. Threshold is linear amplitude, not dBFS; channels share gain reduction.",
         {threshold_parameter(), ratio_parameter(), attack_parameter(), release_parameter()},
         [](const nlohmann::json& params) {
             return std::make_unique<CompressorProcessor>(
                 params.at("threshold").get<float>(), params.at("ratio").get<float>(),
                 params.at("attack").get<float>(), params.at("release").get<float>());
-        }});
+        }};
+    descriptor.audio_input = {1, 8, 2};
+    descriptor.audio_output = {1, 8, 2};
+    registry.register_processor(std::move(descriptor));
 }

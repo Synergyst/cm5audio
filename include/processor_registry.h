@@ -29,6 +29,14 @@ struct ProcessorParameter {
     std::vector<ProcessorChoice> choices;
 };
 
+// One interleaved audio bus. Existing processors default to mono until their
+// implementation explicitly declares a wider supported layout.
+struct ProcessorChannelLayout {
+    unsigned minimum = 1;
+    unsigned maximum = 1;
+    unsigned default_channels = 1;
+};
+
 struct ProcessorDescriptor {
     using Factory = std::function<std::unique_ptr<AudioProcessor>(const nlohmann::json&)>;
     std::string type;
@@ -36,6 +44,8 @@ struct ProcessorDescriptor {
     std::string description;
     std::vector<ProcessorParameter> parameters;
     Factory factory;
+    ProcessorChannelLayout audio_input;
+    ProcessorChannelLayout audio_output;
 };
 
 // Registration is startup-only. Discovery and creation are read-only and safe
@@ -49,6 +59,7 @@ public:
                                            const nlohmann::json& params,
                                            nlohmann::json& normalized) const;
     nlohmann::json discovery() const;
+    const ProcessorDescriptor* find(const std::string& type) const;
 
 private:
     ProcessorRegistry();

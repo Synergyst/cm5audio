@@ -191,6 +191,40 @@
             cursor: grab;
         }
         .endpoint-header:active { cursor: grabbing; }
+        .plugin-node-block {
+            width: 360px;
+            border-color: var(--accent-blue);
+            background: linear-gradient(150deg, var(--panel-bg), #202733);
+            box-shadow: 0 7px 24px rgba(0,0,0,0.55);
+        }
+        .plugin-node-block.plugin-bypassed { opacity: 0.68; border-color: var(--text-dim); }
+        .plugin-node-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .plugin-node-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .plugin-node-type { display: block; color: var(--text-dim); font-size: 10px; font-weight: normal; margin-top: 3px; }
+        .plugin-node-actions { display: flex; gap: 4px; flex-shrink: 0; }
+        .plugin-node-actions button { min-height: 25px; padding: 2px 7px; font-size: 10px; }
+        .plugin-node-ports { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .plugin-node-port-title { color: var(--text-dim); font-size: 10px; font-weight: bold; letter-spacing: .8px; padding: 3px 6px; border-bottom: 1px solid var(--border-color); }
+        .plugin-node-port .channel-row { margin: 3px 0; }
+        .plugin-node-port .ch-label { width: 42px; }
+        #plugin-modal {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: min(560px, calc(100vw - 32px)); max-height: 86vh; overflow: auto;
+            display: none; z-index: 1001; background: var(--panel-bg);
+            border: 1px solid var(--accent-blue); border-radius: 10px; padding: 20px;
+            box-shadow: 0 15px 60px rgba(0,0,0,.75);
+        }
+        #plugin-modal h2 { margin: 0 0 16px; font-size: 16px; color: var(--accent-blue); }
+        #plugin-modal .plugin-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+        #plugin-modal-params { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+        #plugin-modal-params .control-row { margin: 0; }
+        #plugin-modal-status { min-height: 18px; margin-top: 8px; color: var(--text-dim); font-size: 11px; white-space: pre-wrap; }
+        .plugin-extract-btn { border-color: var(--accent-blue); color: var(--accent-blue); }
         .channel-row {
             display: flex;
             align-items: center;
@@ -471,7 +505,7 @@
                 <button onclick="zoomOut()" style="padding: 4px 10px; min-height: 28px;">-</button>
                 <button onclick="resetZoom()" style="padding: 4px 10px; min-height: 28px;">RESET</button>
                 <button onclick="autoOrganizeLayout()" style="padding: 4px 10px; min-height: 28px; background: #5e81ac; font-weight: bold; margin-left: 5px;">ORGANIZE LAYOUT</button>
-                <button onclick="PluginDemo.spawnNode()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 5px;">ADD DUMMY PLUGIN</button>
+                <button onclick="openPluginModal()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 5px;">ADD PLUGIN NODE</button>
                 
                 <!-- Layout Backup & Grid Snap Controls -->
                 <button onclick="exportLayout()" style="background: #a3be8c; color: #000; font-weight: bold; margin-left: 15px;">EXPORT LAYOUT</button>
@@ -538,7 +572,7 @@
         </div>
     </main>
 
-    <div class="modal-overlay" id="overlay" onclick="closeModal()"></div>
+    <div class="modal-overlay" id="overlay" onclick="closeActiveModal()"></div>
     <div id="route-modal" role="dialog" aria-modal="true" aria-labelledby="route-modal-title">
         <h2 id="route-modal-title" style="margin-top:0; font-size: 15px; color: var(--accent-blue)">Route Inspector & DSP Chain</h2>
         <div id="route-info" style="margin-bottom: 12px; font-family: monospace; font-size: 11px; word-break: break-all;"></div>
@@ -589,9 +623,41 @@
         </div>
     </div>
 
+    <div id="plugin-modal" role="dialog" aria-modal="true" aria-labelledby="plugin-modal-title">
+        <h2 id="plugin-modal-title">Add Plugin Node</h2>
+        <div class="control-group">
+            <div class="control-row">
+                <label for="plugin-modal-type">Processor</label>
+                <select id="plugin-modal-type" onchange="onPluginModalTypeChange()"></select>
+            </div>
+            <div class="control-row">
+                <label for="plugin-modal-name">Node Name</label>
+                <input id="plugin-modal-name" type="text" maxlength="80">
+            </div>
+            <div class="control-row">
+                <label for="plugin-modal-input-channels">Audio Input Channels</label>
+                <select id="plugin-modal-input-channels"></select>
+            </div>
+            <div class="control-row">
+                <label for="plugin-modal-output-channels">Audio Output Channels</label>
+                <select id="plugin-modal-output-channels"></select>
+            </div>
+            <div class="control-row" id="plugin-modal-active-row">
+                <label for="plugin-modal-active">Processing</label>
+                <select id="plugin-modal-active"><option value="true">ACTIVE</option><option value="false">BYPASS</option></select>
+            </div>
+        </div>
+        <div id="plugin-modal-params"></div>
+        <div id="plugin-modal-status" role="status"></div>
+        <div class="plugin-modal-actions">
+            <button type="button" onclick="closePluginModal()">CANCEL</button>
+            <button type="button" class="primary" id="plugin-modal-save" onclick="savePluginModal()">CREATE NODE</button>
+        </div>
+    </div>
+
     <script>
         const $ = id => document.getElementById(id);
-        let graph = { endpoints: [], routes: [] };
+        let graph = { endpoints: [], routes: [], plugin_nodes: [] };
         let pwGraph = { nodes: {}, links: [] };
         let pwLayoutAssignments = new Map();
         let pipewireGraphLoadInProgress = false;
@@ -602,7 +668,10 @@
         let activeTabName = 'patchbay';
 
         let endpointBlocks = new Map();
+        let pluginNodeBlocks = new Map();
         let pwEndpointBlocks = new Map();
+        let pluginEditingId = null;
+        let pluginModalBusy = false;
 
         let dspDiscovery = { status: 'idle', processors: [], maxChainLength: null, error: '' };
         let dspDiscoveryRequest = 0;
@@ -741,6 +810,7 @@
             const drivers = [];
 
             graph.endpoints.forEach(ep => {
+                if (ep.kind && String(ep.kind).startsWith('plugin_')) return;
                 const name = (ep.name || ep.id).toLowerCase();
                 if (name.includes('freewheel') || name.includes('dummy') || name.includes('midi') || name.includes('tone')) {
                     drivers.push(ep);
@@ -854,6 +924,7 @@ function autoOrganizeLayout() {
             const cm5Drivers = [];
 
             graph.endpoints.forEach(ep => {
+                if (ep.kind && String(ep.kind).startsWith('plugin_')) return;
                 const name = (ep.name || ep.id).toLowerCase();
                 if (name.includes('freewheel') || name.includes('dummy') || name.includes('midi') || name.includes('tone')) {
                     cm5Drivers.push(ep);
@@ -899,6 +970,11 @@ function autoOrganizeLayout() {
 
             let yCol2 = 0;
             if (cm5Drivers.length > 0) stackFamily(cm5Drivers, COL_WIDTH * 2, yCol2, false);
+            let pluginY = 0;
+            (graph.plugin_nodes || []).forEach(plugin => {
+                nodePositions[`plugin/${plugin.id}`] = { x: COL_WIDTH * 2, y: pluginY };
+                pluginY += 210;
+            });
 
             const sortByPipeWireLayoutName = (a, b) => {
                 const aa = pwLayoutAssignments.get(Number(a.id));
@@ -924,6 +1000,10 @@ function autoOrganizeLayout() {
             // Apply positions instantly to DOM elements
             endpointBlocks.forEach((block, id) => {
                 const pos = nodePositions[id];
+                if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+            });
+            pluginNodeBlocks.forEach((block, id) => {
+                const pos = nodePositions[`plugin/${id}`];
                 if (pos) block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
             });
             pwEndpointBlocks.forEach((block, id) => {
@@ -986,6 +1066,23 @@ function autoOrganizeLayout() {
         }
 
         const patchbay = $('patchbay');
+
+        // Start an internal CM5Audio cable drag from any source endpoint,
+        // including plugin-node outputs. Plugin ports use the same endpoint
+        // IDs and route API as hardware endpoints.
+        function beginWiringDrag(endpoint, channel, row, event) {
+            if (event.button !== 0 || endpoint.direction !== 'source') return;
+
+            isWiringDrag = true;
+            wiringSource = { endpointId: endpoint.id, channel };
+            snappedDestination = null;
+            document.querySelectorAll('.channel-row.selected').forEach(el => el.classList.remove('selected'));
+            row.classList.add('selected');
+            activeSource = { endpointId: endpoint.id, channel };
+
+            patchbay.setPointerCapture(event.pointerId);
+            event.stopPropagation();
+        }
 
         patchbay.addEventListener('wheel', e => {
             e.preventDefault();
@@ -1066,8 +1163,17 @@ function autoOrganizeLayout() {
                 let closestDest = null;
                 let minDist = 45;
 
-                document.querySelectorAll('.endpoint-block:not(.pw-block) .channel-row, .pw-block .channel-row').forEach(row => {
-                    if (row.id.startsWith('slot-') && row.id.includes(wiringSource.endpointId)) return;
+                // Only internal destination ports are valid drop targets.
+                // PipeWire-native ports are managed by PipeWire and cannot be
+                // inserted into the cm5audio AudioRoute graph through this API.
+                document.querySelectorAll(
+                    '.endpoint-block:not(.pw-block) .channel-row[data-endpoint-direction="destination"]'
+                ).forEach(row => {
+                    const endpointId = row.dataset.endpointId;
+                    const channel = Number(row.dataset.channel);
+                    if (!endpointId || !Number.isInteger(channel)) return;
+                    if (endpointId === wiringSource.endpointId && channel === wiringSource.channel) return;
+
                     const rowRect = row.getBoundingClientRect();
                     const rowCenterX = (rowRect.left + rowRect.width / 2 - viewportRect.left) / scale;
                     const rowCenterY = (rowRect.top + rowRect.height / 2 - viewportRect.top) / scale;
@@ -1082,10 +1188,10 @@ function autoOrganizeLayout() {
                 document.querySelectorAll('.channel-row.snapped').forEach(r => r.classList.remove('snapped'));
                 if (closestDest) {
                     closestDest.classList.add('snapped');
-                    const parts = closestDest.id.replace('slot-', '').replace('pw-slot-', '').split('-');
-                    const ch = parseInt(parts.pop());
-                    const epId = parts.join('-');
-                    snappedDestination = { endpointId: epId, channel: ch };
+                    snappedDestination = {
+                        endpointId: closestDest.dataset.endpointId,
+                        channel: Number(closestDest.dataset.channel)
+                    };
                 } else {
                     snappedDestination = null;
                 }
@@ -1283,6 +1389,7 @@ function autoOrganizeLayout() {
         async function loadGraph() {
             try {
                 graph = await fetchAPI('/api/graph');
+                if (!Array.isArray(graph.plugin_nodes)) graph.plugin_nodes = [];
                 renderPatchbay();
                 updateSysInfo();
                 if (!isInitialFitDone && Object.keys(nodePositions).length === 0) {
@@ -1378,7 +1485,8 @@ function autoOrganizeLayout() {
 
         function renderPatchbay() {
             const viewport = $('patchbay-viewport');
-            const currentEndpoints = new Set(graph.endpoints.map(e => e.id));
+            const regularEndpoints = graph.endpoints.filter(ep => !ep.kind || !String(ep.kind).startsWith('plugin_'));
+            const currentEndpoints = new Set(regularEndpoints.map(e => e.id));
 
             endpointBlocks.forEach((block, id) => {
                 if (!currentEndpoints.has(id)) {
@@ -1389,7 +1497,7 @@ function autoOrganizeLayout() {
                 }
             });
 
-            graph.endpoints.forEach((ep, idx) => {
+            regularEndpoints.forEach((ep, idx) => {
                 const isSource = ep.direction === 'source';
 
                 if (!nodePositions[ep.id]) {
@@ -1412,12 +1520,155 @@ function autoOrganizeLayout() {
                 }
             });
 
+            renderPluginNodes();
             localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
             rebuildMeterCache();
 
             if (activeTabName === 'patchbay') {
                 setTimeout(drawCables, 50);
             }
+        }
+
+        function renderPluginNodes() {
+            const viewport = $('patchbay-viewport');
+            const nodes = Array.isArray(graph.plugin_nodes) ? graph.plugin_nodes : [];
+            const currentIds = new Set(nodes.map(node => String(node.id)));
+            pluginNodeBlocks.forEach((block, id) => {
+                if (!currentIds.has(String(id))) {
+                    pluginNodeBlocks.delete(id);
+                    block.remove();
+                }
+            });
+            nodes.forEach(plugin => {
+                const signature = `${plugin.type}:${plugin.input_channels}:${plugin.output_channels}`;
+                let block = pluginNodeBlocks.get(plugin.id);
+                if (block && block.dataset.signature !== signature) {
+                    block.remove();
+                    pluginNodeBlocks.delete(plugin.id);
+                    block = null;
+                }
+                if (!block) {
+                    block = createPluginNodeBlock(plugin);
+                    viewport.appendChild(block);
+                    pluginNodeBlocks.set(plugin.id, block);
+                } else {
+                    const title = block.querySelector('.plugin-node-title');
+                    if (title) title.firstChild.textContent = plugin.name || plugin.type;
+                    block.classList.toggle('plugin-bypassed', !plugin.active);
+                    const bypass = block.querySelector('.plugin-node-actions button');
+                    if (bypass) {
+                        bypass.textContent = plugin.active ? 'BYPASS' : 'ACTIVE';
+                        bypass.title = plugin.active ? 'Bypass processor' : 'Enable processor';
+                    }
+                    const position = nodePositions[`plugin/${plugin.id}`] || { x: 680, y: Number(plugin.id) * 190 };
+                    block.style.transform = `translate(${position.x}px, ${position.y}px)`;
+                }
+            });
+        }
+
+        function createPluginNodeBlock(plugin) {
+            const block = document.createElement('div');
+            block.className = 'endpoint-block plugin-node-block';
+            block.id = `plugin-block-${plugin.id}`;
+            block.dataset.epId = `plugin/${plugin.id}`;
+            block.dataset.signature = `${plugin.type}:${plugin.input_channels}:${plugin.output_channels}`;
+            block.classList.toggle('plugin-bypassed', !plugin.active);
+            const positionKey = `plugin/${plugin.id}`;
+            const position = nodePositions[positionKey] || { x: 680, y: Number(plugin.id) * 190 };
+            nodePositions[positionKey] = position;
+            block.style.transform = `translate(${position.x}px, ${position.y}px)`;
+
+            const header = document.createElement('div');
+            header.className = 'endpoint-header plugin-node-header';
+            const titleWrap = document.createElement('span');
+            titleWrap.className = 'plugin-node-title';
+            titleWrap.appendChild(document.createTextNode(plugin.name || plugin.type));
+            const typeLabel = document.createElement('span');
+            typeLabel.className = 'plugin-node-type';
+            typeLabel.textContent = plugin.type;
+            titleWrap.appendChild(typeLabel);
+            const actions = document.createElement('span');
+            actions.className = 'plugin-node-actions';
+            const bypass = document.createElement('button');
+            bypass.type = 'button';
+            bypass.textContent = plugin.active ? 'BYPASS' : 'ACTIVE';
+            bypass.title = plugin.active ? 'Bypass processor' : 'Enable processor';
+            bypass.addEventListener('pointerdown', event => event.stopPropagation());
+            bypass.addEventListener('click', event => {
+                event.stopPropagation();
+                setPluginActive(plugin.id, !plugin.active);
+            });
+            const settings = document.createElement('button');
+            settings.type = 'button';
+            settings.textContent = '⚙';
+            settings.title = 'Plugin settings';
+            settings.addEventListener('pointerdown', event => event.stopPropagation());
+            settings.addEventListener('click', event => {
+                event.stopPropagation();
+                openPluginModal(plugin.id);
+            });
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.textContent = '×';
+            remove.title = 'Remove plugin node and connected cables';
+            remove.addEventListener('pointerdown', event => event.stopPropagation());
+            remove.addEventListener('click', event => {
+                event.stopPropagation();
+                removePluginNode(plugin.id);
+            });
+            actions.append(bypass, settings, remove);
+            header.append(titleWrap, actions);
+            block.appendChild(header);
+            setupBlockDragging(block, positionKey);
+
+            const ports = document.createElement('div');
+            ports.className = 'plugin-node-ports';
+            const inputPort = graph.endpoints.find(endpoint => endpoint.id === plugin.input_endpoint) || {
+                id: plugin.input_endpoint, direction: 'destination', channels: plugin.input_channels
+            };
+            const outputPort = graph.endpoints.find(endpoint => endpoint.id === plugin.output_endpoint) || {
+                id: plugin.output_endpoint, direction: 'source', channels: plugin.output_channels
+            };
+            const makePort = (endpoint, title, channelCount, isOutput) => {
+                const column = document.createElement('div');
+                column.className = 'plugin-node-port';
+                const label = document.createElement('div');
+                label.className = 'plugin-node-port-title';
+                label.textContent = `${title} · ${channelCount} CH`;
+                column.appendChild(label);
+                for (let channel = 0; channel < channelCount; channel++) {
+                    const row = document.createElement('div');
+                    row.className = 'channel-row';
+                    row.id = `slot-${endpoint.id}-${channel}`;
+                    row.dataset.endpointId = endpoint.id;
+                    row.dataset.endpointDirection = endpoint.direction;
+                    row.dataset.channel = String(channel);
+                    const channelLabel = document.createElement('span');
+                    channelLabel.className = 'ch-label';
+                    channelLabel.textContent = `CH${channel + 1}`;
+                    if (isOutput) {
+                        const meter = document.createElement('div');
+                        meter.className = 'vu-container';
+                        row.append(meter, channelLabel);
+                    } else {
+                        row.append(channelLabel, document.createElement('div'));
+                    }
+                    row.addEventListener('click', () => handleSlotClick(endpoint, channel));
+                    if (isOutput) {
+                        row.addEventListener('pointerdown', event =>
+                            beginWiringDrag(endpoint, channel, row, event)
+                        );
+                    }
+                    column.appendChild(row);
+                }
+                return column;
+            };
+            ports.append(
+                makePort(inputPort, 'AUDIO IN', plugin.input_channels, false),
+                makePort(outputPort, 'AUDIO OUT', plugin.output_channels, true)
+            );
+            block.appendChild(ports);
+            return block;
         }
 
         // Use PipeWire's application identity first; node-name/description
@@ -1670,6 +1921,9 @@ function autoOrganizeLayout() {
                 const row = document.createElement('div');
                 row.className = 'channel-row';
                 row.id = `slot-${ep.id}-${i}`;
+                row.dataset.endpointId = ep.id;
+                row.dataset.endpointDirection = ep.direction;
+                row.dataset.channel = String(i);
 
                 if (ep.direction === 'source') {
                     row.innerHTML = `<div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div><span class="ch-label" style="text-align: right;">CH${i+1}</span>`;
@@ -1680,18 +1934,9 @@ function autoOrganizeLayout() {
                 row.onclick = () => handleSlotClick(ep, i);
 
                 if (ep.direction === 'source') {
-                    row.addEventListener('pointerdown', e => {
-                        if (e.button !== 0) return;
-                        isWiringDrag = true;
-                        wiringSource = { endpointId: ep.id, channel: i };
-
-                        document.querySelectorAll('.channel-row.selected').forEach(el => el.classList.remove('selected'));
-                        row.classList.add('selected');
-                        activeSource = { endpointId: ep.id, channel: i };
-
-                        patchbay.setPointerCapture(e.pointerId);
-                        e.stopPropagation();
-                    });
+                    row.addEventListener('pointerdown', e =>
+                        beginWiringDrag(ep, i, row, e)
+                    );
                 }
 
                 block.appendChild(row);
@@ -1766,6 +2011,223 @@ function autoOrganizeLayout() {
 
             pwEndpointBlocks.set(node.id, block);
             return block;
+        }
+
+        function getProcessorDescriptor(type) {
+            return dspDiscovery.processors.find(processor => processor.type === type);
+        }
+
+        function populateChannelOptions(select, port, selected) {
+            select.replaceChildren();
+            const minimum = Number(port?.min_channels ?? 1);
+            const maximum = Number(port?.max_channels ?? 1);
+            const fallback = Number(port?.default_channels ?? minimum);
+            for (let channels = minimum; channels <= maximum; channels++) {
+                const option = dspText('option', `${channels} channel${channels === 1 ? '' : 's'}`);
+                option.value = String(channels);
+                select.appendChild(option);
+            }
+            select.value = String(selected ?? fallback);
+        }
+
+        function renderPluginModalParameters(descriptor, values) {
+            const container = $('plugin-modal-params');
+            container.replaceChildren();
+            for (const parameter of (descriptor?.parameters || [])) {
+                const row = dspText('div', '', 'control-row');
+                const label = dspText('label', parameter.name || parameter.id);
+                const isChoice = parameter.type === 'boolean' || parameter.type === 'enum';
+                const control = document.createElement(isChoice ? 'select' : 'input');
+                control.dataset.pluginParameter = parameter.id;
+                const value = hasOwn(values, parameter.id) ? values[parameter.id] :
+                    (parameter.default !== undefined ? parameter.default : descriptor.defaults?.[parameter.id]);
+                if (parameter.type === 'boolean') {
+                    for (const [text, choice] of [['True', true], ['False', false]]) {
+                        const option = dspText('option', text);
+                        option.value = String(choice);
+                        control.appendChild(option);
+                    }
+                    control.value = String(Boolean(value));
+                } else if (parameter.type === 'enum') {
+                    (parameter.choices || []).forEach(choice => {
+                        const option = dspText('option', choice.label ?? displayJson(choice.value));
+                        option.value = displayJson(choice.value);
+                        control.appendChild(option);
+                    });
+                    control.value = displayJson(value);
+                } else {
+                    control.type = parameter.type === 'string' ? 'text' : 'number';
+                    if (parameter.type === 'integer' || parameter.type === 'number') {
+                        if (parameter.min != null) control.min = parameter.min;
+                        if (parameter.max != null) control.max = parameter.max;
+                        if (parameter.step != null) control.step = parameter.step;
+                    }
+                    control.value = value ?? '';
+                }
+                label.appendChild(control);
+                row.appendChild(label);
+                if (parameter.unit) row.appendChild(dspText('span', parameter.unit, 'dsp-help'));
+                container.appendChild(row);
+            }
+            if (!container.children.length) container.appendChild(dspText('div', 'This processor has no configurable parameters.', 'dsp-help'));
+        }
+
+        async function openPluginModal(pluginId = null) {
+            if (pluginModalBusy) return;
+            if (dspDiscovery.status !== 'ready') await loadDspAvailable();
+            if (dspDiscovery.status !== 'ready') {
+                showError('Plugin discovery is unavailable: ' + dspDiscovery.error);
+                return;
+            }
+            pluginEditingId = pluginId;
+            const editing = pluginId !== null;
+            const plugin = editing ? (graph.plugin_nodes || []).find(item => item.id === pluginId) : null;
+            if (editing && !plugin) return;
+            const typeSelect = $('plugin-modal-type');
+            typeSelect.replaceChildren();
+            dspDiscovery.processors.forEach(descriptor => {
+                const option = dspText('option', descriptor.name || descriptor.type);
+                option.value = descriptor.type;
+                typeSelect.appendChild(option);
+            });
+            if (plugin) typeSelect.value = plugin.type;
+            typeSelect.disabled = editing;
+            $('plugin-modal-title').textContent = editing ? `Plugin Node #${plugin.id}` : 'Add Plugin Node';
+            $('plugin-modal-name').value = plugin?.name || '';
+            $('plugin-modal-active-row').hidden = !editing;
+            $('plugin-modal-active').value = String(plugin?.active ?? true);
+            onPluginModalTypeChange(plugin?.input_channels, plugin?.output_channels, plugin?.params || {});
+            $('plugin-modal-status').textContent = '';
+            $('plugin-modal-save').textContent = editing ? 'APPLY SETTINGS' : 'CREATE NODE';
+            $('plugin-modal-save').disabled = false;
+            $('overlay').style.display = 'block';
+            $('plugin-modal').style.display = 'block';
+        }
+
+        function onPluginModalTypeChange(inputChannels, outputChannels, params = {}) {
+            const descriptor = getProcessorDescriptor($('plugin-modal-type').value);
+            if (!descriptor) return;
+            populateChannelOptions($('plugin-modal-input-channels'), descriptor.audio?.inputs?.[0], inputChannels);
+            populateChannelOptions($('plugin-modal-output-channels'), descriptor.audio?.outputs?.[0], outputChannels);
+            renderPluginModalParameters(descriptor, params);
+        }
+
+        function readPluginModalParams(descriptor) {
+            const params = {};
+            $('plugin-modal-params').querySelectorAll('[data-plugin-parameter]').forEach(control => {
+                const parameter = descriptor.parameters.find(item => item.id === control.dataset.pluginParameter);
+                if (!parameter) return;
+                if (parameter.type === 'boolean') params[parameter.id] = control.value === 'true';
+                else if (parameter.type === 'enum') {
+                    const choice = (parameter.choices || []).find(item => displayJson(item.value) === control.value);
+                    if (!choice) throw new Error(`Invalid selection for ${parameter.name || parameter.id}`);
+                    params[parameter.id] = cloneJson(choice.value);
+                } else if (parameter.type === 'number' || parameter.type === 'integer') {
+                    const number = control.value.trim() === '' ? NaN : Number(control.value);
+                    if (!Number.isFinite(number) || (parameter.type === 'integer' && !Number.isInteger(number)) ||
+                        (parameter.min != null && number < parameter.min) || (parameter.max != null && number > parameter.max))
+                        throw new Error(`Invalid value for ${parameter.name || parameter.id}`);
+                    params[parameter.id] = number;
+                } else params[parameter.id] = control.value;
+            });
+            return params;
+        }
+
+        async function savePluginModal() {
+            if (pluginModalBusy) return;
+            const descriptor = getProcessorDescriptor($('plugin-modal-type').value);
+            if (!descriptor) return;
+            try {
+                const payload = {
+                    name: $('plugin-modal-name').value.trim() || descriptor.name || descriptor.type,
+                    input_channels: Number($('plugin-modal-input-channels').value),
+                    output_channels: Number($('plugin-modal-output-channels').value),
+                    active: $('plugin-modal-active').value === 'true',
+                    params: readPluginModalParams(descriptor)
+                };
+                pluginModalBusy = true;
+                $('plugin-modal-save').disabled = true;
+                $('plugin-modal-status').textContent = 'Applying plugin configuration…';
+                const url = pluginEditingId === null ? '/api/plugins' : `/api/plugins/${encodeURIComponent(pluginEditingId)}`;
+                const result = await fetchAPI(url, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, type: descriptor.type })
+                });
+                if (result.status !== 'ok' || result.adopted !== true)
+                    throw new Error(result.message || 'Backend did not confirm plugin graph adoption');
+                closePluginModal();
+                await loadGraph();
+            } catch (error) {
+                $('plugin-modal-status').textContent = error.message;
+            } finally {
+                pluginModalBusy = false;
+                $('plugin-modal-save').disabled = false;
+            }
+        }
+
+        function closePluginModal() {
+            if (pluginModalBusy) return;
+            pluginEditingId = null;
+            $('plugin-modal').style.display = 'none';
+            if ($('route-modal').style.display !== 'block') $('overlay').style.display = 'none';
+        }
+
+        function closeActiveModal() {
+            if ($('plugin-modal').style.display === 'block') closePluginModal();
+            else closeModal();
+        }
+
+        async function setPluginActive(id, active) {
+            const plugin = (graph.plugin_nodes || []).find(item => item.id === id);
+            if (!plugin) return;
+            try {
+                const result = await fetchAPI(`/api/plugins/${encodeURIComponent(id)}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ active, name: plugin.name, input_channels: plugin.input_channels,
+                        output_channels: plugin.output_channels, params: plugin.params })
+                });
+                if (result.status !== 'ok' || result.adopted !== true) throw new Error(result.message || 'Plugin state adoption was not confirmed');
+                await loadGraph();
+            } catch (error) { showError('Plugin state change failed: ' + error.message); }
+        }
+
+        async function removePluginNode(id) {
+            if (!confirm('Remove this plugin node and all of its connected audio routes?')) return;
+            try {
+                const result = await fetchAPI(`/api/plugins/${encodeURIComponent(id)}`, { method: 'DELETE' });
+                if (result.status !== 'ok' || result.adopted !== true) throw new Error(result.message || 'Plugin removal was not confirmed');
+                await loadGraph();
+            } catch (error) { showError('Plugin removal failed: ' + error.message); }
+        }
+
+        async function extractProcessorToNode(index) {
+            if (modalBusy || editingRouteId === null) return;
+            if (!confirm('Extract this processor into its own plugin node? The route chain will be split around it, preserving processing order and settings.')) return;
+            let draft;
+            try { draft = validatedRouteDraft(); }
+            catch (error) { setRouteError(error.message); return; }
+            const routeId = editingRouteId;
+            modalBusy = true;
+            updateModalControls();
+            try {
+                const applied = await fetchAPI(`/api/routes/${encodeURIComponent(routeId)}/apply`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft)
+                });
+                if (applied.status !== 'ok' || applied.adopted !== true)
+                    throw new Error(applied.message || 'Route changes were not confirmed');
+                const extracted = await fetchAPI('/api/plugins/extract', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ route_id: routeId, processor_index: index })
+                });
+                if (extracted.status !== 'ok' || extracted.adopted !== true)
+                    throw new Error(extracted.message || 'Plugin extraction was not confirmed');
+                modalBusy = false;
+                closeModal();
+                await loadGraph();
+            } catch (error) {
+                setRouteError('Processor extraction failed: ' + error.message);
+                modalBusy = false;
+                updateModalControls();
+            }
         }
 
         function handleSlotClick(ep, ch) {
@@ -2188,7 +2650,9 @@ function autoOrganizeLayout() {
                 down.title = 'Move processor down';
                 down.setAttribute('aria-label', `Move processor ${index + 1} down`);
                 down.dataset.locked = String(index === currentRouteDspState.chain.length - 1);
-                actions.append(up, down, dspButton('Remove', () => removeProcessor(index), 'remove-btn'));
+                actions.append(up, down,
+                    dspButton('Upgrade to Node', () => extractProcessorToNode(index), 'plugin-extract-btn'),
+                    dspButton('Remove', () => removeProcessor(index), 'remove-btn'));
                 header.appendChild(actions);
                 card.appendChild(header);
                 const params = dspText('div', '', 'dsp-processor-params');
@@ -2437,6 +2901,5 @@ function autoOrganizeLayout() {
         }
         init();
     </script>
-    <script src="client/plugin_demo.js"></script>
 </body>
 </html>

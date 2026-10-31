@@ -3,7 +3,6 @@
     "pipewire:77",
     "pipewire:33",
     "pipewire:42",
-    "pipewire:58",
     "pipewire:43",
     "pipewire:44",
     "pipewire:78",
@@ -26,10 +25,6 @@
     },
     "pipewire:44": {
       "capture_channels": 2,
-      "playback_channels": 0
-    },
-    "pipewire:58": {
-      "capture_channels": 1,
       "playback_channels": 0
     },
     "pipewire:75": {

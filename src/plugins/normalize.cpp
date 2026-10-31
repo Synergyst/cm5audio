@@ -36,7 +36,7 @@ void NormalizeProcessor::process(float* buffer, size_t frames, unsigned channels
 }
 
 void register_normalize_processor(ProcessorRegistry& registry) {
-    registry.register_processor({
+    ProcessorDescriptor descriptor{
         "normalize", "Normalize", "Automatic gain control for consistent VOIP levels.",
         {
             {"target", "Target Level", "number", 0.5, 0.01, 1.0, 0.01, "linear", {}},
@@ -50,5 +50,8 @@ void register_normalize_processor(ProcessorRegistry& registry) {
                 params.at("max_gain").get<float>()
             );
         }
-    });
+    };
+    descriptor.audio_input = {1, 8, 2};
+    descriptor.audio_output = {1, 8, 2};
+    registry.register_processor(std::move(descriptor));
 }

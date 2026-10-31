@@ -509,7 +509,8 @@ void register_rnnoise_processor(ProcessorRegistry& registry)
                 modelPath);
         }
     };
-    descriptor.audio_input = {1, 8, 1};
-    descriptor.audio_output = {1, 8, 1};
+    descriptor.audio_input = {1, 1, 1};
+    descriptor.audio_output = {1, 1, 1};
+    descriptor.chain_channel_mode = ProcessorChainChannelMode::MONO_ONLY;
     registry.register_processor(std::move(descriptor));
 }

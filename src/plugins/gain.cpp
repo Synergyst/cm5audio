@@ -15,6 +15,7 @@ void register_gain_processor(ProcessorRegistry& registry) {
             return std::make_unique<GainProcessor>(params.at("gain").get<float>());
         }};
     descriptor.audio_input = {1, 8, 2};
+    descriptor.chain_channel_mode = ProcessorChainChannelMode::MULTICHANNEL;
     descriptor.audio_output = {1, 8, 2};
     registry.register_processor(std::move(descriptor));
 }

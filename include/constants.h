@@ -11,5 +11,8 @@ constexpr unsigned CM5_BUFFER_FRAMES = 256;
 
 constexpr unsigned CM5_MAX_PROCESSORS_PER_ROUTE = 16;
 constexpr unsigned CM5_MAX_PLUGIN_PORTS = 16;
+// Composite plugin chains use one symmetric audio bus, bounded to the
+// channel width supported by the built-in DSP processors.
+constexpr unsigned CM5_MAX_CHAIN_CHANNELS = CM5_MAX_CLIENT_CHANNELS;
 
 #endif

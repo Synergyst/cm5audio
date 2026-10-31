@@ -50,7 +50,7 @@ void DeEsserProcessor::process(float* buffer, size_t frames, unsigned channels) 
 }
 
 void register_deesser_processor(ProcessorRegistry& registry) {
-    registry.register_processor({
+    ProcessorDescriptor descriptor{
         "deesser", "De-Esser", "Attenuates harsh high-frequency sibilance (S/T sounds).",
         {
             {"threshold", "Threshold", "number", 0.1, 0.01, 1.0, 0.01, "linear", {}},
@@ -66,5 +66,9 @@ void register_deesser_processor(ProcessorRegistry& registry) {
                 params.at("speed").get<float>()
             );
         }
-    });
+    };
+    // The processor's detector state is mono. Composite chains create an
+    // independent instance for each channel to avoid L/R state coupling.
+    descriptor.chain_channel_mode = ProcessorChainChannelMode::PER_CHANNEL;
+    registry.register_processor(std::move(descriptor));
 }

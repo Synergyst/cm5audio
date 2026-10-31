@@ -230,7 +230,7 @@
         .chain-preset-info small { color: var(--text-dim); }
         #chain-preset-editor-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(760px, calc(100vw - 32px)); max-height: 90vh; overflow: auto; display: none; z-index: 1004; background: var(--panel-bg); border: 1px solid #8f78b7; border-radius: 10px; padding: 20px; box-shadow: 0 15px 60px rgba(0,0,0,.75); }
         #chain-preset-editor-modal h2 { margin: 0 0 14px; font-size: 16px; color: #c6b3e8; }
-        .chain-preset-editor-fields { display: grid; grid-template-columns: minmax(180px, 1fr) 140px auto; gap: 10px; align-items: end; }
+        .chain-preset-editor-fields { display: grid; grid-template-columns: minmax(180px, 1fr) 110px 130px auto; gap: 10px; align-items: end; }
         .chain-preset-editor-fields label { display: flex; flex-direction: column; gap: 5px; color: var(--text-dim); font-size: 12px; }
         .chain-preset-editor-fields input, .chain-preset-editor-fields select { width: 100%; box-sizing: border-box; }
         .chain-preset-add-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
@@ -240,6 +240,9 @@
         .chain-node-replace { border: 1px solid #8f78b7; border-radius: 7px; padding: 10px; margin: 10px 0; }
         .chain-node-replace .control-row { align-items: center; }
         .chain-node-replace select { width: min(100%, 320px); }
+        .chain-channel-warning { margin: 8px 0; padding: 8px; border: 1px solid rgba(220,150,70,.55); border-radius: 6px; color: #e8bd83; background: rgba(220,150,70,.08); font-size: 11px; white-space: pre-wrap; }
+        .chain-channel-warning:empty { display: none; }
+        .chain-channel-mode { display: block; margin-top: 3px; color: var(--text-dim); font-size: 10px; }
         @media (max-width: 620px) { .chain-preset-editor-fields { grid-template-columns: 1fr; } }
         .chain-modal-steps { max-height: 42vh; overflow: auto; margin: 12px 0; }
         .chain-modal-step { border: 1px solid var(--border-color); border-radius: 6px; padding: 9px; margin: 6px 0; }
@@ -708,14 +711,16 @@
         <h2 id="chain-preset-editor-title">Edit Plugin Chain Preset</h2>
         <div class="chain-preset-editor-fields">
             <label for="chain-preset-edit-name">Preset Name<input id="chain-preset-edit-name" type="text" maxlength="80"></label>
+            <label for="chain-preset-edit-channels">Audio Channels<select id="chain-preset-edit-channels" onchange="updateChainPresetChannelControls()"><option value="1">Mono (1)</option><option value="2">Stereo (2)</option><option value="3">3 channels</option><option value="4">Quad (4)</option><option value="5">5 channels</option><option value="6">5.1 (6)</option><option value="7">7 channels</option><option value="8">7.1 (8)</option></select></label>
             <label for="chain-preset-edit-gain">Chain Gain<input id="chain-preset-edit-gain" type="number" min="0" max="8" step="any"></label>
             <label for="chain-preset-edit-active"><span>Enabled</span><input id="chain-preset-edit-active" type="checkbox" checked></label>
         </div>
+        <div id="chain-preset-channel-warning" class="chain-channel-warning" role="status"></div>
         <div class="chain-preset-add-row">
             <select id="chain-preset-add-type" aria-label="Processor to add"></select>
             <button type="button" onclick="addProcessorToPreset()">ADD PROCESSOR</button>
         </div>
-        <div class="dsp-help">Processors execute from top to bottom. Use UP/DOWN to change order, REMOVE to delete a processor, and edit each parameter directly.</div>
+        <div class="dsp-help">Processors execute from top to bottom. Use UP/DOWN to change order, REMOVE to delete a processor, and edit each parameter directly. The Audio Channels selector controls the preset's bus width. Mono-only processors such as RNNoise are blocked above one channel.</div>
         <div id="chain-preset-edit-steps" class="chain-modal-steps"></div>
         <div id="chain-preset-edit-status" role="status" class="dsp-help"></div>
         <div class="chain-modal-actions">
@@ -727,8 +732,10 @@
     <div id="chain-node-modal" role="dialog" aria-modal="true" aria-labelledby="chain-node-title">
         <h2 id="chain-node-title">Plugin Chain Node</h2>
         <div class="control-row"><label for="chain-node-name">Node Name</label><input id="chain-node-name" type="text" maxlength="80"></div>
+        <div class="control-row"><label for="chain-node-channels">Audio Channels</label><select id="chain-node-channels" onchange="updateChainNodeChannelControls()"><option value="1">Mono (1)</option><option value="2">Stereo (2)</option><option value="3">3 channels</option><option value="4">Quad (4)</option><option value="5">5 channels</option><option value="6">5.1 (6)</option><option value="7">7 channels</option><option value="8">7.1 (8)</option></select></div>
+        <div id="chain-node-channel-warning" class="chain-channel-warning" role="status"></div>
         <div class="control-row"><label for="chain-node-gain">Chain Gain</label><input id="chain-node-gain" type="number" min="0" max="8" step="any"></div>
-        <div class="dsp-help">Processors execute from top to bottom. Processor parameters are retained from the original Route Inspector chain.</div>
+        <div class="dsp-help">Each chain processor follows its declared channel mode: mono processors get an independent instance per channel, linked multichannel processors process the interleaved bus together, and mono-only processors cannot be widened. The channel count applies to this node's complete audio bus.</div>
         <div class="chain-node-replace">
             <strong>Replace this node from a saved preset</strong>
             <div class="control-row" style="margin-top:8px;">
@@ -772,7 +779,7 @@
         let chainPresetDraft = null;
         let chainPresetEditorBusy = false;
 
-        let dspDiscovery = { status: 'idle', processors: [], maxChainLength: null, error: '' };
+        let dspDiscovery = { status: 'idle', processors: [], maxChainLength: null, maxChainChannels: 8, error: '' };
         let dspDiscoveryRequest = 0;
         let currentRouteDspState = null;
         let dspParameterBindings = [];
@@ -2503,7 +2510,7 @@ function autoOrganizeLayout() {
             try {
                 const result = await fetchAPI('/api/plugin-chain-presets', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, chain: draft.dsp.chain, chain_gain: draft.dsp.gain, active: draft.dsp.active })
+                    body: JSON.stringify({ name, chain: draft.dsp.chain, chain_gain: draft.dsp.gain, channels: 1, active: draft.dsp.active })
                 });
                 if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
                     throw new Error(result.message || 'Preset could not be saved to cm5audio_settings.json');
@@ -2520,12 +2527,120 @@ function autoOrganizeLayout() {
             try {
                 const result = await fetchAPI('/api/plugin-chain-presets', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, chain: plugin.chain, chain_gain: plugin.chain_gain ?? 1, active: plugin.active })
+                    body: JSON.stringify({ name, chain: plugin.chain, chain_gain: plugin.chain_gain ?? 1, channels: plugin.channels ?? plugin.input_channels ?? 1, active: plugin.active })
                 });
                 if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
                     throw new Error(result.message || 'Preset could not be persisted');
                 alert(`Saved chain preset: ${result.preset.name}`);
             } catch (error) { showError('Saving chain preset failed: ' + error.message); }
+        }
+
+        function getChainChannelIssues(chain, channels) {
+            const issues = [];
+            const width = Number(channels);
+            if (!Number.isInteger(width) || width < 1 || width > Number(dspDiscovery.maxChainChannels || 8)) {
+                return [`Chain channel count must be between 1 and ${Number(dspDiscovery.maxChainChannels || 8)}.`];
+            }
+            (Array.isArray(chain) ? chain : []).forEach((step, index) => {
+                const descriptor = getProcessorDescriptor(step.type);
+                if (!descriptor) {
+                    issues.push(`${index + 1}. ${step.type}: processor is unavailable in this backend.`);
+                    return;
+                }
+                const mode = descriptor.chain_channel_mode || 'per_channel';
+                const label = descriptor.name || descriptor.type;
+                if (mode === 'mono_only' && width !== 1) {
+                    issues.push(`${index + 1}. ${label} is mono-only. Remove it or set the chain to 1 channel.`);
+                    return;
+                }
+                const required = mode === 'per_channel' ? 1 : width;
+                const layouts = [
+                    ...(descriptor.audio?.inputs || []),
+                    ...(descriptor.audio?.outputs || [])
+                ];
+                for (const port of layouts) {
+                    const minimum = Number(port.min_channels ?? 1);
+                    const maximum = Number(port.max_channels ?? 1);
+                    if (required < minimum || required > maximum) {
+                        issues.push(`${index + 1}. ${label}: ${port.name || port.id} supports ${minimum}–${maximum} channel(s), but this chain requires ${required}.`);
+                        break;
+                    }
+                }
+            });
+            return issues;
+        }
+
+        function getChainChannelModeText(descriptor) {
+            const mode = descriptor?.chain_channel_mode || 'per_channel';
+            if (mode === 'mono_only') return 'Mono only — cannot be widened';
+            if (mode === 'multichannel') return 'Linked multichannel processing — one instance handles the bus';
+            return 'Per-channel processing — independent mono instance for each channel';
+        }
+
+        function updateChainPresetChannelControls() {
+            if (!chainPresetDraft) return;
+            const channels = Number($('chain-preset-edit-channels').value);
+            chainPresetDraft.channels = channels;
+            const issues = getChainChannelIssues(chainPresetDraft.chain, channels);
+            $('chain-preset-channel-warning').textContent = issues.length
+                ? 'This chain cannot run at the selected width:\n' + issues.join('\n')
+                : (channels > 1
+                    ? `The chain will process ${channels} channels in the same DSP block. Per-channel processors receive independent instances; linked processors run once across the complete bus.`
+                    : 'Mono chain: one processor instance per chain stage unless the processor declares otherwise.');
+            $('chain-preset-channel-warning').style.borderColor = issues.length ? 'rgba(220,90,90,.65)' : 'rgba(90,170,120,.45)';
+            $('chain-preset-channel-warning').style.color = issues.length ? '#f09b9b' : '#a8d6b5';
+
+            const addType = $('chain-preset-add-type');
+            if (addType && dspDiscovery.status === 'ready') {
+                const selected = addType.value;
+                addType.replaceChildren();
+                for (const descriptor of dspDiscovery.processors) {
+                    const option = dspText('option', descriptor.name || descriptor.type);
+                    option.value = descriptor.type;
+                    option.title = descriptor.description || '';
+                    // Existing validation errors remain visible; only disable a new item when that item itself is incompatible.
+                    const mode = descriptor.chain_channel_mode || 'per_channel';
+                    const required = mode === 'per_channel' ? 1 : channels;
+                    option.disabled = (mode === 'mono_only' && channels > 1) ||
+                        (mode === 'multichannel' && [...(descriptor.audio?.inputs || []), ...(descriptor.audio?.outputs || [])]
+                            .some(port => required < Number(port.min_channels ?? 1) || required > Number(port.max_channels ?? 1)));
+                    if (option.disabled) option.title = `${option.title} ${getChainChannelModeText(descriptor)}`.trim();
+                    addType.appendChild(option);
+                }
+                if (selected && [...addType.options].some(option => option.value === selected && !option.disabled))
+                    addType.value = selected;
+                if (!addType.value || addType.selectedOptions[0]?.disabled) {
+                    const firstEnabled = [...addType.options].find(option => !option.disabled);
+                    if (firstEnabled) addType.value = firstEnabled.value;
+                }
+            }
+            const save = $('chain-preset-edit-save');
+            if (save) save.disabled = issues.length > 0;
+        }
+
+        function updateChainNodeChannelControls() {
+            if (!chainNodeDraft) return;
+            const channels = Number($('chain-node-channels').value);
+            const issues = getChainChannelIssues(chainNodeDraft, channels);
+            const plugin = (graph.plugin_nodes || []).find(item => item.id === editingChainNodeId && item.type === 'plugin_chain');
+            if (plugin && Number.isInteger(channels) && channels >= 1) {
+                const inputEndpoint = plugin.ports?.find(port => port.type === 'audio' && port.direction === 'input')?.endpoint;
+                const outputEndpoint = plugin.ports?.find(port => port.type === 'audio' && port.direction === 'output')?.endpoint;
+                for (const route of (graph.routes || [])) {
+                    if (route.destination === inputEndpoint && Number(route.destination_channel) >= channels)
+                        issues.push(`Input cable ${route.id} uses channel ${Number(route.destination_channel) + 1}; remove that cable before reducing the node width.`);
+                    if (route.source === outputEndpoint && Number(route.source_channel) >= channels)
+                        issues.push(`Output cable ${route.id} uses channel ${Number(route.source_channel) + 1}; remove that cable before reducing the node width.`);
+                }
+            }
+            $('chain-node-channel-warning').textContent = issues.length
+                ? 'This chain cannot run at the selected width:\n' + issues.join('\n')
+                : (channels > 1
+                    ? `Ready for ${channels}-channel processing. Mono processors are duplicated with independent state per channel; linked processors handle the complete bus.`
+                    : 'Ready for mono processing.');
+            $('chain-node-channel-warning').style.borderColor = issues.length ? 'rgba(220,90,90,.65)' : 'rgba(90,170,120,.45)';
+            $('chain-node-channel-warning').style.color = issues.length ? '#f09b9b' : '#a8d6b5';
+            $('chain-node-apply').disabled = issues.length > 0 || chainNodeModalBusy;
         }
 
         async function openChainPresetsModal() {
@@ -2556,7 +2671,7 @@ function autoOrganizeLayout() {
                     const row = dspText('div', '', 'chain-preset-item');
                     const info = dspText('div', '', 'chain-preset-info');
                     info.append(dspText('strong', preset.name || `Preset #${preset.id}`),
-                        dspText('small', `${preset.processor_count ?? (preset.chain || []).length} processors · Gain ${Number(preset.chain_gain ?? 1).toFixed(2)}${preset.active === false ? ' · Bypassed' : ''}`));
+                        dspText('small', `${preset.processor_count ?? (preset.chain || []).length} processors · ${Number(preset.channels ?? 1)} ch · Gain ${Number(preset.chain_gain ?? 1).toFixed(2)}${preset.active === false ? ' · Bypassed' : ''}`));
                     const edit = dspButton('EDIT', async () => {
                         edit.disabled = true;
                         try { await openChainPresetEditor(preset.id); }
@@ -2604,6 +2719,7 @@ function autoOrganizeLayout() {
             $('chain-presets-modal').style.display = 'none';
             $('chain-preset-editor-title').textContent = `Edit Preset #${preset.id}`;
             $('chain-preset-edit-name').value = preset.name || '';
+            $('chain-preset-edit-channels').value = String(preset.channels ?? 1);
             $('chain-preset-edit-gain').value = Number(preset.chain_gain ?? 1);
             $('chain-preset-edit-active').checked = preset.active !== false;
             $('chain-preset-edit-status').textContent = '';
@@ -2616,6 +2732,7 @@ function autoOrganizeLayout() {
                 addType.appendChild(option);
             }
             renderChainPresetEditorSteps();
+            updateChainPresetChannelControls();
             $('chain-preset-editor-modal').style.display = 'block';
             $('overlay').style.display = 'block';
         }
@@ -2639,7 +2756,10 @@ function autoOrganizeLayout() {
                 const card = dspText('div', '', 'chain-modal-step');
                 const heading = dspText('div', '', 'chain-step-heading');
                 const descriptor = getProcessorDescriptor(step.type);
-                heading.appendChild(dspText('strong', `${index + 1}. ${descriptor?.name || step.type}`));
+                const title = dspText('div', '', '');
+                title.appendChild(dspText('strong', `${index + 1}. ${descriptor?.name || step.type}`));
+                if (descriptor) title.appendChild(dspText('small', getChainChannelModeText(descriptor), 'chain-channel-mode'));
+                heading.appendChild(title);
                 const actions = dspText('div', '', 'chain-step-actions');
                 const up = dspButton('UP', () => movePresetProcessor(index, -1));
                 up.disabled = index === 0;
@@ -2667,6 +2787,7 @@ function autoOrganizeLayout() {
             });
             if (!chainPresetDraft.chain.length)
                 container.appendChild(dspText('div', 'The chain is empty. Add at least one processor before saving.', 'dsp-help dsp-warning'));
+            updateChainPresetChannelControls();
         }
 
         function addProcessorToPreset() {
@@ -2679,6 +2800,12 @@ function autoOrganizeLayout() {
             const type = $('chain-preset-add-type').value;
             const descriptor = getProcessorDescriptor(type);
             if (!descriptor) return;
+            const channels = Number($('chain-preset-edit-channels').value);
+            const candidateIssues = getChainChannelIssues([...chainPresetDraft.chain, { type, params: descriptor.defaults || {} }], channels);
+            if (candidateIssues.length) {
+                $('chain-preset-edit-status').textContent = candidateIssues.join(' ');
+                return;
+            }
             const params = {};
             for (const parameter of (descriptor.parameters || [])) {
                 const value = parameter.default !== undefined ? parameter.default : descriptor.defaults?.[parameter.id];
@@ -2720,6 +2847,13 @@ function autoOrganizeLayout() {
                 $('chain-preset-edit-status').textContent = 'A preset must contain at least one processor.';
                 return;
             }
+            const channels = Number($('chain-preset-edit-channels').value);
+            const channelIssues = getChainChannelIssues(chainPresetDraft.chain, channels);
+            if (channelIssues.length) {
+                $('chain-preset-edit-status').textContent = channelIssues.join(' ');
+                updateChainPresetChannelControls();
+                return;
+            }
             for (const binding of dspParameterBindings) {
                 if (!binding.validate()) {
                     binding.control.reportValidity();
@@ -2733,7 +2867,7 @@ function autoOrganizeLayout() {
             try {
                 const result = await fetchAPI(`/api/plugin-chain-presets/${encodeURIComponent(editingChainPresetId)}/update`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, chain: chainPresetDraft.chain, chain_gain: gain,
+                    body: JSON.stringify({ name, chain: chainPresetDraft.chain, chain_gain: gain, channels,
                         active: $('chain-preset-edit-active').checked })
                 });
                 if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
@@ -2748,7 +2882,7 @@ function autoOrganizeLayout() {
                 $('chain-preset-edit-status').textContent = error.message;
             } finally {
                 chainPresetEditorBusy = false;
-                $('chain-preset-edit-save').disabled = false;
+                updateChainPresetChannelControls();
             }
         }
 
@@ -2760,6 +2894,7 @@ function autoOrganizeLayout() {
             dspParameterBindings = [];
             $('chain-node-title').textContent = `Plugin Chain Node #${id}`;
             $('chain-node-name').value = plugin.name || 'Plugin Chain';
+            $('chain-node-channels').value = String(plugin.channels ?? plugin.input_channels ?? 1);
             $('chain-node-gain').value = Number(plugin.chain_gain ?? 1);
             $('chain-node-status').textContent = '';
             populateChainNodePresetOptions();
@@ -2769,6 +2904,7 @@ function autoOrganizeLayout() {
                 const card = dspText('div', '', 'chain-modal-step');
                 const descriptor = getProcessorDescriptor(step.type);
                 card.appendChild(dspText('strong', `${index + 1}. ${descriptor?.name || step.type}`));
+                if (descriptor) card.appendChild(dspText('small', getChainChannelModeText(descriptor), 'chain-channel-mode'));
                 if (descriptor && isObject(step.params)) {
                     const params = dspText('div', '', 'dsp-processor-params');
                     descriptor.parameters.forEach(parameter =>
@@ -2785,6 +2921,7 @@ function autoOrganizeLayout() {
                 }
                 list.appendChild(card);
             });
+            updateChainNodeChannelControls();
             $('chain-node-modal').style.display = 'block';
             $('overlay').style.display = 'block';
         }
@@ -2809,7 +2946,7 @@ function autoOrganizeLayout() {
                 placeholder.value = '';
                 select.appendChild(placeholder);
                 presets.forEach(preset => {
-                    const option = dspText('option', `${preset.name} · ${preset.processor_count ?? (preset.chain || []).length} processors`);
+                    const option = dspText('option', `${preset.name} · ${Number(preset.channels ?? 1)} ch · ${preset.processor_count ?? (preset.chain || []).length} processors`);
                     option.value = String(preset.id);
                     select.appendChild(option);
                 });
@@ -2853,7 +2990,7 @@ function autoOrganizeLayout() {
             } finally {
                 chainNodeModalBusy = false;
                 $('chain-node-replace-button').disabled = false;
-                $('chain-node-apply').disabled = false;
+                updateChainNodeChannelControls();
             }
         }
 
@@ -2877,6 +3014,13 @@ function autoOrganizeLayout() {
                 $('chain-node-status').textContent = 'Chain gain must be between 0 and 8.';
                 return;
             }
+            const channels = Number($('chain-node-channels').value);
+            const channelIssues = getChainChannelIssues(chainNodeDraft, channels);
+            if (channelIssues.length) {
+                $('chain-node-status').textContent = channelIssues.join(' ');
+                updateChainNodeChannelControls();
+                return;
+            }
             for (const binding of dspParameterBindings) {
                 if (!binding.validate()) {
                     binding.control.reportValidity();
@@ -2891,7 +3035,7 @@ function autoOrganizeLayout() {
                 const result = await fetchAPI(`/api/plugins/${encodeURIComponent(plugin.id)}/chain`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name: $('chain-node-name').value.trim(), chain: chainNodeDraft,
-                        chain_gain: gain, active: plugin.active })
+                        chain_gain: gain, channels, active: plugin.active })
                 });
                 if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
                     throw new Error(result.message || 'Chain update was not adopted/persisted');
@@ -2899,7 +3043,7 @@ function autoOrganizeLayout() {
                 chainNodeModalBusy = false;
                 closeChainNodeModal();
             } catch (error) { $('chain-node-status').textContent = error.message; }
-            finally { chainNodeModalBusy = false; $('chain-node-apply').disabled = false; }
+            finally { chainNodeModalBusy = false; updateChainNodeChannelControls(); }
         }
 
         async function saveChainNodeAsPreset() {
@@ -2921,10 +3065,17 @@ function autoOrganizeLayout() {
                 $('chain-node-status').textContent = 'Chain gain must be between 0 and 8.';
                 return;
             }
+            const channels = Number($('chain-node-channels').value);
+            const channelIssues = getChainChannelIssues(chainNodeDraft, channels);
+            if (channelIssues.length) {
+                $('chain-node-status').textContent = channelIssues.join(' ');
+                updateChainNodeChannelControls();
+                return;
+            }
             try {
                 const result = await fetchAPI('/api/plugin-chain-presets', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, chain: chainNodeDraft, chain_gain: gain, active: plugin.active })
+                    body: JSON.stringify({ name, chain: chainNodeDraft, chain_gain: gain, channels, active: plugin.active })
                 });
                 if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
                     throw new Error(result.message || 'Preset could not be saved to cm5audio_settings.json');
@@ -3148,6 +3299,7 @@ function autoOrganizeLayout() {
         function validateDspDiscovery(data) {
             if (!isObject(data) || data.schema_version !== 2 ||
                 !Number.isInteger(data.max_chain_length) || data.max_chain_length < 0 ||
+                (data.max_chain_channels != null && (!Number.isInteger(data.max_chain_channels) || data.max_chain_channels < 1 || data.max_chain_channels > 8)) ||
                 !Array.isArray(data.processors)) {
                 throw new Error('Unsupported or invalid DSP discovery response (expected schema version 2).');
             }
@@ -3155,7 +3307,8 @@ function autoOrganizeLayout() {
             const parameterTypes = new Set(['number', 'integer', 'boolean', 'string', 'enum']);
             for (const processor of data.processors) {
                 if (!isObject(processor) || typeof processor.type !== 'string' || !processor.type ||
-                    types.has(processor.type) || !isObject(processor.defaults) || !Array.isArray(processor.parameters)) {
+                    types.has(processor.type) || !isObject(processor.defaults) || !Array.isArray(processor.parameters) ||
+                    !['per_channel', 'multichannel', 'mono_only'].includes(processor.chain_channel_mode || 'per_channel')) {
                     throw new Error('Invalid processor metadata in DSP discovery response.');
                 }
                 types.add(processor.type);
@@ -3199,15 +3352,15 @@ function autoOrganizeLayout() {
 
         async function loadDspAvailable() {
             const request = ++dspDiscoveryRequest;
-            dspDiscovery = { status: 'loading', processors: [], maxChainLength: null, error: '' };
+            dspDiscovery = { status: 'loading', processors: [], maxChainLength: null, maxChainChannels: 8, error: '' };
             renderDspDiscovery();
             try {
                 const data = validateDspDiscovery(await fetchAPI('/api/dsp/available', { cache: 'no-store' }));
                 if (request !== dspDiscoveryRequest) return;
-                dspDiscovery = { status: 'ready', processors: data.processors, maxChainLength: data.max_chain_length, error: '' };
+                dspDiscovery = { status: 'ready', processors: data.processors, maxChainLength: data.max_chain_length, maxChainChannels: data.max_chain_channels || 8, error: '' };
             } catch (e) {
                 if (request !== dspDiscoveryRequest) return;
-                dspDiscovery = { status: 'error', processors: [], maxChainLength: null, error: e.message };
+                dspDiscovery = { status: 'error', processors: [], maxChainLength: null, maxChainChannels: 8, error: e.message };
                 showError('DSP discovery failed: ' + e.message);
             }
             renderDspDiscovery();

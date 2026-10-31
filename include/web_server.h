@@ -139,6 +139,7 @@ struct PluginNodeInstance {
     // Populated only for the composite plugin_chain node type.
     nlohmann::json chain = nlohmann::json::array();
     float chain_gain = 1.0f;
+    unsigned chain_channels = 1;
 };
 
 struct PluginChainPreset {
@@ -147,6 +148,7 @@ struct PluginChainPreset {
     nlohmann::json chain = nlohmann::json::array();
     float chain_gain = 1.0f;
     bool active = true;
+    unsigned channels = 1;
 };
 
 struct MidiRoute {
@@ -203,20 +205,20 @@ public:
                             bool active, std::shared_ptr<const PluginNodeInstance>& updated,
                             std::string& error);
     bool create_plugin_chain_node(const std::string& name, const nlohmann::json& chain,
-                            float chainGain, bool active, uint32_t requestedId,
+                            float chainGain, bool active, unsigned channels, uint32_t requestedId,
                             std::shared_ptr<const PluginNodeInstance>& created,
                             std::string& error);
     bool update_plugin_chain_node(uint32_t id, const std::string& name,
-                            const nlohmann::json& chain, float chainGain, bool active,
+                            const nlohmann::json& chain, float chainGain, bool active, unsigned channels,
                             std::shared_ptr<const PluginNodeInstance>& updated,
                             std::string& error);
     std::vector<PluginChainPreset> get_plugin_chain_presets() const;
     bool get_plugin_chain_preset(uint32_t id, PluginChainPreset& preset) const;
     bool save_plugin_chain_preset(const std::string& name, const nlohmann::json& chain,
-                            float chainGain, bool active, uint32_t requestedId,
+                            float chainGain, bool active, unsigned channels, uint32_t requestedId,
                             PluginChainPreset& saved, std::string& error);
     bool update_plugin_chain_preset(uint32_t id, const std::string& name,
-                            const nlohmann::json& chain, float chainGain, bool active,
+                            const nlohmann::json& chain, float chainGain, bool active, unsigned channels,
                             PluginChainPreset& updated, std::string& error);
     bool delete_plugin_chain_preset(uint32_t id, std::string& error);
     bool remove_plugin_node(uint32_t id, std::string& error);

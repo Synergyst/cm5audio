@@ -949,5 +949,6 @@ void register_midi_pitch_shifter_processor(ProcessorRegistry& registry)
         {"midi_out", "MIDI Output", ProcessorPortType::MIDI,
          ProcessorPortDirection::OUTPUT, ProcessorChannelLayout{}, {}}
     };
+    descriptor.chain_channel_mode = ProcessorChainChannelMode::MULTICHANNEL;
     registry.register_processor(std::move(descriptor));
 }

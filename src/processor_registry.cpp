@@ -192,11 +192,14 @@ nlohmann::json ProcessorRegistry::discovery() const {
         processors.push_back({{"type", descriptor.type}, {"name", descriptor.name},
                               {"description", descriptor.description}, {"defaults", defaults},
                               {"parameters", parameters}, {"ports", std::move(ports)},
+                              {"chain_channel_mode", processor_chain_channel_mode_name(descriptor.chain_channel_mode)},
+                              {"chain_channel_mode_description", processor_chain_channel_mode_description(descriptor.chain_channel_mode)},
                               {"audio", {{"inputs", std::move(audioInputs)},
                                          {"outputs", std::move(audioOutputs)}}}});
     }
     return {{"schema_version", 2}, {"max_chain_length", CM5_MAX_PROCESSORS_PER_ROUTE},
-            {"max_plugin_ports", CM5_MAX_PLUGIN_PORTS}, {"processors", processors}};
+            {"max_plugin_ports", CM5_MAX_PLUGIN_PORTS},
+            {"max_chain_channels", CM5_MAX_CHAIN_CHANNELS}, {"processors", processors}};
 }
 
 void ProcessorRegistry::validate_value(const ProcessorParameter& parameter,

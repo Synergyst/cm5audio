@@ -1,5 +1,6 @@
 #include "plugins/compressor.h"
 #include "processor_registry.h"
+#include <algorithm>
 #include <cmath>
 #include <nlohmann/json.hpp>
 #include <memory>
@@ -14,17 +15,35 @@ CompressorProcessor::CompressorProcessor(float threshold, float ratio,
 }
 
 void CompressorProcessor::process(float* buffer, size_t frames, unsigned channels) {
-    for (size_t i = 0; i < frames * channels; ++i) {
-        float input = buffer[i];
-        float absInput = std::abs(input);
+    if (!buffer || frames == 0 || channels == 0) return;
+
+    const float threshold = m_threshold.load(std::memory_order_relaxed);
+    const float ratio = std::max(1.0f, m_ratio.load(std::memory_order_relaxed));
+
+    // Detect the peak across the complete frame, then apply one shared gain
+    // value to every channel in that frame. This is linked multichannel
+    // compression: a transient on either side cannot pull the stereo image
+    // toward that channel by advancing the detector state separately per
+    // interleaved sample. For mono, the result is the original algorithm.
+    for (size_t frame = 0; frame < frames; ++frame) {
+        float framePeak = 0.0f;
+        const size_t frameOffset = frame * static_cast<size_t>(channels);
+        for (unsigned channel = 0; channel < channels; ++channel)
+            framePeak = std::max(framePeak, std::abs(buffer[frameOffset + channel]));
+
         float targetGain = 1.0f;
-        if (absInput > m_threshold) {
-            targetGain = m_threshold + (absInput - m_threshold) / m_ratio;
-            targetGain /= absInput;
+        if (framePeak > threshold) {
+            targetGain = threshold + (framePeak - threshold) / ratio;
+            targetGain /= framePeak;
         }
-        float coef = (targetGain < m_envelope) ? m_attackCoef : m_releaseCoef;
-        m_envelope = coef * m_envelope + (1.0f - coef) * targetGain;
-        buffer[i] *= m_envelope;
+
+        const float coefficient = (targetGain < m_envelope)
+            ? m_attackCoef : m_releaseCoef;
+        m_envelope = coefficient * m_envelope +
+                     (1.0f - coefficient) * targetGain;
+
+        for (unsigned channel = 0; channel < channels; ++channel)
+            buffer[frameOffset + channel] *= m_envelope;
     }
 }
 
@@ -53,6 +72,7 @@ void register_compressor_processor(ProcessorRegistry& registry) {
                 params.at("attack").get<float>(), params.at("release").get<float>());
         }};
     descriptor.audio_input = {1, 8, 2};
+    descriptor.chain_channel_mode = ProcessorChainChannelMode::MULTICHANNEL;
     descriptor.audio_output = {1, 8, 2};
     registry.register_processor(std::move(descriptor));
 }

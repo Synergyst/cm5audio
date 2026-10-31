@@ -37,6 +37,33 @@ struct ProcessorChannelLayout {
 enum class ProcessorPortType { AUDIO, MIDI };
 enum class ProcessorPortDirection { INPUT, OUTPUT };
 
+// How a processor participates when embedded in a composite plugin chain.
+// PER_CHANNEL creates an independent processor instance/state for every bus
+// channel. MULTICHANNEL runs one instance over the complete interleaved bus.
+// MONO_ONLY rejects composite chains wider than one channel.
+enum class ProcessorChainChannelMode { PER_CHANNEL, MULTICHANNEL, MONO_ONLY };
+
+inline const char* processor_chain_channel_mode_name(ProcessorChainChannelMode mode) noexcept {
+    switch (mode) {
+        case ProcessorChainChannelMode::MULTICHANNEL: return "multichannel";
+        case ProcessorChainChannelMode::MONO_ONLY: return "mono_only";
+        case ProcessorChainChannelMode::PER_CHANNEL:
+        default: return "per_channel";
+    }
+}
+
+inline const char* processor_chain_channel_mode_description(ProcessorChainChannelMode mode) noexcept {
+    switch (mode) {
+        case ProcessorChainChannelMode::MULTICHANNEL:
+            return "One processor instance handles the complete interleaved audio bus.";
+        case ProcessorChainChannelMode::MONO_ONLY:
+            return "This processor is restricted to a one-channel chain.";
+        case ProcessorChainChannelMode::PER_CHANNEL:
+        default:
+            return "An independent mono processor instance and state are used for each channel.";
+    }
+}
+
 inline const char* processor_port_type_name(ProcessorPortType type) noexcept {
     return type == ProcessorPortType::AUDIO ? "audio" : "midi";
 }
@@ -72,6 +99,10 @@ struct ProcessorDescriptor {
     ProcessorChannelLayout audio_input;
     ProcessorChannelLayout audio_output;
     std::vector<ProcessorPortDescriptor> ports;
+
+    // Defines how this processor is run inside a composite chain. Legacy
+    // mono-oriented effects default to independent per-channel instances.
+    ProcessorChainChannelMode chain_channel_mode = ProcessorChainChannelMode::PER_CHANNEL;
 };
 
 // Registration is startup-only. Discovery and creation are read-only and safe

@@ -64,6 +64,7 @@ nlohmann::json plugin_node_json(const PluginNodeInstance& plugin) {
     if (plugin.type == "plugin_chain") {
         result["chain"] = plugin.chain;
         result["chain_gain"] = plugin.chain_gain;
+        result["channels"] = plugin.chain_channels;
         result["processor_count"] = plugin.chain.size();
     }
     return result;
@@ -167,20 +168,51 @@ nlohmann::json build_meter_json_container(const Container& meters, unsigned chan
     return build_meter_json(meters.data(), std::min<unsigned>(channels, static_cast<unsigned>(meters.size())));
 }
 
-// A route DSP chain is a serial, in-place mono processor list. A chain node
-// reuses that exact execution model inside the graph-native plugin scheduler.
-// All child processors are constructed on the control thread; process() only
-// calls already-created processors and performs a bounded gain multiply.
+// Each chain stage owns either one processor instance for the entire interleaved
+// bus, or one independent mono instance per channel. All instances and the
+// scratch buffer are prepared on the control thread; process() never allocates.
+struct PreparedPluginChainStage {
+    ProcessorChainChannelMode channel_mode = ProcessorChainChannelMode::PER_CHANNEL;
+    std::vector<std::unique_ptr<AudioProcessor>> processors;
+};
+
 class PluginChainProcessor final : public AudioProcessor {
 public:
-    PluginChainProcessor(std::vector<std::unique_ptr<AudioProcessor>> processors, float gain)
-        : m_processors(std::move(processors)), m_gain(gain) {}
+    PluginChainProcessor(std::vector<PreparedPluginChainStage> stages,
+                         float gain, unsigned channels)
+        : m_stages(std::move(stages)), m_gain(gain), m_channels(channels),
+          m_channelScratch(CM5_MAX_AUDIO_FRAMES, 0.0f) {}
 
     void process(float* buffer, size_t frames, unsigned channels) override {
-        if (!buffer || frames == 0 || channels == 0) return;
-        for (auto& processor : m_processors) {
-            if (processor) processor->process(buffer, frames, channels);
+        if (!buffer || frames == 0 || channels == 0 ||
+            channels != m_channels || frames > m_channelScratch.size())
+            return;
+
+        for (auto& stage : m_stages) {
+            if (stage.processors.empty()) continue;
+
+            if (stage.channel_mode == ProcessorChainChannelMode::PER_CHANNEL) {
+                if (stage.processors.size() != channels) return;
+                for (unsigned channel = 0; channel < channels; ++channel) {
+                    auto& processor = stage.processors[channel];
+                    if (!processor) continue;
+
+                    for (size_t frame = 0; frame < frames; ++frame)
+                        m_channelScratch[frame] = buffer[frame * channels + channel];
+
+                    processor->process(m_channelScratch.data(), frames, 1);
+
+                    for (size_t frame = 0; frame < frames; ++frame)
+                        buffer[frame * channels + channel] = m_channelScratch[frame];
+                }
+            } else {
+                // MULTICHANNEL processors handle the full interleaved bus.
+                // MONO_ONLY processors reach this path only for channels == 1.
+                if (stage.processors.front())
+                    stage.processors.front()->process(buffer, frames, channels);
+            }
         }
+
         if (m_gain != 1.0f) {
             const size_t count = frames * static_cast<size_t>(channels);
             for (size_t i = 0; i < count; ++i) buffer[i] *= m_gain;
@@ -188,11 +220,44 @@ public:
     }
 
 private:
-    std::vector<std::unique_ptr<AudioProcessor>> m_processors;
+    std::vector<PreparedPluginChainStage> m_stages;
     float m_gain = 1.0f;
+    unsigned m_channels = 1;
+    std::vector<float> m_channelScratch;
 };
 
-nlohmann::json normalize_plugin_chain_definition(const nlohmann::json& rawChain, float chainGain) {
+void validate_plugin_chain_channel_compatibility(
+    const nlohmann::json& rawChain, unsigned channels) {
+    if (channels < 1 || channels > CM5_MAX_CHAIN_CHANNELS)
+        throw std::invalid_argument("Plugin chain channels must be between 1 and " +
+                                    std::to_string(CM5_MAX_CHAIN_CHANNELS));
+
+    for (const auto& item : rawChain) {
+        if (!item.is_object() || !item.contains("type") || !item["type"].is_string())
+            continue; // The normalizer emits the more specific structure error.
+        const std::string type = item["type"].get<std::string>();
+        const ProcessorDescriptor* descriptor = ProcessorRegistry::instance().find(type);
+        if (!descriptor) continue; // The normalizer emits the unknown-type error.
+
+        if (descriptor->chain_channel_mode == ProcessorChainChannelMode::MONO_ONLY && channels != 1)
+            throw std::invalid_argument(type + " is mono-only and cannot be used in a " +
+                                        std::to_string(channels) + "-channel plugin chain");
+
+        const unsigned processorChannels =
+            descriptor->chain_channel_mode == ProcessorChainChannelMode::PER_CHANNEL ? 1u : channels;
+        if (processorChannels < descriptor->audio_input.minimum ||
+            processorChannels > descriptor->audio_input.maximum ||
+            processorChannels < descriptor->audio_output.minimum ||
+            processorChannels > descriptor->audio_output.maximum) {
+            throw std::invalid_argument(type + " does not support the required " +
+                                        std::to_string(processorChannels) +
+                                        "-channel processing mode in this chain");
+        }
+    }
+}
+
+nlohmann::json normalize_plugin_chain_definition(
+    const nlohmann::json& rawChain, float chainGain, unsigned channels) {
     if (!rawChain.is_array()) throw std::invalid_argument("chain must be an array");
     if (rawChain.empty()) throw std::invalid_argument("a plugin chain must contain at least one processor");
     if (rawChain.size() > CM5_MAX_PROCESSORS_PER_ROUTE)
@@ -200,6 +265,9 @@ nlohmann::json normalize_plugin_chain_definition(const nlohmann::json& rawChain,
                                     std::to_string(CM5_MAX_PROCESSORS_PER_ROUTE));
     if (!std::isfinite(chainGain) || chainGain < 0.0f || chainGain > 8.0f)
         throw std::invalid_argument("chain_gain must be finite and between 0 and 8");
+    if (channels < 1 || channels > CM5_MAX_CHAIN_CHANNELS)
+        throw std::invalid_argument("Plugin chain channels must be between 1 and " +
+                                    std::to_string(CM5_MAX_CHAIN_CHANNELS));
 
     nlohmann::json normalizedChain = nlohmann::json::array();
     for (const auto& item : rawChain) {
@@ -241,23 +309,39 @@ nlohmann::json normalize_plugin_chain_definition(const nlohmann::json& rawChain,
         }
         normalizedChain.push_back({{"type", type}, {"params", std::move(normalized)}});
     }
+
+    validate_plugin_chain_channel_compatibility(normalizedChain, channels);
     return normalizedChain;
 }
 
 struct PreparedPluginChain {
     nlohmann::json chain = nlohmann::json::array();
-    std::vector<std::unique_ptr<AudioProcessor>> processors;
+    std::vector<PreparedPluginChainStage> stages;
 };
 
-PreparedPluginChain prepare_plugin_chain(const nlohmann::json& rawChain, float chainGain) {
+PreparedPluginChain prepare_plugin_chain(
+    const nlohmann::json& rawChain, float chainGain, unsigned channels) {
     PreparedPluginChain prepared;
-    prepared.chain = normalize_plugin_chain_definition(rawChain, chainGain);
-    prepared.processors.reserve(prepared.chain.size());
+    prepared.chain = normalize_plugin_chain_definition(rawChain, chainGain, channels);
+    prepared.stages.reserve(prepared.chain.size());
+
     for (const auto& item : prepared.chain) {
-        nlohmann::json normalized;
-        auto processor = ProcessorRegistry::instance().create(
-            item["type"].get<std::string>(), item["params"], normalized);
-        prepared.processors.push_back(std::move(processor));
+        const std::string type = item["type"].get<std::string>();
+        const ProcessorDescriptor* descriptor = ProcessorRegistry::instance().find(type);
+        if (!descriptor) throw std::invalid_argument("Unknown processor type: " + type);
+
+        PreparedPluginChainStage stage;
+        stage.channel_mode = descriptor->chain_channel_mode;
+        const unsigned instanceCount =
+            stage.channel_mode == ProcessorChainChannelMode::PER_CHANNEL ? channels : 1u;
+        stage.processors.reserve(instanceCount);
+        for (unsigned instance = 0; instance < instanceCount; ++instance) {
+            nlohmann::json normalized;
+            auto processor = ProcessorRegistry::instance().create(
+                type, item["params"], normalized);
+            stage.processors.push_back(std::move(processor));
+        }
+        prepared.stages.push_back(std::move(stage));
     }
     return prepared;
 }
@@ -265,6 +349,7 @@ PreparedPluginChain prepare_plugin_chain(const nlohmann::json& rawChain, float c
 nlohmann::json chain_preset_json(const PluginChainPreset& preset) {
     return {{"id", preset.id}, {"name", preset.name}, {"chain", preset.chain},
             {"chain_gain", preset.chain_gain}, {"active", preset.active},
+            {"channels", preset.channels},
             {"processor_count", preset.chain.size()}};
 }
 
@@ -666,7 +751,7 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                     std::string error;
                     if (!save_plugin_chain_preset(value["name"].get<std::string>(), value["chain"],
                             value.value("chain_gain", 1.0f), value.value("active", true),
-                            static_cast<uint32_t>(rawId), restored, error))
+                            value.value("channels", 1u), static_cast<uint32_t>(rawId), restored, error))
                         std::cerr << "[Plugin Chain] Preset restore skipped for " << rawId << ": " << error << std::endl;
                 } catch (const std::exception& error) {
                     std::cerr << "[Plugin Chain] Invalid saved preset: " << error.what() << std::endl;
@@ -691,9 +776,10 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                     bool restoredOk = false;
                     if (type == "plugin_chain") {
                         const nlohmann::json chain = value.value("chain", nlohmann::json::array());
+                        const unsigned chainChannels = value.value("channels", inputChannels);
                         restoredOk = create_plugin_chain_node(name, chain,
                             value.value("chain_gain", 1.0f), value.value("active", true),
-                            static_cast<uint32_t>(rawId), restored, error);
+                            chainChannels, static_cast<uint32_t>(rawId), restored, error);
                     } else if (value.contains("port_channels") && portChannels.is_object()) {
                         restoredOk = create_plugin_node_with_ports(type, name, portChannels, params,
                             static_cast<uint32_t>(rawId), restored, error);
@@ -844,6 +930,7 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
         if (plugin->type == "plugin_chain") {
             item["chain"] = plugin->chain;
             item["chain_gain"] = plugin->chain_gain;
+            item["channels"] = plugin->chain_channels;
         }
         settings["plugin_nodes"].push_back(std::move(item));
     }
@@ -973,12 +1060,12 @@ std::vector<std::shared_ptr<const PluginNodeInstance>> ClientManager::get_plugin
 
 bool ClientManager::create_plugin_chain_node(
     const std::string& name, const nlohmann::json& chain, float chainGain, bool active,
-    uint32_t requestedId, std::shared_ptr<const PluginNodeInstance>& created,
-    std::string& error) {
+    unsigned channels, uint32_t requestedId,
+    std::shared_ptr<const PluginNodeInstance>& created, std::string& error) {
     std::lock_guard<std::recursive_mutex> control(m_control_lock);
     std::vector<std::string> allocatedEndpoints;
     try {
-        auto prepared = prepare_plugin_chain(chain, chainGain);
+        auto prepared = prepare_plugin_chain(chain, chainGain, channels);
         const auto existing = plugin_node_snapshot();
         uint32_t id = requestedId;
         if (id == 0) {
@@ -998,6 +1085,9 @@ bool ClientManager::create_plugin_chain_node(
         node->active = active;
         node->chain = std::move(prepared.chain);
         node->chain_gain = chainGain;
+        node->chain_channels = channels;
+        node->input_channels = channels;
+        node->output_channels = channels;
         node->params = nlohmann::json::object();
 
         node->process_node = register_node(base + "process");
@@ -1011,8 +1101,8 @@ bool ClientManager::create_plugin_chain_node(
         input.type = "audio";
         input.direction = "input";
         input.endpoint = base + "input";
-        input.channels = 1;
-        input.meter_bank = std::make_shared<PluginPortMeterBank>(1);
+        input.channels = channels;
+        input.meter_bank = std::make_shared<PluginPortMeterBank>(channels);
         input.node = register_node(input.endpoint);
         if (input.node == NODE_INVALID)
             throw std::runtime_error("Patchbay node capacity exhausted while allocating plugin chain input");
@@ -1024,8 +1114,8 @@ bool ClientManager::create_plugin_chain_node(
         output.type = "audio";
         output.direction = "output";
         output.endpoint = base + "output";
-        output.channels = 1;
-        output.meter_bank = std::make_shared<PluginPortMeterBank>(1);
+        output.channels = channels;
+        output.meter_bank = std::make_shared<PluginPortMeterBank>(channels);
         output.node = register_node(output.endpoint);
         if (output.node == NODE_INVALID)
             throw std::runtime_error("Patchbay node capacity exhausted while allocating plugin chain output");
@@ -1033,14 +1123,12 @@ bool ClientManager::create_plugin_chain_node(
 
         node->input_endpoint = input.endpoint;
         node->input_node = input.node;
-        node->input_channels = 1;
         node->output_endpoint = output.endpoint;
         node->output_node = output.node;
-        node->output_channels = 1;
         node->ports.push_back(std::move(input));
         node->ports.push_back(std::move(output));
         node->processor = std::make_shared<PluginChainProcessor>(
-            std::move(prepared.processors), chainGain);
+            std::move(prepared.stages), chainGain, channels);
 
         auto next = std::make_shared<std::vector<std::shared_ptr<const PluginNodeInstance>>>(
             existing ? *existing : std::vector<std::shared_ptr<const PluginNodeInstance>>{});
@@ -1070,7 +1158,7 @@ bool ClientManager::create_plugin_chain_node(
 
 bool ClientManager::update_plugin_chain_node(
     uint32_t id, const std::string& name, const nlohmann::json& chain,
-    float chainGain, bool active,
+    float chainGain, bool active, unsigned channels,
     std::shared_ptr<const PluginNodeInstance>& updated, std::string& error) {
     std::lock_guard<std::recursive_mutex> control(m_control_lock);
     try {
@@ -1080,14 +1168,35 @@ bool ClientManager::update_plugin_chain_node(
         if (found == current->end()) throw std::invalid_argument("Plugin chain instance not found");
         if ((*found)->type != "plugin_chain") throw std::invalid_argument("Plugin instance is not a chain node");
 
-        auto prepared = prepare_plugin_chain(chain, chainGain);
+        auto prepared = prepare_plugin_chain(chain, chainGain, channels);
+        const auto routeSnapshot = route_snapshot();
         auto node = std::make_shared<PluginNodeInstance>(**found);
+
+        for (auto& port : node->ports) {
+            if (port.type != "audio") continue;
+            if (port.channels != channels) {
+                if (routeSnapshot) {
+                    for (const auto& route : *routeSnapshot) {
+                        if (route.source_node == port.node && route.source_channel >= channels)
+                            throw std::invalid_argument("Cannot reduce chain width: an output cable uses a channel being removed");
+                        if (route.destination_node == port.node && route.destination_channel >= channels)
+                            throw std::invalid_argument("Cannot reduce chain width: an input cable uses a channel being removed");
+                    }
+                }
+                port.channels = channels;
+                port.meter_bank = std::make_shared<PluginPortMeterBank>(channels);
+            }
+        }
+
         if (!name.empty()) node->name = name;
         node->chain = std::move(prepared.chain);
         node->chain_gain = chainGain;
+        node->chain_channels = channels;
+        node->input_channels = channels;
+        node->output_channels = channels;
         node->active = active;
         node->processor = std::make_shared<PluginChainProcessor>(
-            std::move(prepared.processors), chainGain);
+            std::move(prepared.stages), chainGain, channels);
 
         auto next = std::make_shared<std::vector<std::shared_ptr<const PluginNodeInstance>>>(*current);
         (*next)[static_cast<size_t>(std::distance(current->begin(), found))] = node;
@@ -1121,7 +1230,8 @@ bool ClientManager::get_plugin_chain_preset(uint32_t id, PluginChainPreset& pres
 
 bool ClientManager::save_plugin_chain_preset(
     const std::string& name, const nlohmann::json& chain, float chainGain,
-    bool active, uint32_t requestedId, PluginChainPreset& saved, std::string& error) {
+    bool active, unsigned channels, uint32_t requestedId,
+    PluginChainPreset& saved, std::string& error) {
     std::lock_guard<std::recursive_mutex> control(m_control_lock);
     try {
         std::string cleanName = name;
@@ -1130,7 +1240,7 @@ bool ClientManager::save_plugin_chain_preset(
         cleanName = first == std::string::npos ? std::string() : cleanName.substr(first, last - first + 1);
         if (cleanName.empty() || cleanName.size() > 80)
             throw std::invalid_argument("Preset name must contain 1 to 80 characters");
-        auto normalizedChain = normalize_plugin_chain_definition(chain, chainGain);
+        auto normalizedChain = normalize_plugin_chain_definition(chain, chainGain, channels);
         std::lock_guard<std::mutex> lock(m_chain_preset_lock);
         uint32_t id = requestedId;
         if (id == 0) {
@@ -1141,7 +1251,12 @@ bool ClientManager::save_plugin_chain_preset(
                        [id](const PluginChainPreset& item) { return item.id == id; })) {
             throw std::invalid_argument("Plugin chain preset ID already exists");
         }
-        saved = {id, cleanName, std::move(normalizedChain), chainGain, active};
+        saved.id = id;
+        saved.name = cleanName;
+        saved.chain = std::move(normalizedChain);
+        saved.chain_gain = chainGain;
+        saved.active = active;
+        saved.channels = channels;
         m_pluginChainPresets.push_back(saved);
         if (id >= m_next_chain_preset_id.load(std::memory_order_relaxed) && id < std::numeric_limits<uint32_t>::max())
             m_next_chain_preset_id.store(id + 1, std::memory_order_relaxed);
@@ -1154,7 +1269,8 @@ bool ClientManager::save_plugin_chain_preset(
 
 bool ClientManager::update_plugin_chain_preset(
     uint32_t id, const std::string& name, const nlohmann::json& chain,
-    float chainGain, bool active, PluginChainPreset& updated, std::string& error) {
+    float chainGain, bool active, unsigned channels,
+    PluginChainPreset& updated, std::string& error) {
     std::lock_guard<std::recursive_mutex> control(m_control_lock);
     try {
         if (id == 0) throw std::invalid_argument("Plugin chain preset ID must be nonzero");
@@ -1167,14 +1283,19 @@ bool ClientManager::update_plugin_chain_preset(
 
         // Validate and normalize every processor and parameter before replacing
         // the stored preset, so a bad edit never partially mutates the library.
-        auto normalizedChain = normalize_plugin_chain_definition(chain, chainGain);
+        auto normalizedChain = normalize_plugin_chain_definition(chain, chainGain, channels);
         std::lock_guard<std::mutex> lock(m_chain_preset_lock);
         const auto found = std::find_if(m_pluginChainPresets.begin(), m_pluginChainPresets.end(),
             [id](const PluginChainPreset& item) { return item.id == id; });
         if (found == m_pluginChainPresets.end())
             throw std::invalid_argument("Plugin chain preset not found");
 
-        updated = {id, cleanName, std::move(normalizedChain), chainGain, active};
+        updated.id = id;
+        updated.name = cleanName;
+        updated.chain = std::move(normalizedChain);
+        updated.chain_gain = chainGain;
+        updated.active = active;
+        updated.channels = channels;
         *found = updated;
         return true;
     } catch (const std::exception& exception) {
@@ -2174,7 +2295,8 @@ bool WebServer::start() {
                 PluginChainPreset saved;
                 std::string error;
                 if (!m_clientMgr.save_plugin_chain_preset(body["name"].get<std::string>(), body["chain"],
-                        body.value("chain_gain", 1.0f), body.value("active", true), 0, saved, error))
+                        body.value("chain_gain", 1.0f), body.value("active", true),
+                        body.value("channels", 1u), 0, saved, error))
                     throw std::invalid_argument(error);
                 response.set_content(nlohmann::json({{"status", "ok"}, {"preset", chain_preset_json(saved)}}).dump(2), "application/json");
             } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
@@ -2194,10 +2316,11 @@ bool WebServer::start() {
                 const nlohmann::json chain = body.value("chain", current.chain);
                 const float chainGain = body.value("chain_gain", current.chain_gain);
                 const bool active = body.value("active", current.active);
+                const unsigned channels = body.value("channels", current.channels);
                 PluginChainPreset updated;
                 std::string error;
                 if (!m_clientMgr.update_plugin_chain_preset(presetId, name, chain,
-                        chainGain, active, updated, error))
+                        chainGain, active, channels, updated, error))
                     throw std::invalid_argument(error);
                 response.set_content(nlohmann::json({{"status", "ok"},
                     {"preset", chain_preset_json(updated)}}).dump(2), "application/json");
@@ -2217,7 +2340,7 @@ bool WebServer::start() {
                 std::shared_ptr<const PluginNodeInstance> created;
                 std::string error;
                 if (!m_clientMgr.create_plugin_chain_node(nodeName, preset.chain, preset.chain_gain,
-                        preset.active, 0, created, error)) throw std::invalid_argument(error);
+                        preset.active, preset.channels, 0, created, error)) throw std::invalid_argument(error);
                 response.set_content(nlohmann::json({{"status", "ok"}, {"plugin", plugin_node_json(*created)}}).dump(2), "application/json");
             } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
         });
@@ -2242,7 +2365,7 @@ bool WebServer::start() {
                 std::string error;
                 if (!m_clientMgr.create_plugin_chain_node(body.value("name", std::string("Plugin Chain")),
                         body["chain"], body.value("chain_gain", 1.0f), body.value("active", true),
-                        0, created, error)) throw std::invalid_argument(error);
+                        body.value("channels", 1u), 0, created, error)) throw std::invalid_argument(error);
                 response.set_content(nlohmann::json({{"status", "ok"}, {"plugin", plugin_node_json(*created)}}).dump(2), "application/json");
             } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
         });
@@ -2261,7 +2384,8 @@ bool WebServer::start() {
                 std::string error;
                 if (!m_clientMgr.update_plugin_chain_node(id, body.value("name", (*found)->name),
                         body["chain"], body.value("chain_gain", (*found)->chain_gain),
-                        body.value("active", (*found)->active), updated, error))
+                        body.value("active", (*found)->active),
+                        body.value("channels", (*found)->chain_channels), updated, error))
                     throw std::invalid_argument(error);
                 response.set_content(nlohmann::json({{"status", "ok"}, {"plugin", plugin_node_json(*updated)}}).dump(2), "application/json");
             } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
@@ -2295,7 +2419,7 @@ bool WebServer::start() {
                 std::shared_ptr<const PluginNodeInstance> updated;
                 std::string error;
                 if (!m_clientMgr.update_plugin_chain_node(pluginId, (*nodeIt)->name,
-                        preset.chain, preset.chain_gain, preset.active, updated, error))
+                        preset.chain, preset.chain_gain, preset.active, preset.channels, updated, error))
                     throw std::invalid_argument(error);
 
                 response.set_content(nlohmann::json({{"status", "ok"},
@@ -2357,7 +2481,7 @@ bool WebServer::start() {
                     const nlohmann::json chain = body.value("chain", old->chain);
                     const float chainGain = body.value("chain_gain", old->chain_gain);
                     ok = m_clientMgr.update_plugin_chain_node(id, name, chain, chainGain,
-                        active, updated, error);
+                        active, body.value("channels", old->chain_channels), updated, error);
                 } else if (body.contains("port_channels")) {
                     ok = m_clientMgr.update_plugin_node_with_ports(id, name, body["port_channels"],
                         params, active, updated, error);
@@ -2443,7 +2567,8 @@ bool WebServer::start() {
                 std::shared_ptr<const PluginNodeInstance> chainNode;
                 std::string error;
                 if (!m_clientMgr.create_plugin_chain_node(nodeName, originalDsp.chain,
-                        originalDsp.gain, originalDsp.active, 0, chainNode, error))
+                        originalDsp.gain, originalDsp.active, body.value("channels", 1u),
+                        0, chainNode, error))
                     throw std::invalid_argument(error);
 
                 AudioRoute upstream;

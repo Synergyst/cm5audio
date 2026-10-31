@@ -12,7 +12,9 @@ void LpfProcessor::process(float* buffer, size_t frames, unsigned channels) {
     const float dt = 1.0f / 48000.0f;
     const float alpha = dt / (rc + dt);
 
-    if (m_z.size() != channels) m_z.assign(channels, 0.0f);
+    // The descriptor caps this legacy processor at eight channels. Its state
+    // is allocated in the constructor; never resize a vector on the DSP thread.
+    if (channels == 0 || channels > m_z.size()) return;
 
     for (size_t i = 0; i < frames; ++i) {
         for (unsigned c = 0; c < channels; ++c) {

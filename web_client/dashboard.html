@@ -208,10 +208,41 @@
         .plugin-node-type { display: block; color: var(--text-dim); font-size: 10px; font-weight: normal; margin-top: 3px; }
         .plugin-node-actions { display: flex; gap: 4px; flex-shrink: 0; }
         .plugin-node-actions button { min-height: 25px; padding: 2px 7px; font-size: 10px; }
-        .plugin-node-ports { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .plugin-node-ports { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
         .plugin-node-port-title { color: var(--text-dim); font-size: 10px; font-weight: bold; letter-spacing: .8px; padding: 3px 6px; border-bottom: 1px solid var(--border-color); }
         .plugin-node-port .channel-row { margin: 3px 0; }
         .plugin-node-port .ch-label { width: 42px; }
+        .plugin-node-port.midi-plugin-port { min-width: 0; }
+        .plugin-chain-block { width: 360px; border-color: #8f78b7; }
+        .plugin-chain-block .plugin-node-header { color: #c6b3e8; }
+        .plugin-chain-summary { margin: 8px 0 10px; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: rgba(143,120,183,.08); }
+        .plugin-chain-step { display: flex; align-items: center; gap: 7px; padding: 4px 2px; font-size: 11px; }
+        .plugin-chain-step + .plugin-chain-step { border-top: 1px solid rgba(255,255,255,.06); }
+        .plugin-chain-step-index { color: var(--text-dim); min-width: 18px; font-family: monospace; }
+        .plugin-chain-step-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .plugin-chain-step-arrow { color: var(--accent-blue); text-align: center; font-size: 10px; line-height: 12px; }
+        .plugin-chain-action { border-color: #8f78b7; color: #c6b3e8; }
+        #chain-presets-modal, #chain-node-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(620px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; display: none; z-index: 1002; background: var(--panel-bg); border: 1px solid #8f78b7; border-radius: 10px; padding: 20px; box-shadow: 0 15px 60px rgba(0,0,0,.75); }
+        #chain-presets-modal h2, #chain-node-modal h2 { margin: 0 0 14px; font-size: 16px; color: #c6b3e8; }
+        .chain-preset-item { display: flex; align-items: center; gap: 10px; padding: 9px; border: 1px solid var(--border-color); border-radius: 6px; margin: 7px 0; }
+        .chain-preset-info { flex: 1; min-width: 0; }
+        .chain-preset-info strong { display: block; overflow: hidden; text-overflow: ellipsis; }
+        .chain-preset-info small { color: var(--text-dim); }
+        .chain-modal-steps { max-height: 42vh; overflow: auto; margin: 12px 0; }
+        .chain-modal-step { border: 1px solid var(--border-color); border-radius: 6px; padding: 9px; margin: 6px 0; }
+        .chain-modal-step strong { display: block; margin-bottom: 5px; }
+        .chain-modal-step pre { margin: 0; color: var(--text-dim); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
+        .chain-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+        .midi-port-row { display: flex; align-items: center; min-height: 28px; margin: 4px 2px; padding: 4px 8px; border: 1px solid #8f6ab3; border-radius: 5px; color: #d8b9f2; background: rgba(143,106,179,.10); font-size: 11px; cursor: crosshair; }
+        .midi-port-row.input { justify-content: flex-start; }
+        .midi-port-row.output { justify-content: flex-end; }
+        .midi-port-row.selected { outline: 2px solid #b48ead; background: rgba(180,142,173,.25); }
+        .cable.midi-cable { stroke: #b48ead; stroke-width: 2.5; stroke-dasharray: 6 4; }
+        .cable.midi-cable:hover { filter: drop-shadow(0 0 4px #b48ead); }
+        .plugin-modal-port-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; margin: 8px 0; }
+        .plugin-modal-port { border: 1px solid var(--border-color); border-radius: 6px; padding: 8px; }
+        .plugin-modal-port .control-row { margin: 0; }
+        .plugin-modal-port .dsp-help { font-size: 10px; }
         #plugin-modal {
             position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
             width: min(560px, calc(100vw - 32px)); max-height: 86vh; overflow: auto;
@@ -506,6 +537,7 @@
                 <button onclick="resetZoom()" style="padding: 4px 10px; min-height: 28px;">RESET</button>
                 <button onclick="autoOrganizeLayout()" style="padding: 4px 10px; min-height: 28px; background: #5e81ac; font-weight: bold; margin-left: 5px;">ORGANIZE LAYOUT</button>
                 <button onclick="openPluginModal()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 5px;">ADD PLUGIN NODE</button>
+                <button onclick="openChainPresetsModal()" style="background: #8f78b7; color: #fff; font-weight: bold;">CHAIN PRESETS</button>
                 
                 <!-- Layout Backup & Grid Snap Controls -->
                 <button onclick="exportLayout()" style="background: #a3be8c; color: #000; font-weight: bold; margin-left: 15px;">EXPORT LAYOUT</button>
@@ -608,6 +640,10 @@
             <div id="dsp-discovery-status" class="dsp-help dsp-message" role="status"></div>
             <button id="dsp-discovery-retry" class="dsp-small-btn" onclick="loadDspAvailable()">Refresh processors</button>
             <div id="dsp-chain-list" class="dsp-chain-container"></div>
+            <div class="control-row" style="margin-top: 9px; gap: 8px; flex-wrap: wrap;">
+                <button id="dsp-chain-upgrade" class="plugin-extract-btn" onclick="upgradeEntireChainToNode()">UPGRADE ENTIRE CHAIN TO NODE</button>
+                <button id="dsp-chain-preset" onclick="saveRouteChainAsPreset()">SAVE CHAIN AS PRESET</button>
+            </div>
 
             <div class="control-row" style="margin-top: 10px; gap: 8px;">
                 <select id="new-processor-type" aria-label="Processor to add" style="flex: 1;" disabled></select>
@@ -634,14 +670,7 @@
                 <label for="plugin-modal-name">Node Name</label>
                 <input id="plugin-modal-name" type="text" maxlength="80">
             </div>
-            <div class="control-row">
-                <label for="plugin-modal-input-channels">Audio Input Channels</label>
-                <select id="plugin-modal-input-channels"></select>
-            </div>
-            <div class="control-row">
-                <label for="plugin-modal-output-channels">Audio Output Channels</label>
-                <select id="plugin-modal-output-channels"></select>
-            </div>
+            <div id="plugin-modal-port-controls" class="plugin-modal-port-controls"></div>
             <div class="control-row" id="plugin-modal-active-row">
                 <label for="plugin-modal-active">Processing</label>
                 <select id="plugin-modal-active"><option value="true">ACTIVE</option><option value="false">BYPASS</option></select>
@@ -655,15 +684,37 @@
         </div>
     </div>
 
+    <div id="chain-presets-modal" role="dialog" aria-modal="true" aria-labelledby="chain-presets-title">
+        <h2 id="chain-presets-title">Plugin Chain Presets</h2>
+        <div class="dsp-help">Saved presets live in cm5audio_settings.json and remain available after their chain nodes are deleted.</div>
+        <div id="chain-presets-list" aria-live="polite"></div>
+        <div class="chain-modal-actions"><button type="button" onclick="closeChainPresetsModal()">CLOSE</button></div>
+    </div>
+
+    <div id="chain-node-modal" role="dialog" aria-modal="true" aria-labelledby="chain-node-title">
+        <h2 id="chain-node-title">Plugin Chain Node</h2>
+        <div class="control-row"><label for="chain-node-name">Node Name</label><input id="chain-node-name" type="text" maxlength="80"></div>
+        <div class="control-row"><label for="chain-node-gain">Chain Gain</label><input id="chain-node-gain" type="number" min="0" max="8" step="any"></div>
+        <div class="dsp-help">Processors execute from top to bottom. Processor parameters are retained from the original Route Inspector chain.</div>
+        <div id="chain-node-steps" class="chain-modal-steps"></div>
+        <div id="chain-node-status" role="status" class="dsp-help"></div>
+        <div class="chain-modal-actions">
+            <button type="button" onclick="closeChainNodeModal()">CANCEL</button>
+            <button type="button" onclick="saveChainNodeAsPreset()">SAVE AS PRESET</button>
+            <button type="button" class="primary" id="chain-node-apply" onclick="applyChainNodeSettings()">APPLY</button>
+        </div>
+    </div>
+
     <script>
         const $ = id => document.getElementById(id);
-        let graph = { endpoints: [], routes: [], plugin_nodes: [] };
+        let graph = { endpoints: [], routes: [], plugin_nodes: [], midi_routes: [] };
         let pwGraph = { nodes: {}, links: [] };
         let pwLayoutAssignments = new Map();
         let pipewireGraphLoadInProgress = false;
         let pipewireGraphPollingEnabled = true;
         let pipewireGraphSnapshot = null;
         let activeSource = null;
+        let activeMidiPort = null;
         let editingRouteId = null;
         let activeTabName = 'patchbay';
 
@@ -672,6 +723,9 @@
         let pwEndpointBlocks = new Map();
         let pluginEditingId = null;
         let pluginModalBusy = false;
+        let editingChainNodeId = null;
+        let chainNodeDraft = null;
+        let chainNodeModalBusy = false;
 
         let dspDiscovery = { status: 'idle', processors: [], maxChainLength: null, error: '' };
         let dspDiscoveryRequest = 0;
@@ -1390,6 +1444,7 @@ function autoOrganizeLayout() {
             try {
                 graph = await fetchAPI('/api/graph');
                 if (!Array.isArray(graph.plugin_nodes)) graph.plugin_nodes = [];
+                if (!Array.isArray(graph.midi_routes)) graph.midi_routes = [];
                 renderPatchbay();
                 updateSysInfo();
                 if (!isInitialFitDone && Object.keys(nodePositions).length === 0) {
@@ -1481,6 +1536,24 @@ function autoOrganizeLayout() {
                     cachedMeters.push({ epId, ch: i, fillEl: fill, peakEl: peak });
                 }
             });
+
+            // Plugin meters are keyed by plugin instance and declared audio port.
+            (Array.isArray(graph.plugin_nodes) ? graph.plugin_nodes : []).forEach(plugin => {
+                (Array.isArray(plugin.ports) ? plugin.ports : []).forEach(port => {
+                    if (port.type !== 'audio') return;
+                    const channels = Math.max(0, Number(port.channels) || 0);
+                    for (let channel = 0; channel < channels; channel++) {
+                        const key = `${plugin.id}-${port.id}-${channel}`;
+                        const fill = document.getElementById(`vu-plugin-${key}`);
+                        if (!fill) continue;
+                        const peak = document.getElementById(`peak-plugin-${key}`);
+                        cachedMeters.push({
+                            pluginId: String(plugin.id), portId: port.id,
+                            ch: channel, fillEl: fill, peakEl: peak
+                        });
+                    }
+                });
+            });
         }
 
         function renderPatchbay() {
@@ -1540,7 +1613,7 @@ function autoOrganizeLayout() {
                 }
             });
             nodes.forEach(plugin => {
-                const signature = `${plugin.type}:${plugin.input_channels}:${plugin.output_channels}`;
+                const signature = `${plugin.type}:${JSON.stringify(plugin.ports || [])}:${JSON.stringify(plugin.chain || [])}:${Number(plugin.chain_gain ?? 1)}`;
                 let block = pluginNodeBlocks.get(plugin.id);
                 if (block && block.dataset.signature !== signature) {
                     block.remove();
@@ -1569,9 +1642,10 @@ function autoOrganizeLayout() {
         function createPluginNodeBlock(plugin) {
             const block = document.createElement('div');
             block.className = 'endpoint-block plugin-node-block';
+            block.classList.toggle('plugin-chain-block', plugin.type === 'plugin_chain');
             block.id = `plugin-block-${plugin.id}`;
             block.dataset.epId = `plugin/${plugin.id}`;
-            block.dataset.signature = `${plugin.type}:${plugin.input_channels}:${plugin.output_channels}`;
+            block.dataset.signature = `${plugin.type}:${JSON.stringify(plugin.ports || [])}:${JSON.stringify(plugin.chain || [])}:${Number(plugin.chain_gain ?? 1)}`;
             block.classList.toggle('plugin-bypassed', !plugin.active);
             const positionKey = `plugin/${plugin.id}`;
             const position = nodePositions[positionKey] || { x: 680, y: Number(plugin.id) * 190 };
@@ -1585,7 +1659,9 @@ function autoOrganizeLayout() {
             titleWrap.appendChild(document.createTextNode(plugin.name || plugin.type));
             const typeLabel = document.createElement('span');
             typeLabel.className = 'plugin-node-type';
-            typeLabel.textContent = plugin.type;
+            typeLabel.textContent = plugin.type === 'plugin_chain'
+                ? `PLUGIN CHAIN · ${(plugin.chain || []).length} PROCESSOR${(plugin.chain || []).length === 1 ? '' : 'S'}`
+                : plugin.type;
             titleWrap.appendChild(typeLabel);
             const actions = document.createElement('span');
             actions.className = 'plugin-node-actions';
@@ -1605,7 +1681,8 @@ function autoOrganizeLayout() {
             settings.addEventListener('pointerdown', event => event.stopPropagation());
             settings.addEventListener('click', event => {
                 event.stopPropagation();
-                openPluginModal(plugin.id);
+                if (plugin.type === 'plugin_chain') openChainNodeModal(plugin.id);
+                else openPluginModal(plugin.id);
             });
             const remove = document.createElement('button');
             remove.type = 'button';
@@ -1616,57 +1693,118 @@ function autoOrganizeLayout() {
                 event.stopPropagation();
                 removePluginNode(plugin.id);
             });
-            actions.append(bypass, settings, remove);
+            if (plugin.type === 'plugin_chain') {
+                const savePreset = document.createElement('button');
+                savePreset.type = 'button';
+                savePreset.textContent = 'PRESET';
+                savePreset.title = 'Save this chain as a reusable preset';
+                savePreset.className = 'plugin-chain-action';
+                savePreset.addEventListener('pointerdown', event => event.stopPropagation());
+                savePreset.addEventListener('click', event => {
+                    event.stopPropagation();
+                    savePluginNodeChainAsPreset(plugin.id);
+                });
+                actions.append(bypass, settings, savePreset, remove);
+            } else actions.append(bypass, settings, remove);
             header.append(titleWrap, actions);
             block.appendChild(header);
             setupBlockDragging(block, positionKey);
 
+            if (plugin.type === 'plugin_chain') {
+                const summary = document.createElement('div');
+                summary.className = 'plugin-chain-summary';
+                const steps = Array.isArray(plugin.chain) ? plugin.chain : [];
+                if (!steps.length) summary.textContent = 'Empty chain';
+                steps.forEach((step, index) => {
+                    const row = document.createElement('div');
+                    row.className = 'plugin-chain-step';
+                    const number = document.createElement('span');
+                    number.className = 'plugin-chain-step-index';
+                    number.textContent = String(index + 1).padStart(2, '0');
+                    const name = document.createElement('span');
+                    name.className = 'plugin-chain-step-name';
+                    const descriptor = getProcessorDescriptor(step.type);
+                    name.textContent = descriptor?.name || step.type || 'Unknown processor';
+                    row.append(number, name);
+                    summary.appendChild(row);
+                    if (index < steps.length - 1) {
+                        const arrow = document.createElement('div');
+                        arrow.className = 'plugin-chain-step-arrow';
+                        arrow.textContent = '↓';
+                        summary.appendChild(arrow);
+                    }
+                });
+                const count = document.createElement('div');
+                count.className = 'dsp-help';
+                count.textContent = `${steps.length} processor${steps.length === 1 ? '' : 's'} · Gain ${Number(plugin.chain_gain ?? 1).toFixed(2)}`;
+                summary.appendChild(count);
+                block.appendChild(summary);
+            }
+
             const ports = document.createElement('div');
             ports.className = 'plugin-node-ports';
-            const inputPort = graph.endpoints.find(endpoint => endpoint.id === plugin.input_endpoint) || {
-                id: plugin.input_endpoint, direction: 'destination', channels: plugin.input_channels
-            };
-            const outputPort = graph.endpoints.find(endpoint => endpoint.id === plugin.output_endpoint) || {
-                id: plugin.output_endpoint, direction: 'source', channels: plugin.output_channels
-            };
-            const makePort = (endpoint, title, channelCount, isOutput) => {
+            const declaredPorts = Array.isArray(plugin.ports) ? plugin.ports : [
+                { id: 'audio_in', name: 'Audio Input', type: 'audio', direction: 'input', endpoint: plugin.input_endpoint, channels: plugin.input_channels },
+                { id: 'audio_out', name: 'Audio Output', type: 'audio', direction: 'output', endpoint: plugin.output_endpoint, channels: plugin.output_channels }
+            ];
+            declaredPorts.forEach(port => {
                 const column = document.createElement('div');
                 column.className = 'plugin-node-port';
                 const label = document.createElement('div');
                 label.className = 'plugin-node-port-title';
-                label.textContent = `${title} · ${channelCount} CH`;
-                column.appendChild(label);
-                for (let channel = 0; channel < channelCount; channel++) {
-                    const row = document.createElement('div');
-                    row.className = 'channel-row';
-                    row.id = `slot-${endpoint.id}-${channel}`;
-                    row.dataset.endpointId = endpoint.id;
-                    row.dataset.endpointDirection = endpoint.direction;
-                    row.dataset.channel = String(channel);
-                    const channelLabel = document.createElement('span');
-                    channelLabel.className = 'ch-label';
-                    channelLabel.textContent = `CH${channel + 1}`;
-                    if (isOutput) {
+                const isOutput = port.direction === 'output';
+                if (port.type === 'audio') {
+                    const endpoint = graph.endpoints.find(item => item.id === port.endpoint) || {
+                        id: port.endpoint, direction: isOutput ? 'source' : 'destination', channels: port.channels || 1
+                    };
+                    label.textContent = `${port.name || port.id} · ${Number(port.channels || endpoint.channels || 1)} CH`;
+                    column.appendChild(label);
+                    const channelCount = Math.max(1, Number(port.channels || endpoint.channels || 1));
+                    for (let channel = 0; channel < channelCount; channel++) {
+                        const row = document.createElement('div');
+                        row.className = 'channel-row';
+                        row.id = `slot-${endpoint.id}-${channel}`;
+                        row.dataset.endpointId = endpoint.id;
+                        row.dataset.endpointDirection = endpoint.direction;
+                        row.dataset.channel = String(channel);
+                        const channelLabel = document.createElement('span');
+                        channelLabel.className = 'ch-label';
+                        channelLabel.textContent = `CH${channel + 1}`;
                         const meter = document.createElement('div');
                         meter.className = 'vu-container';
-                        row.append(meter, channelLabel);
-                    } else {
-                        row.append(channelLabel, document.createElement('div'));
+                        const meterKey = `${plugin.id}-${port.id}-${channel}`;
+                        const fill = document.createElement('div');
+                        fill.className = 'vu-fill';
+                        fill.id = `vu-plugin-${meterKey}`;
+                        const peak = document.createElement('div');
+                        peak.className = 'vu-peak';
+                        peak.id = `peak-plugin-${meterKey}`;
+                        meter.append(fill, peak);
+                        if (isOutput) row.append(meter, channelLabel);
+                        else row.append(channelLabel, meter);
+                        row.addEventListener('click', () => handleSlotClick(endpoint, channel));
+                        if (isOutput) row.addEventListener('pointerdown', event =>
+                            beginWiringDrag(endpoint, channel, row, event));
+                        column.appendChild(row);
                     }
-                    row.addEventListener('click', () => handleSlotClick(endpoint, channel));
-                    if (isOutput) {
-                        row.addEventListener('pointerdown', event =>
-                            beginWiringDrag(endpoint, channel, row, event)
-                        );
-                    }
+                } else if (port.type === 'midi') {
+                    column.classList.add('midi-plugin-port');
+                    label.textContent = `${port.name || port.id} · MIDI ${isOutput ? 'OUT' : 'IN'}`;
+                    column.appendChild(label);
+                    const row = document.createElement('div');
+                    row.className = `midi-port-row ${isOutput ? 'output' : 'input'}`;
+                    row.id = `midi-slot-${port.endpoint}`;
+                    row.dataset.endpointId = port.endpoint;
+                    row.dataset.endpointDirection = port.direction;
+                    row.textContent = isOutput ? `MIDI OUT · ${port.name || port.id}` : `MIDI IN · ${port.name || port.id}`;
+                    row.title = isOutput ? 'Select as MIDI cable source' : 'Connect selected MIDI output here';
+                    row.addEventListener('click', () => handleMidiPortClick(port, row));
                     column.appendChild(row);
+                } else {
+                    return;
                 }
-                return column;
-            };
-            ports.append(
-                makePort(inputPort, 'AUDIO IN', plugin.input_channels, false),
-                makePort(outputPort, 'AUDIO OUT', plugin.output_channels, true)
-            );
+                ports.appendChild(column);
+            });
             block.appendChild(ports);
             return block;
         }
@@ -2017,17 +2155,41 @@ function autoOrganizeLayout() {
             return dspDiscovery.processors.find(processor => processor.type === type);
         }
 
-        function populateChannelOptions(select, port, selected) {
-            select.replaceChildren();
-            const minimum = Number(port?.min_channels ?? 1);
-            const maximum = Number(port?.max_channels ?? 1);
-            const fallback = Number(port?.default_channels ?? minimum);
-            for (let channels = minimum; channels <= maximum; channels++) {
-                const option = dspText('option', `${channels} channel${channels === 1 ? '' : 's'}`);
-                option.value = String(channels);
-                select.appendChild(option);
-            }
-            select.value = String(selected ?? fallback);
+        function renderPluginModalPortControls(descriptor, selectedPortChannels = {}) {
+            const container = $('plugin-modal-port-controls');
+            container.replaceChildren();
+            const ports = Array.isArray(descriptor?.ports) ? descriptor.ports : [];
+            let audioPortCount = 0;
+            ports.forEach(port => {
+                const card = dspText('div', '', 'plugin-modal-port');
+                const heading = dspText('div', `${port.name || port.id} · ${String(port.type).toUpperCase()} ${String(port.direction).toUpperCase()}`, 'dsp-help');
+                card.appendChild(heading);
+                if (port.type === 'audio') {
+                    audioPortCount++;
+                    const row = dspText('div', '', 'control-row');
+                    const label = dspText('label', 'Channels');
+                    const select = document.createElement('select');
+                    select.dataset.pluginPortChannels = port.id;
+                    const minimum = Number(port.min_channels ?? 1);
+                    const maximum = Number(port.max_channels ?? 1);
+                    const fallback = Number(selectedPortChannels[port.id] ?? port.default_channels ?? minimum);
+                    for (let count = minimum; count <= maximum; count++) {
+                        const option = dspText('option', `${count} channel${count === 1 ? '' : 's'}`);
+                        option.value = String(count);
+                        select.appendChild(option);
+                    }
+                    select.value = String(fallback);
+                    label.appendChild(select);
+                    row.appendChild(label);
+                    card.appendChild(row);
+                } else if (port.type === 'midi') {
+                    card.appendChild(dspText('div', 'Event stream · no audio channel count', 'dsp-help'));
+                    if (port.source_parameter) card.appendChild(dspText('div', 'External source selection is configured in the plugin parameters.', 'dsp-help'));
+                }
+                container.appendChild(card);
+            });
+            if (!audioPortCount && !ports.some(port => port.type === 'midi'))
+                container.appendChild(dspText('div', 'This processor declares no external ports.', 'dsp-help'));
         }
 
         function renderPluginModalParameters(descriptor, values) {
@@ -2096,7 +2258,11 @@ function autoOrganizeLayout() {
             $('plugin-modal-name').value = plugin?.name || '';
             $('plugin-modal-active-row').hidden = !editing;
             $('plugin-modal-active').value = String(plugin?.active ?? true);
-            onPluginModalTypeChange(plugin?.input_channels, plugin?.output_channels, plugin?.params || {});
+            const selectedPortChannels = {};
+            (plugin?.ports || []).forEach(port => {
+                if (port.type === 'audio') selectedPortChannels[port.id] = port.channels;
+            });
+            onPluginModalTypeChange(selectedPortChannels, plugin?.params || {});
             $('plugin-modal-status').textContent = '';
             $('plugin-modal-save').textContent = editing ? 'APPLY SETTINGS' : 'CREATE NODE';
             $('plugin-modal-save').disabled = false;
@@ -2104,12 +2270,11 @@ function autoOrganizeLayout() {
             $('plugin-modal').style.display = 'block';
         }
 
-        function onPluginModalTypeChange(inputChannels, outputChannels, params = {}) {
+        function onPluginModalTypeChange(selectedPortChannels = {}, params = {}) {
             const descriptor = getProcessorDescriptor($('plugin-modal-type').value);
             if (!descriptor) return;
-            populateChannelOptions($('plugin-modal-input-channels'), descriptor.audio?.inputs?.[0], inputChannels);
-            populateChannelOptions($('plugin-modal-output-channels'), descriptor.audio?.outputs?.[0], outputChannels);
-            renderPluginModalParameters(descriptor, params);
+            renderPluginModalPortControls(descriptor, selectedPortChannels || {});
+            renderPluginModalParameters(descriptor, params || {});
         }
 
         function readPluginModalParams(descriptor) {
@@ -2138,10 +2303,19 @@ function autoOrganizeLayout() {
             const descriptor = getProcessorDescriptor($('plugin-modal-type').value);
             if (!descriptor) return;
             try {
+                const portChannels = {};
+                $('plugin-modal-port-controls').querySelectorAll('[data-plugin-port-channels]').forEach(control => {
+                    const count = Number(control.value);
+                    if (!Number.isInteger(count) || count < 1) throw new Error(`Invalid channel count for ${control.dataset.pluginPortChannels}`);
+                    portChannels[control.dataset.pluginPortChannels] = count;
+                });
+                const firstAudioInput = (descriptor.ports || []).find(port => port.type === 'audio' && port.direction === 'input');
+                const firstAudioOutput = (descriptor.ports || []).find(port => port.type === 'audio' && port.direction === 'output');
                 const payload = {
                     name: $('plugin-modal-name').value.trim() || descriptor.name || descriptor.type,
-                    input_channels: Number($('plugin-modal-input-channels').value),
-                    output_channels: Number($('plugin-modal-output-channels').value),
+                    port_channels: portChannels,
+                    input_channels: firstAudioInput ? (portChannels[firstAudioInput.id] ?? firstAudioInput.default_channels) : 1,
+                    output_channels: firstAudioOutput ? (portChannels[firstAudioOutput.id] ?? firstAudioOutput.default_channels) : 1,
                     active: $('plugin-modal-active').value === 'true',
                     params: readPluginModalParams(descriptor)
                 };
@@ -2172,7 +2346,9 @@ function autoOrganizeLayout() {
         }
 
         function closeActiveModal() {
-            if ($('plugin-modal').style.display === 'block') closePluginModal();
+            if ($('chain-node-modal').style.display === 'block') closeChainNodeModal();
+            else if ($('chain-presets-modal').style.display === 'block') closeChainPresetsModal();
+            else if ($('plugin-modal').style.display === 'block') closePluginModal();
             else closeModal();
         }
 
@@ -2180,21 +2356,29 @@ function autoOrganizeLayout() {
             const plugin = (graph.plugin_nodes || []).find(item => item.id === id);
             if (!plugin) return;
             try {
-                const result = await fetchAPI(`/api/plugins/${encodeURIComponent(id)}`, {
+                const isChain = plugin.type === 'plugin_chain';
+                const payload = isChain
+                    ? { active, name: plugin.name, chain: plugin.chain, chain_gain: plugin.chain_gain ?? 1 }
+                    : { active, name: plugin.name,
+                        port_channels: Object.fromEntries((plugin.ports || []).filter(port => port.type === 'audio').map(port => [port.id, port.channels])),
+                        input_channels: plugin.input_channels, output_channels: plugin.output_channels, params: plugin.params };
+                const result = await fetchAPI(isChain
+                    ? `/api/plugins/${encodeURIComponent(id)}/chain`
+                    : `/api/plugins/${encodeURIComponent(id)}`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ active, name: plugin.name, input_channels: plugin.input_channels,
-                        output_channels: plugin.output_channels, params: plugin.params })
+                    body: JSON.stringify(payload)
                 });
-                if (result.status !== 'ok' || result.adopted !== true) throw new Error(result.message || 'Plugin state adoption was not confirmed');
+                if (result.status !== 'ok' || result.adopted !== true || (isChain && result.persisted !== true))
+                    throw new Error(result.message || 'Plugin state adoption/persistence was not confirmed');
                 await loadGraph();
             } catch (error) { showError('Plugin state change failed: ' + error.message); }
         }
 
         async function removePluginNode(id) {
-            if (!confirm('Remove this plugin node and all of its connected audio routes?')) return;
+            if (!confirm('Remove this plugin node and all of its connected audio and MIDI cables?')) return;
             try {
                 const result = await fetchAPI(`/api/plugins/${encodeURIComponent(id)}`, { method: 'DELETE' });
-                if (result.status !== 'ok' || result.adopted !== true) throw new Error(result.message || 'Plugin removal was not confirmed');
+                if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true) throw new Error(result.message || 'Plugin removal was not confirmed/persisted');
                 await loadGraph();
             } catch (error) { showError('Plugin removal failed: ' + error.message); }
         }
@@ -2230,7 +2414,298 @@ function autoOrganizeLayout() {
             }
         }
 
+        async function upgradeEntireChainToNode() {
+            if (modalBusy || editingRouteId === null || !currentRouteDspState) return;
+            let draft;
+            try { draft = validatedRouteDraft(); }
+            catch (error) { setRouteError(error.message); return; }
+            if (!draft.dsp.chain.length) { setRouteError('There are no processors to upgrade.'); return; }
+            if (!confirm(`Convert all ${draft.dsp.chain.length} processors into one plugin chain node? The route will be split around the new node.`)) return;
+            const routeId = editingRouteId;
+            modalBusy = true;
+            updateModalControls();
+            try {
+                const applied = await fetchAPI(`/api/routes/${encodeURIComponent(routeId)}/apply`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft)
+                });
+                if (applied.status !== 'ok' || applied.adopted !== true)
+                    throw new Error(applied.message || 'Route DSP changes were not confirmed');
+                const result = await fetchAPI('/api/plugins/extract-chain', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ route_id: routeId, name: 'Plugin Chain' })
+                });
+                if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
+                    throw new Error(result.message || 'Whole-chain conversion was not confirmed/persisted');
+                modalBusy = false;
+                closeModal();
+                await loadGraph();
+            } catch (error) {
+                setRouteError('Whole-chain conversion failed: ' + error.message);
+                modalBusy = false;
+                updateModalControls();
+            }
+        }
+
+        async function saveRouteChainAsPreset() {
+            if (modalBusy || !currentRouteDspState) return;
+            let draft;
+            try { draft = validatedRouteDraft(); }
+            catch (error) { setRouteError(error.message); return; }
+            if (!draft.dsp.chain.length) { setRouteError('There are no processors to save as a preset.'); return; }
+            const name = prompt('Name this plugin chain preset:');
+            if (name === null) return;
+            try {
+                const result = await fetchAPI('/api/plugin-chain-presets', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, chain: draft.dsp.chain, chain_gain: draft.dsp.gain, active: draft.dsp.active })
+                });
+                if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
+                    throw new Error(result.message || 'Preset could not be saved to cm5audio_settings.json');
+                setRouteError();
+                alert(`Saved chain preset: ${result.preset.name}`);
+            } catch (error) { setRouteError('Saving chain preset failed: ' + error.message); }
+        }
+
+        async function savePluginNodeChainAsPreset(id) {
+            const plugin = (graph.plugin_nodes || []).find(item => item.id === id && item.type === 'plugin_chain');
+            if (!plugin) return;
+            const name = prompt('Name this plugin chain preset:', plugin.name || 'Plugin Chain');
+            if (name === null) return;
+            try {
+                const result = await fetchAPI('/api/plugin-chain-presets', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, chain: plugin.chain, chain_gain: plugin.chain_gain ?? 1, active: plugin.active })
+                });
+                if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
+                    throw new Error(result.message || 'Preset could not be persisted');
+                alert(`Saved chain preset: ${result.preset.name}`);
+            } catch (error) { showError('Saving chain preset failed: ' + error.message); }
+        }
+
+        async function openChainPresetsModal() {
+            $('chain-presets-modal').style.display = 'block';
+            $('overlay').style.display = 'block';
+            await refreshChainPresets();
+        }
+
+        function closeChainPresetsModal() {
+            $('chain-presets-modal').style.display = 'none';
+            if ($('route-modal').style.display !== 'block' && $('plugin-modal').style.display !== 'block' && $('chain-node-modal').style.display !== 'block')
+                $('overlay').style.display = 'none';
+        }
+
+        async function refreshChainPresets() {
+            const container = $('chain-presets-list');
+            container.replaceChildren(dspText('div', 'Loading presets…', 'dsp-help'));
+            try {
+                const data = await fetchAPI('/api/plugin-chain-presets', { cache: 'no-store' });
+                container.replaceChildren();
+                const presets = Array.isArray(data.presets) ? data.presets : [];
+                if (!presets.length) {
+                    container.appendChild(dspText('div', 'No saved plugin chain presets yet.', 'dsp-help'));
+                    return;
+                }
+                presets.forEach(preset => {
+                    const row = dspText('div', '', 'chain-preset-item');
+                    const info = dspText('div', '', 'chain-preset-info');
+                    info.append(dspText('strong', preset.name || `Preset #${preset.id}`),
+                        dspText('small', `${preset.processor_count ?? (preset.chain || []).length} processors · Gain ${Number(preset.chain_gain ?? 1).toFixed(2)}${preset.active === false ? ' · Bypassed' : ''}`));
+                    const restore = dspButton('RESTORE', async () => {
+                        restore.disabled = true;
+                        try {
+                            const result = await fetchAPI(`/api/plugin-chain-presets/${encodeURIComponent(preset.id)}/instantiate`, {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: preset.name })
+                            });
+                            if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
+                                throw new Error(result.message || 'Preset restoration was not confirmed/persisted');
+                            closeChainPresetsModal();
+                            await loadGraph();
+                        } catch (error) { showError('Preset restoration failed: ' + error.message); restore.disabled = false; }
+                    });
+                    const remove = dspButton('DELETE', async () => {
+                        if (!confirm(`Delete saved preset “${preset.name}”? Existing chain nodes will not be affected.`)) return;
+                        remove.disabled = true;
+                        try {
+                            const result = await fetchAPI(`/api/plugin-chain-presets/${encodeURIComponent(preset.id)}`, { method: 'DELETE' });
+                            if (result.status !== 'ok' || result.persisted !== true)
+                                throw new Error(result.message || 'Preset deletion was not persisted');
+                            await refreshChainPresets();
+                        } catch (error) { showError('Preset deletion failed: ' + error.message); remove.disabled = false; }
+                    }, 'remove-btn');
+                    row.append(info, restore, remove);
+                    container.appendChild(row);
+                });
+            } catch (error) {
+                container.replaceChildren(dspText('div', 'Could not load presets: ' + error.message, 'dsp-warning'));
+            }
+        }
+
+        function openChainNodeModal(id) {
+            const plugin = (graph.plugin_nodes || []).find(item => item.id === id && item.type === 'plugin_chain');
+            if (!plugin) return;
+            editingChainNodeId = id;
+            chainNodeDraft = cloneJson(plugin.chain || []);
+            dspParameterBindings = [];
+            $('chain-node-title').textContent = `Plugin Chain Node #${id}`;
+            $('chain-node-name').value = plugin.name || 'Plugin Chain';
+            $('chain-node-gain').value = Number(plugin.chain_gain ?? 1);
+            $('chain-node-status').textContent = '';
+            const list = $('chain-node-steps');
+            list.replaceChildren();
+            chainNodeDraft.forEach((step, index) => {
+                const card = dspText('div', '', 'chain-modal-step');
+                const descriptor = getProcessorDescriptor(step.type);
+                card.appendChild(dspText('strong', `${index + 1}. ${descriptor?.name || step.type}`));
+                if (descriptor && isObject(step.params)) {
+                    const params = dspText('div', '', 'dsp-processor-params');
+                    descriptor.parameters.forEach(parameter =>
+                        renderDspParameter(step, descriptor, parameter, params, index));
+                    const known = new Set(descriptor.parameters.map(parameter => parameter.id));
+                    const unknown = Object.keys(step.params).filter(key => !known.has(key));
+                    if (unknown.length)
+                        params.appendChild(dspText('div', `Preserved unknown parameters: ${unknown.join(', ')}`, 'dsp-help dsp-warning'));
+                    if (!params.children.length) params.appendChild(dspText('div', 'No parameters.', 'dsp-help'));
+                    card.appendChild(params);
+                } else {
+                    card.appendChild(dspText('pre', displayJson(step.params || {})));
+                    card.appendChild(dspText('div', 'Processor metadata is unavailable; saved parameters are preserved read-only.', 'dsp-help dsp-warning'));
+                }
+                list.appendChild(card);
+            });
+            $('chain-node-modal').style.display = 'block';
+            $('overlay').style.display = 'block';
+        }
+
+        function closeChainNodeModal() {
+            if (chainNodeModalBusy) return;
+            editingChainNodeId = null;
+            chainNodeDraft = null;
+            dspParameterBindings = [];
+            $('chain-node-modal').style.display = 'none';
+            if ($('route-modal').style.display !== 'block' && $('plugin-modal').style.display !== 'block' && $('chain-presets-modal').style.display !== 'block')
+                $('overlay').style.display = 'none';
+        }
+
+        async function applyChainNodeSettings() {
+            if (chainNodeModalBusy || editingChainNodeId === null) return;
+            const plugin = (graph.plugin_nodes || []).find(item => item.id === editingChainNodeId && item.type === 'plugin_chain');
+            if (!plugin) return;
+            const gain = $('chain-node-gain').value.trim() === '' ? NaN : Number($('chain-node-gain').value);
+            if (!Number.isFinite(gain) || gain < 0 || gain > 8) {
+                $('chain-node-status').textContent = 'Chain gain must be between 0 and 8.';
+                return;
+            }
+            for (const binding of dspParameterBindings) {
+                if (!binding.validate()) {
+                    binding.control.reportValidity();
+                    $('chain-node-status').textContent = 'Correct the highlighted processor parameter before applying.';
+                    return;
+                }
+            }
+            dspParameterBindings.forEach(binding => binding.commit());
+            chainNodeModalBusy = true;
+            $('chain-node-apply').disabled = true;
+            try {
+                const result = await fetchAPI(`/api/plugins/${encodeURIComponent(plugin.id)}/chain`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: $('chain-node-name').value.trim(), chain: chainNodeDraft,
+                        chain_gain: gain, active: plugin.active })
+                });
+                if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
+                    throw new Error(result.message || 'Chain update was not adopted/persisted');
+                await loadGraph();
+                chainNodeModalBusy = false;
+                closeChainNodeModal();
+            } catch (error) { $('chain-node-status').textContent = error.message; }
+            finally { chainNodeModalBusy = false; $('chain-node-apply').disabled = false; }
+        }
+
+        async function saveChainNodeAsPreset() {
+            if (editingChainNodeId === null || !Array.isArray(chainNodeDraft)) return;
+            for (const binding of dspParameterBindings) {
+                if (!binding.validate()) {
+                    binding.control.reportValidity();
+                    $('chain-node-status').textContent = 'Correct the highlighted processor parameter before saving the preset.';
+                    return;
+                }
+            }
+            dspParameterBindings.forEach(binding => binding.commit());
+            const plugin = (graph.plugin_nodes || []).find(item => item.id === editingChainNodeId);
+            if (!plugin) return;
+            const name = prompt('Name this plugin chain preset:', plugin.name || 'Plugin Chain');
+            if (name === null) return;
+            const gain = $('chain-node-gain').value.trim() === '' ? NaN : Number($('chain-node-gain').value);
+            if (!Number.isFinite(gain) || gain < 0 || gain > 8) {
+                $('chain-node-status').textContent = 'Chain gain must be between 0 and 8.';
+                return;
+            }
+            try {
+                const result = await fetchAPI('/api/plugin-chain-presets', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, chain: chainNodeDraft, chain_gain: gain, active: plugin.active })
+                });
+                if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
+                    throw new Error(result.message || 'Preset could not be saved to cm5audio_settings.json');
+                $('chain-node-status').textContent = `Saved preset: ${result.preset.name}`;
+            } catch (error) { $('chain-node-status').textContent = error.message; }
+        }
+
+        function clearMidiPortSelection() {
+            document.querySelectorAll('.midi-port-row.selected').forEach(row => row.classList.remove('selected'));
+            activeMidiPort = null;
+        }
+
+        async function handleMidiPortClick(port, row) {
+            document.querySelectorAll('.channel-row.selected').forEach(item => item.classList.remove('selected'));
+            activeSource = null;
+            const direction = port.direction;
+            if (!activeMidiPort) {
+                activeMidiPort = { endpoint: port.endpoint, direction };
+                row.classList.add('selected');
+                return;
+            }
+            if (activeMidiPort.endpoint === port.endpoint) {
+                clearMidiPortSelection();
+                return;
+            }
+            const previous = activeMidiPort;
+            if (previous.direction === direction) {
+                clearMidiPortSelection();
+                activeMidiPort = { endpoint: port.endpoint, direction };
+                row.classList.add('selected');
+                return;
+            }
+            const source = previous.direction === 'output' ? previous.endpoint : port.endpoint;
+            const destination = previous.direction === 'input' ? previous.endpoint : port.endpoint;
+            try {
+                const result = await fetchAPI('/api/midi/routes', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source, destination })
+                });
+                if (result.status !== 'ok' || result.adopted !== true)
+                    throw new Error(result.message || 'MIDI graph adoption was not confirmed');
+                clearMidiPortSelection();
+                await loadGraph();
+            } catch (error) {
+                showError('MIDI connection failed: ' + error.message);
+                clearMidiPortSelection();
+            }
+        }
+
+        async function removeMidiRoute(id) {
+            if (!confirm('Remove this MIDI connection?')) return;
+            try {
+                const result = await fetchAPI(`/api/midi/routes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+                if (result.status !== 'ok' || result.adopted !== true)
+                    throw new Error(result.message || 'MIDI route removal was not confirmed');
+                await loadGraph();
+            } catch (error) {
+                showError('MIDI connection removal failed: ' + error.message);
+            }
+        }
+
         function handleSlotClick(ep, ch) {
+            if (activeMidiPort) clearMidiPortSelection();
             const row = $(`slot-${ep.id}-${ch}`);
             if (ep.direction === 'source') {
                 document.querySelectorAll('.channel-row.selected').forEach(el => el.classList.remove('selected'));
@@ -2350,6 +2825,30 @@ function autoOrganizeLayout() {
                     svg.appendChild(path);
                 });
             }
+
+            // 3. Render graph-native MIDI connections as dashed purple cables.
+            if (Array.isArray(graph.midi_routes)) {
+                graph.midi_routes.forEach(route => {
+                    const srcEl = $(`midi-slot-${route.source}`);
+                    const destEl = $(`midi-slot-${route.destination}`);
+                    if (!srcEl || !destEl) return;
+                    const srcRect = srcEl.getBoundingClientRect();
+                    const destRect = destEl.getBoundingClientRect();
+                    const x1 = (srcRect.right - viewportRect.left) / scale;
+                    const y1 = (srcRect.top + srcRect.height / 2 - viewportRect.top) / scale;
+                    const x2 = (destRect.left - viewportRect.left) / scale;
+                    const y2 = (destRect.top + destRect.height / 2 - viewportRect.top) / scale;
+                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    const cp1x = x1 + (x2 - x1) * 0.5;
+                    const cp2x = x1 + (x2 - x1) * 0.5;
+                    path.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`);
+                    path.setAttribute('class', 'cable midi-cable');
+                    path.setAttribute('stroke', route.enabled === false ? '#bf616a' : '#b48ead');
+                    path.setAttribute('aria-label', `MIDI route ${route.id}`);
+                    path.addEventListener('click', event => { event.stopPropagation(); removeMidiRoute(route.id); });
+                    svg.appendChild(path);
+                });
+            }
         }
 
         function dspText(tag, text, className = '') {
@@ -2365,10 +2864,10 @@ function autoOrganizeLayout() {
         }
 
         function validateDspDiscovery(data) {
-            if (!isObject(data) || data.schema_version !== 1 ||
+            if (!isObject(data) || data.schema_version !== 2 ||
                 !Number.isInteger(data.max_chain_length) || data.max_chain_length < 0 ||
                 !Array.isArray(data.processors)) {
-                throw new Error('Unsupported or invalid DSP discovery response (expected schema version 1).');
+                throw new Error('Unsupported or invalid DSP discovery response (expected schema version 2).');
             }
             const types = new Set();
             const parameterTypes = new Set(['number', 'integer', 'boolean', 'string', 'enum']);
@@ -2378,6 +2877,22 @@ function autoOrganizeLayout() {
                     throw new Error('Invalid processor metadata in DSP discovery response.');
                 }
                 types.add(processor.type);
+                if (!Array.isArray(processor.ports) || processor.ports.length > Number(data.max_plugin_ports || 0))
+                    throw new Error('Invalid typed-port metadata for processor ' + processor.type + '.');
+                const portIds = new Set();
+                for (const port of processor.ports) {
+                    if (!isObject(port) || typeof port.id !== 'string' || !port.id || portIds.has(port.id) ||
+                        !['audio', 'midi'].includes(port.type) || !['input', 'output'].includes(port.direction))
+                        throw new Error('Invalid port metadata for processor ' + processor.type + '.');
+                    portIds.add(port.id);
+                    if (port.type === 'audio') {
+                        if (!Number.isInteger(port.min_channels) || !Number.isInteger(port.max_channels) ||
+                            !Number.isInteger(port.default_channels) || port.min_channels < 1 ||
+                            port.max_channels < port.min_channels || port.default_channels < port.min_channels ||
+                            port.default_channels > port.max_channels)
+                            throw new Error('Invalid audio channel layout for ' + processor.type + '/' + port.id + '.');
+                    }
+                }
                 const ids = new Set();
                 for (const parameter of processor.parameters) {
                     if (!isObject(parameter) || typeof parameter.id !== 'string' || !parameter.id ||
@@ -2459,6 +2974,8 @@ function autoOrganizeLayout() {
             const available = dspDiscovery.status === 'ready' && dspDiscovery.processors.length > 0;
             $('new-processor-type').disabled = stateLocked || !available;
             $('dsp-add').disabled = stateLocked || !available || currentRouteDspState.chain.length >= dspDiscovery.maxChainLength;
+            if ($('dsp-chain-upgrade')) $('dsp-chain-upgrade').disabled = stateLocked || !currentRouteDspState.chain.length;
+            if ($('dsp-chain-preset')) $('dsp-chain-preset').disabled = stateLocked || !currentRouteDspState.chain.length;
             $('dsp-discovery-retry').disabled = modalBusy || dspDiscovery.status === 'loading';
             $('route-apply').disabled = stateLocked || dspDiscovery.status !== 'ready';
             $('route-apply').textContent = modalBusy ? 'WORKING…' : 'APPLY';
@@ -2829,7 +3346,11 @@ function autoOrganizeLayout() {
                 const data = await fetchAPI('/api/meters');
                 cachedMeters.forEach(m => {
                     let meter = null;
-                    if (m.epId.startsWith('pw-node/')) {
+                    if (m.pluginId !== undefined) {
+                        const pluginMeters = data.plugins && data.plugins[m.pluginId];
+                        const portMeters = pluginMeters && pluginMeters[m.portId];
+                        if (Array.isArray(portMeters)) meter = portMeters[m.ch] || null;
+                    } else if (m.epId.startsWith('pw-node/')) {
                         const nodeId = m.epId.slice('pw-node/'.length);
                         const node = pwGraph.nodes[nodeId];
                         const bankName = node && node.is_input ? 'playback' : 'capture';

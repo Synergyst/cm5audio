@@ -26,13 +26,14 @@ class ClientManager;
 
 struct NodeHandler {
     enum class Type { HARDWARE_CAPTURE, HARDWARE_PLAYBACK, CLIENT_CAPTURE, CLIENT_PLAYBACK,
-                       PLUGIN_INPUT, PLUGIN_OUTPUT, TONE, VIRTUAL };
+                       PLUGIN_INPUT, PLUGIN_OUTPUT, PLUGIN_PROCESS, TONE, VIRTUAL };
     Type type;
     void* ptr;
     unsigned channels;
     std::string endpointId;
     bool active = false;
     const PluginNodeInstance* plugin = nullptr;
+    size_t port_index = 0;
 };
 
 class DspEngine {
@@ -114,7 +115,11 @@ private:
         std::vector<std::shared_ptr<HardwareDevice>> hardware;
         std::vector<std::shared_ptr<WebClientSession>> sessions;
         std::shared_ptr<const std::vector<std::shared_ptr<const PluginNodeInstance>>> plugins;
-        bool empty() const { return hardware.empty() && sessions.empty() && (!plugins || plugins->empty()); }
+        std::shared_ptr<const std::vector<MidiRoute>> midiRoutes;
+        bool empty() const {
+            return hardware.empty() && sessions.empty() && (!plugins || plugins->empty()) &&
+                   (!midiRoutes || midiRoutes->empty());
+        }
     };
     EndpointOwners m_endpointOwners;
     std::mutex m_retiredEndpointsLock;
@@ -125,7 +130,15 @@ private:
     std::function<void()> m_rebuildGraphTestHook;
 
     std::shared_ptr<const std::vector<AudioRoute>> m_currentRoutes;
+    std::shared_ptr<const std::vector<MidiRoute>> m_currentMidiRoutes;
     std::vector<const AudioRoute*> m_adjList[MAX_NODES];
+
+    struct MidiDispatch {
+        NodeId process_node = NODE_INVALID;
+        const PluginPortInstance* source_port = nullptr;
+        std::vector<std::shared_ptr<MidiEventQueue>> destinations;
+    };
+    std::vector<MidiDispatch> m_midiDispatches;
 
     struct RouteDsp {
         struct Chain {

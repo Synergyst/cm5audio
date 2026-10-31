@@ -15,8 +15,7 @@ struct ProcessorChoice {
     nlohmann::json value;
 };
 
-// Supported UI types: number, integer, boolean, string, enum. Units are display-only:
-// the factory always receives the units declared here (no implicit dB conversion).
+// Supported UI types: number, integer, boolean, string, enum. Units are display-only.
 struct ProcessorParameter {
     std::string id;
     std::string name;
@@ -29,12 +28,34 @@ struct ProcessorParameter {
     std::vector<ProcessorChoice> choices;
 };
 
-// One interleaved audio bus. Existing processors default to mono until their
-// implementation explicitly declares a wider supported layout.
 struct ProcessorChannelLayout {
     unsigned minimum = 1;
     unsigned maximum = 1;
     unsigned default_channels = 1;
+};
+
+enum class ProcessorPortType { AUDIO, MIDI };
+enum class ProcessorPortDirection { INPUT, OUTPUT };
+
+inline const char* processor_port_type_name(ProcessorPortType type) noexcept {
+    return type == ProcessorPortType::AUDIO ? "audio" : "midi";
+}
+
+inline const char* processor_port_direction_name(ProcessorPortDirection direction) noexcept {
+    return direction == ProcessorPortDirection::INPUT ? "input" : "output";
+}
+
+// A plugin may declare any bounded number of named ports. Audio ports carry a
+// channel layout; MIDI ports carry event streams and therefore have no channel
+// count. source_parameter optionally names a string/enum parameter used to
+// choose the external MIDI source for an input port (legacy MIDI plugins).
+struct ProcessorPortDescriptor {
+    std::string id;
+    std::string name;
+    ProcessorPortType type = ProcessorPortType::AUDIO;
+    ProcessorPortDirection direction = ProcessorPortDirection::INPUT;
+    ProcessorChannelLayout channels{};
+    std::string source_parameter;
 };
 
 struct ProcessorDescriptor {
@@ -44,12 +65,17 @@ struct ProcessorDescriptor {
     std::string description;
     std::vector<ProcessorParameter> parameters;
     Factory factory;
+
+    // Compatibility aliases for the original one-input/one-output processor
+    // interface. New code should declare `ports`; these fields are normalized
+    // to the audio_in/audio_out ports during registration.
     ProcessorChannelLayout audio_input;
     ProcessorChannelLayout audio_output;
+    std::vector<ProcessorPortDescriptor> ports;
 };
 
 // Registration is startup-only. Discovery and creation are read-only and safe
-// concurrently after built-ins and any application processors have been registered.
+// concurrently after built-ins and application processors have been registered.
 class ProcessorRegistry {
 public:
     static ProcessorRegistry& instance();
@@ -69,8 +95,6 @@ private:
     std::map<std::string, ProcessorDescriptor> m_processors;
 };
 
-// Explicitly called by ProcessorRegistry construction; each built-in keeps its
-// descriptor and factory alongside its implementation in src/plugins/.
 void register_builtin_processors(ProcessorRegistry& registry);
 
 #endif

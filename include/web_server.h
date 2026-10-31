@@ -99,19 +99,61 @@ struct AudioRoute {
 // for its audio input bus and a source for its audio output bus. This lets the
 // existing channel-to-channel route representation remain the patchbay cable
 // model while the DSP engine executes the processor between those endpoints.
+struct PluginPortMeterBank {
+    explicit PluginPortMeterBank(unsigned channelCount)
+        : channels(channelCount), meters(channelCount ? std::make_unique<ChannelMeter[]>(channelCount) : nullptr) {}
+
+    unsigned channels = 0;
+    std::unique_ptr<ChannelMeter[]> meters;
+};
+
+struct PluginPortInstance {
+    std::string id;
+    std::string name;
+    std::string type;       // "audio" or "midi"
+    std::string direction;  // "input" or "output"
+    std::string endpoint;
+    NodeId node = NODE_INVALID; // Audio ports only; MIDI ports are event endpoints.
+    unsigned channels = 0;       // Audio ports only.
+    std::shared_ptr<PluginPortMeterBank> meter_bank; // Audio input/output meters, allocated off the DSP thread.
+    std::shared_ptr<MidiEventQueue> midi_queue; // MIDI inputs only.
+    mutable std::array<MidiEvent, CM5_MIDI_MAX_EVENTS_PER_BLOCK> midi_block_events{};
+    mutable size_t midi_block_event_count = 0;
+};
+
 struct PluginNodeInstance {
     uint32_t id = 0;
     std::string name;
     std::string type;
-    std::string input_endpoint;
-    std::string output_endpoint;
+    std::string input_endpoint;  // Compatibility alias for primary audio input.
+    std::string output_endpoint; // Compatibility alias for primary audio output.
     NodeId input_node = NODE_INVALID;
     NodeId output_node = NODE_INVALID;
+    NodeId process_node = NODE_INVALID;
     unsigned input_channels = 1;
     unsigned output_channels = 1;
     bool active = true;
     nlohmann::json params = nlohmann::json::object();
+    std::vector<PluginPortInstance> ports;
     std::shared_ptr<AudioProcessor> processor;
+    // Populated only for the composite plugin_chain node type.
+    nlohmann::json chain = nlohmann::json::array();
+    float chain_gain = 1.0f;
+};
+
+struct PluginChainPreset {
+    uint32_t id = 0;
+    std::string name;
+    nlohmann::json chain = nlohmann::json::array();
+    float chain_gain = 1.0f;
+    bool active = true;
+};
+
+struct MidiRoute {
+    uint32_t id = 0;
+    std::string source_endpoint;
+    std::string destination_endpoint;
+    bool enabled = true;
 };
 
 class DeviceManager;
@@ -146,12 +188,40 @@ public:
                             const nlohmann::json& params, uint32_t requestedId,
                             std::shared_ptr<const PluginNodeInstance>& created,
                             std::string& error);
+    bool create_plugin_node_with_ports(const std::string& type, const std::string& name,
+                            const nlohmann::json& portChannels, const nlohmann::json& params,
+                            uint32_t requestedId,
+                            std::shared_ptr<const PluginNodeInstance>& created,
+                            std::string& error);
     bool update_plugin_node(uint32_t id, const std::string& name,
                             unsigned inputChannels, unsigned outputChannels,
                             const nlohmann::json& params, bool active,
                             std::shared_ptr<const PluginNodeInstance>& updated,
                             std::string& error);
+    bool update_plugin_node_with_ports(uint32_t id, const std::string& name,
+                            const nlohmann::json& portChannels, const nlohmann::json& params,
+                            bool active, std::shared_ptr<const PluginNodeInstance>& updated,
+                            std::string& error);
+    bool create_plugin_chain_node(const std::string& name, const nlohmann::json& chain,
+                            float chainGain, bool active, uint32_t requestedId,
+                            std::shared_ptr<const PluginNodeInstance>& created,
+                            std::string& error);
+    bool update_plugin_chain_node(uint32_t id, const std::string& name,
+                            const nlohmann::json& chain, float chainGain, bool active,
+                            std::shared_ptr<const PluginNodeInstance>& updated,
+                            std::string& error);
+    std::vector<PluginChainPreset> get_plugin_chain_presets() const;
+    bool get_plugin_chain_preset(uint32_t id, PluginChainPreset& preset) const;
+    bool save_plugin_chain_preset(const std::string& name, const nlohmann::json& chain,
+                            float chainGain, bool active, uint32_t requestedId,
+                            PluginChainPreset& saved, std::string& error);
+    bool delete_plugin_chain_preset(uint32_t id, std::string& error);
     bool remove_plugin_node(uint32_t id, std::string& error);
+    std::shared_ptr<const std::vector<MidiRoute>> midi_route_snapshot() const;
+    std::vector<MidiRoute> get_midi_routes() const;
+    bool add_midi_route(const std::string& sourceEndpoint, const std::string& destinationEndpoint,
+                        uint32_t& assignedId, std::string& error);
+    bool remove_midi_route(uint32_t id, std::string& error);
     bool remove_route(uint32_t routeId);
     bool update_route(uint32_t routeId, float gain, bool enabled);
     void update_activated_device(const std::string& id, bool active);
@@ -179,6 +249,12 @@ private:
     mutable std::mutex m_plugin_lock;
     std::shared_ptr<const std::vector<std::shared_ptr<const PluginNodeInstance>>> m_pluginNodes;
     std::atomic<uint32_t> m_next_plugin_id{1};
+    mutable std::mutex m_chain_preset_lock;
+    std::vector<PluginChainPreset> m_pluginChainPresets;
+    std::atomic<uint32_t> m_next_chain_preset_id{1};
+    mutable std::mutex m_midi_route_lock;
+    std::shared_ptr<const std::vector<MidiRoute>> m_midiRoutes;
+    std::atomic<uint32_t> m_next_midi_route_id{1};
     DeviceManager* m_deviceManager = nullptr;
     DspEngine* m_dspEngine = nullptr;
 

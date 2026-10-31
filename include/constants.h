@@ -10,5 +10,6 @@ constexpr unsigned CM5_MAX_AUDIO_FRAMES = 4320;
 constexpr unsigned CM5_BUFFER_FRAMES = 256;
 
 constexpr unsigned CM5_MAX_PROCESSORS_PER_ROUTE = 16;
+constexpr unsigned CM5_MAX_PLUGIN_PORTS = 16;
 
 #endif

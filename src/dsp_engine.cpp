@@ -9,6 +9,36 @@
 #include <queue>
 #include <cstring>
 
+static void update_plugin_port_meter(const float* buffer, unsigned channels,
+                                      unsigned stride, size_t frames,
+                                      const std::shared_ptr<PluginPortMeterBank>& bank) {
+    if (!buffer || !bank || !bank->meters || channels == 0 ||
+        channels > bank->channels || stride < channels || frames == 0) return;
+
+    for (unsigned channel = 0; channel < channels; ++channel) {
+        double sumSq = 0.0;
+        float peak = 0.0f;
+        for (size_t frame = 0; frame < frames; ++frame) {
+            const float sample = buffer[frame * stride + channel];
+            const float magnitude = std::abs(sample);
+            sumSq += static_cast<double>(sample) * sample;
+            if (magnitude > peak) peak = magnitude;
+        }
+
+        const float rms = static_cast<float>(std::sqrt(sumSq / frames));
+        const float rmsDb = rms > 0.00001f ? 20.0f * std::log10(rms) : -60.0f;
+        const float peakDb = peak > 0.00001f ? 20.0f * std::log10(peak) : -60.0f;
+        auto& meter = bank->meters[channel];
+        meter.raw_value.store(rms, std::memory_order_relaxed);
+        meter.raw_peak.store(peak, std::memory_order_relaxed);
+        meter.rms_db.store(rmsDb, std::memory_order_relaxed);
+        meter.peak_db.store(peakDb, std::memory_order_relaxed);
+        meter.peak_hold_db.store(std::max(peakDb,
+            meter.peak_hold_db.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+        meter.clipped.store(peak > 1.0f, std::memory_order_relaxed);
+    }
+}
+
 #define CM5_ENABLE_PROBES 0
 
 #if CM5_ENABLE_PROBES
@@ -64,6 +94,8 @@ void DspEngine::stop() {
     m_executionOrder.clear();
     for (auto& routes : m_adjList) routes.clear();
     m_currentRoutes.reset();
+    m_currentMidiRoutes.reset();
+    m_midiDispatches.clear();
     m_endpointOwners = {};
     collect_retired_endpoints();
     m_builtRevision = 0;
@@ -188,10 +220,12 @@ void DspEngine::update_meters(float* buffer, unsigned channels, unsigned stride,
 void DspEngine::rebuild_graph() {
     const auto routes_ptr = m_clientManager.route_snapshot();
     const auto pluginNodes = m_clientManager.plugin_node_snapshot();
+    const auto midiRoutes = m_clientManager.midi_route_snapshot();
     EndpointOwners nextOwners;
     nextOwners.hardware = m_deviceManager.get_active_devices();
     nextOwners.sessions = m_clientManager.get_active_sessions();
     nextOwners.plugins = pluginNodes;
+    nextOwners.midiRoutes = midiRoutes;
 
     const auto validNode = [](NodeId node) {
         return node >= 0 && static_cast<size_t>(node) < MAX_NODES;
@@ -239,18 +273,29 @@ void DspEngine::rebuild_graph() {
             m_nodeWidths[route.destination_node] = std::max(m_nodeWidths[route.destination_node], route.destination_channel + 1);
     }
 
-    std::unordered_map<NodeId, const PluginNodeInstance*> pluginInputs;
-    std::unordered_map<NodeId, const PluginNodeInstance*> pluginOutputs;
+    struct PluginPortNode {
+        const PluginNodeInstance* plugin = nullptr;
+        size_t port_index = 0;
+    };
+    std::unordered_map<NodeId, PluginPortNode> pluginPortNodes;
+    std::unordered_map<NodeId, const PluginNodeInstance*> pluginProcessNodes;
     if (pluginNodes) for (const auto& plugin : *pluginNodes) {
-        if (!plugin || !validNode(plugin->input_node) || !validNode(plugin->output_node)) continue;
-        m_nodeWidths[plugin->input_node] = plugin->input_channels;
-        m_nodeWidths[plugin->output_node] = plugin->output_channels;
-        fixedWidth[plugin->input_node] = true;
-        fixedWidth[plugin->output_node] = true;
-        direction[plugin->input_node] = -1;
-        direction[plugin->output_node] = 1;
-        pluginInputs[plugin->input_node] = plugin.get();
-        pluginOutputs[plugin->output_node] = plugin.get();
+        if (!plugin || !validNode(plugin->process_node)) continue;
+        m_nodeWidths[plugin->process_node] = 1;
+        fixedWidth[plugin->process_node] = true;
+        direction[plugin->process_node] = 0;
+        pluginProcessNodes[plugin->process_node] = plugin.get();
+
+        for (size_t index = 0; index < plugin->ports.size(); ++index) {
+            const auto& port = plugin->ports[index];
+            if (port.type != "audio" || !validNode(port.node) ||
+                port.channels == 0 || port.channels > CM5_MAX_CHANNELS)
+                continue;
+            m_nodeWidths[port.node] = port.channels;
+            fixedWidth[port.node] = true;
+            direction[port.node] = port.direction == "input" ? -1 : 1;
+            pluginPortNodes[port.node] = {plugin.get(), index};
+        }
     }
 
     const auto validRoute = [&](const AudioRoute& route) {
@@ -274,16 +319,54 @@ void DspEngine::rebuild_graph() {
         inDegree[route.destination_node]++;
     }
 
-    // A plugin is represented by an input endpoint and an output endpoint.
-    // This synthetic dependency places the plugin's processing operation between
-    // incoming and outgoing patchbay cables in the topological schedule.
+    // Each plugin is an operation node surrounded by any number of typed
+    // endpoints. Every audio input must be ready before the operation runs;
+    // every audio output is scheduled after it. MIDI input queues are drained
+    // at the same operation boundary, so MIDI-only plugins also execute.
     if (pluginNodes) for (const auto& plugin : *pluginNodes) {
-        if (!plugin || !validNode(plugin->input_node) || !validNode(plugin->output_node)) continue;
-        activeNodes.insert(plugin->input_node);
-        activeNodes.insert(plugin->output_node);
-        adj[plugin->input_node].push_back(plugin->output_node);
-        inDegree[plugin->output_node]++;
+        if (!plugin || !validNode(plugin->process_node)) continue;
+        const NodeId processNode = plugin->process_node;
+        activeNodes.insert(processNode);
+        for (const auto& port : plugin->ports) {
+            if (port.type != "audio" || !validNode(port.node)) continue;
+            activeNodes.insert(port.node);
+            if (port.direction == "input") {
+                adj[port.node].push_back(processNode);
+                inDegree[processNode]++;
+            } else {
+                adj[processNode].push_back(port.node);
+                inDegree[port.node]++;
+            }
+        }
     }
+    // MIDI connections participate in graph ordering too. A source plugin is
+    // processed before its MIDI destinations in the same block; this avoids an
+    // unnecessary one-block latency for acyclic MIDI chains.
+    if (midiRoutes && pluginNodes) {
+        for (const auto& route : *midiRoutes) {
+            if (!route.enabled) continue;
+            NodeId sourceProcess = NODE_INVALID;
+            NodeId destinationProcess = NODE_INVALID;
+            for (const auto& plugin : *pluginNodes) {
+                if (!plugin) continue;
+                for (const auto& port : plugin->ports) {
+                    if (port.type != "midi") continue;
+                    if (port.endpoint == route.source_endpoint && port.direction == "output")
+                        sourceProcess = plugin->process_node;
+                    if (port.endpoint == route.destination_endpoint && port.direction == "input")
+                        destinationProcess = plugin->process_node;
+                }
+            }
+            if (!validNode(sourceProcess) || !validNode(destinationProcess) ||
+                sourceProcess == destinationProcess)
+                continue;
+            activeNodes.insert(sourceProcess);
+            activeNodes.insert(destinationProcess);
+            adj[sourceProcess].push_back(destinationProcess);
+            inDegree[destinationProcess]++;
+        }
+    }
+
     for (const auto& dev : nextOwners.hardware) {
         const std::string endpoint = "hardware/" + dev->get_original_id() +
                                      (dev->get_info().is_capture ? "/capture" : "/playback");
@@ -326,12 +409,16 @@ void DspEngine::rebuild_graph() {
         const std::string endpoint = m_clientManager.get_endpoint_from_id(node);
         if (node == NODE_TONE_GENERATOR) {
             m_nodeHandlers[node] = {NodeHandler::Type::TONE, nullptr, 1, "tone/generator", true};
-        } else if (const auto plugin = pluginInputs.find(node); plugin != pluginInputs.end()) {
-            m_nodeHandlers[node] = {NodeHandler::Type::PLUGIN_INPUT, nullptr,
-                (*plugin).second->input_channels, (*plugin).second->input_endpoint, true, (*plugin).second};
-        } else if (const auto plugin = pluginOutputs.find(node); plugin != pluginOutputs.end()) {
-            m_nodeHandlers[node] = {NodeHandler::Type::PLUGIN_OUTPUT, nullptr,
-                (*plugin).second->output_channels, (*plugin).second->output_endpoint, true, (*plugin).second};
+        } else if (const auto plugin = pluginProcessNodes.find(node); plugin != pluginProcessNodes.end()) {
+            m_nodeHandlers[node] = {NodeHandler::Type::PLUGIN_PROCESS, nullptr, 1,
+                "plugin-process/" + std::to_string((*plugin).second->id), true, (*plugin).second};
+        } else if (const auto plugin = pluginPortNodes.find(node); plugin != pluginPortNodes.end()) {
+            const auto* owner = plugin->second.plugin;
+            const auto& port = owner->ports[plugin->second.port_index];
+            const auto type = port.direction == "input"
+                ? NodeHandler::Type::PLUGIN_INPUT : NodeHandler::Type::PLUGIN_OUTPUT;
+            m_nodeHandlers[node] = {type, nullptr, port.channels, port.endpoint,
+                true, owner, plugin->second.port_index};
         } else {
             // Original hardware IDs and client keys may contain arbitrary '/'.
             // Match complete endpoint strings rather than splitting at a slash.
@@ -376,9 +463,41 @@ void DspEngine::rebuild_graph() {
         }
     }
     m_currentRoutes = routes_ptr;
+    m_currentMidiRoutes = midiRoutes;
     for (auto& routes : m_adjList) routes.clear();
     if (routes_ptr) for (const auto& route : *routes_ptr)
         if (validRoute(route)) m_adjList[route.source_node].push_back(&route);
+
+    m_midiDispatches.clear();
+    if (midiRoutes && pluginNodes) {
+        for (const auto& route : *midiRoutes) {
+            if (!route.enabled) continue;
+            const PluginPortInstance* sourcePort = nullptr;
+            const PluginPortInstance* destinationPort = nullptr;
+            NodeId sourceProcessNode = NODE_INVALID;
+            for (const auto& plugin : *pluginNodes) {
+                if (!plugin) continue;
+                for (const auto& port : plugin->ports) {
+                    if (port.endpoint == route.source_endpoint && port.type == "midi" && port.direction == "output") {
+                        sourcePort = &port;
+                        sourceProcessNode = plugin->process_node;
+                    }
+                    if (port.endpoint == route.destination_endpoint && port.type == "midi" && port.direction == "input")
+                        destinationPort = &port;
+                }
+            }
+            if (!sourcePort || !destinationPort || !destinationPort->midi_queue ||
+                !validNode(sourceProcessNode))
+                continue;
+            auto dispatch = std::find_if(m_midiDispatches.begin(), m_midiDispatches.end(),
+                [&](const MidiDispatch& item) { return item.source_port == sourcePort; });
+            if (dispatch == m_midiDispatches.end()) {
+                m_midiDispatches.push_back({sourceProcessNode, sourcePort, {destinationPort->midi_queue}});
+            } else {
+                dispatch->destinations.push_back(destinationPort->midi_queue);
+            }
+        }
+    }
 
     // Every snapshot owner, including endpoints that did not bind a handler,
     // survives until a control thread collects it. Never release a possible last
@@ -472,33 +591,140 @@ void DspEngine::process_audio() {
                         buf[f * chs + ch] += session->io_buffer[f * chs + ch];
                 update_meters(buf, chs, chs, handler.endpointId, true);
             }
-        } else if (handler.type == NodeHandler::Type::PLUGIN_OUTPUT) {
+        } else if (handler.type == NodeHandler::Type::PLUGIN_PROCESS) {
             const PluginNodeInstance* plugin = handler.plugin;
             if (plugin) {
-                float* input = get_buffer(plugin->input_node);
-                const unsigned inputChannels = plugin->input_channels;
-                const unsigned outputChannels = plugin->output_channels;
-                if (input && inputChannels > 0 && outputChannels > 0 &&
-                    inputChannels <= CM5_MAX_CHANNELS && outputChannels <= CM5_MAX_CHANNELS) {
-                    if (plugin->active && plugin->processor) {
-                        AudioProcessContext context;
-                        context.input = input;
-                        context.output = buf;
-                        context.frames = CM5_BUFFER_FRAMES;
-                        context.input_channels = inputChannels;
-                        context.output_channels = outputChannels;
-                        context.sample_rate = m_engineSampleRate;
-                        plugin->processor->process(context);
-                    } else {
-                        const unsigned copyChannels = std::min(inputChannels, outputChannels);
+                std::array<AudioBusBuffer, CM5_MAX_PLUGIN_PORTS> audioInputs{};
+                std::array<AudioBusBuffer, CM5_MAX_PLUGIN_PORTS> audioOutputs{};
+                std::array<MidiInputBuffer, CM5_MAX_PLUGIN_PORTS> midiInputs{};
+                std::array<MidiOutputBuffer, CM5_MAX_PLUGIN_PORTS> midiOutputs{};
+                size_t audioInputCount = 0;
+                size_t audioOutputCount = 0;
+                size_t midiInputCount = 0;
+                size_t midiOutputCount = 0;
+
+                for (const auto& port : plugin->ports) {
+                    if (port.type == "audio") {
+                        float* portBuffer = port.node == NODE_INVALID ? nullptr : get_buffer(port.node);
+                        if (port.direction == "input" && audioInputCount < audioInputs.size()) {
+                            audioInputs[audioInputCount++] = {
+                                port.id.c_str(), portBuffer, nullptr, port.channels
+                            };
+                            update_plugin_port_meter(portBuffer, port.channels, port.channels,
+                                                     CM5_BUFFER_FRAMES, port.meter_bank);
+                        } else if (port.direction == "output" && audioOutputCount < audioOutputs.size()) {
+                            audioOutputs[audioOutputCount++] = {
+                                port.id.c_str(), nullptr, portBuffer, port.channels
+                            };
+                        }
+                    } else if (port.type == "midi" && port.direction == "input" &&
+                               midiInputCount < midiInputs.size()) {
+                        port.midi_block_event_count = 0;
+                        MidiEvent event;
+                        if (port.midi_queue) {
+                            while (port.midi_block_event_count < port.midi_block_events.size() &&
+                                   port.midi_queue->pop(event)) {
+                                port.midi_block_events[port.midi_block_event_count++] = event;
+                            }
+                        }
+                        midiInputs[midiInputCount++] = {
+                            port.id.c_str(), port.midi_block_events.data(), port.midi_block_event_count
+                        };
+                    } else if (port.type == "midi" && port.direction == "output" &&
+                               midiOutputCount < midiOutputs.size()) {
+                        port.midi_block_event_count = 0;
+                        midiOutputs[midiOutputCount++] = {
+                            port.id.c_str(), port.midi_block_events.data(), 0,
+                            port.midi_block_events.size()
+                        };
+                    }
+                }
+
+                AudioProcessContext context;
+                context.frames = CM5_BUFFER_FRAMES;
+                context.sample_rate = m_engineSampleRate;
+                context.audio_inputs = audioInputs.data();
+                context.audio_input_count = audioInputCount;
+                context.audio_outputs = audioOutputs.data();
+                context.audio_output_count = audioOutputCount;
+                context.midi_inputs = midiInputs.data();
+                context.midi_input_count = midiInputCount;
+                context.midi_outputs = midiOutputs.data();
+                context.midi_output_count = midiOutputCount;
+
+                if (audioInputCount > 0) {
+                    context.input = audioInputs[0].input;
+                    context.input_channels = audioInputs[0].channels;
+                }
+                if (audioOutputCount > 0) {
+                    context.output = audioOutputs[0].output;
+                    context.output_channels = audioOutputs[0].channels;
+                }
+
+                if (plugin->active && plugin->processor) {
+                    plugin->processor->process(context);
+                } else {
+                    // Generic bypass: the first audio input feeds the first
+                    // output; auxiliary outputs are silent unless a processor
+                    // implements its own bypass behavior in a future extension.
+                    for (size_t outputIndex = 0; outputIndex < audioOutputCount; ++outputIndex) {
+                        auto& output = audioOutputs[outputIndex];
+                        if (!output.output || output.channels == 0) continue;
+                        const AudioBusBuffer* input = audioInputCount
+                            ? &audioInputs[std::min(outputIndex, audioInputCount - 1)] : nullptr;
+                        if (!input || !input->input || input->channels == 0) {
+                            std::fill_n(output.output, CM5_BUFFER_FRAMES * output.channels, 0.0f);
+                            continue;
+                        }
+                        const unsigned common = std::min(input->channels, output.channels);
                         for (size_t frame = 0; frame < CM5_BUFFER_FRAMES; ++frame) {
-                            const float* source = input + frame * inputChannels;
-                            float* destination = buf + frame * outputChannels;
-                            for (unsigned channel = 0; channel < copyChannels; ++channel)
+                            const float* source = input->input + frame * input->channels;
+                            float* destination = output.output + frame * output.channels;
+                            for (unsigned channel = 0; channel < common; ++channel)
                                 destination[channel] = source[channel];
-                            for (unsigned channel = copyChannels; channel < outputChannels; ++channel)
+                            for (unsigned channel = common; channel < output.channels; ++channel)
                                 destination[channel] = 0.0f;
                         }
+                    }
+                }
+
+                for (const auto& port : plugin->ports) {
+                    if (port.type != "audio" || port.direction != "output" ||
+                        port.node == NODE_INVALID) continue;
+                    update_plugin_port_meter(get_buffer(port.node), port.channels,
+                                             port.channels, CM5_BUFFER_FRAMES,
+                                             port.meter_bank);
+                }
+
+                if (!plugin->active) {
+                    const MidiInputBuffer* firstMidiInput = midiInputCount ? &midiInputs[0] : nullptr;
+                    for (size_t outputIndex = 0; outputIndex < midiOutputCount; ++outputIndex) {
+                        if (!firstMidiInput || !firstMidiInput->events) continue;
+                        for (size_t eventIndex = 0; eventIndex < firstMidiInput->event_count; ++eventIndex)
+                            midiOutputs[outputIndex].push(firstMidiInput->events[eventIndex]);
+                    }
+                }
+
+                // Publish MIDI events emitted by this operation (including
+                // bypass pass-through) to graph-connected MIDI input queues.
+                // The queues are bounded and lock-free.
+                for (size_t outputIndex = 0; outputIndex < midiOutputCount; ++outputIndex) {
+                    for (const auto& port : plugin->ports) {
+                        if (port.type == "midi" && port.direction == "output" &&
+                            port.id == midiOutputs[outputIndex].port_id) {
+                            port.midi_block_event_count = midiOutputs[outputIndex].event_count;
+                            break;
+                        }
+                    }
+                }
+                for (const auto& dispatch : m_midiDispatches) {
+                    if (dispatch.process_node != node || !dispatch.source_port) continue;
+                    const auto& sourcePort = *dispatch.source_port;
+                    for (size_t eventIndex = 0;
+                         eventIndex < sourcePort.midi_block_event_count; ++eventIndex) {
+                        const MidiEvent& event = sourcePort.midi_block_events[eventIndex];
+                        for (const auto& destination : dispatch.destinations)
+                            if (destination) destination->push(event);
                     }
                 }
             }

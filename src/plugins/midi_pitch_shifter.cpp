@@ -171,12 +171,99 @@ public:
         return pitchBends_[channel].load(std::memory_order_acquire);
     }
 
+    void addEventQueue(const std::shared_ptr<MidiEventQueue>& queue)
+    {
+        if (!queue) return;
+        std::lock_guard<std::mutex> lock(eventQueuesLock_);
+        for (size_t index = 0; index < eventQueues_.size(); ++index) {
+            auto current = std::atomic_load(&eventQueues_[index]);
+            if (current == queue) {
+                ++eventQueueRefs_[index];
+                return;
+            }
+            if (!current) {
+                std::atomic_store(&eventQueues_[index], queue);
+                eventQueueRefs_[index] = 1;
+                return;
+            }
+        }
+        throw std::runtime_error("MIDI input service queue capacity exhausted");
+    }
+
+    void removeEventQueue(const std::shared_ptr<MidiEventQueue>& queue) noexcept
+    {
+        if (!queue) return;
+        std::lock_guard<std::mutex> lock(eventQueuesLock_);
+        for (size_t index = 0; index < eventQueues_.size(); ++index) {
+            auto current = std::atomic_load(&eventQueues_[index]);
+            if (current != queue) continue;
+            if (eventQueueRefs_[index] > 1) {
+                --eventQueueRefs_[index];
+            } else {
+                eventQueueRefs_[index] = 0;
+                std::atomic_store(&eventQueues_[index], std::shared_ptr<MidiEventQueue>{});
+            }
+        }
+    }
+
+    void applyEvent(const MidiEvent& event) noexcept
+    {
+        if (event.size == 0 || event.size > CM5_MIDI_MAX_EVENT_BYTES) return;
+        if (event.protocol == 1) handleMidi1(event.data, event.size);
+        else if (event.protocol == 2 && event.size % sizeof(uint32_t) == 0) {
+            std::array<uint32_t, 4> words{};
+            const size_t count = event.size / sizeof(uint32_t);
+            if (count <= words.size()) {
+                std::memcpy(words.data(), event.data, event.size);
+                handleUmp(words.data(), count);
+            }
+        }
+    }
+
 private:
     struct InputPortData {
         MidiInputService* owner = nullptr;
     };
 
     std::array<std::atomic<float>, MIDI_CHANNELS> pitchBends_{};
+    std::array<std::shared_ptr<MidiEventQueue>, 32> eventQueues_{};
+    std::array<unsigned, 32> eventQueueRefs_{}; // Protected by eventQueuesLock_.
+    std::mutex eventQueuesLock_;
+
+    void publishEvent(const MidiEvent& event) noexcept
+    {
+        for (auto& slot : eventQueues_) {
+            auto queue = std::atomic_load(&slot);
+            if (queue) queue->push(event);
+        }
+    }
+
+    void publishMidi1(const uint8_t* bytes, size_t size) noexcept
+    {
+        if (!bytes || size == 0) return;
+        MidiEvent event;
+        event.protocol = 1;
+        event.size = static_cast<uint8_t>(std::min(size, CM5_MIDI_MAX_EVENT_BYTES));
+        std::memcpy(event.data, bytes, event.size);
+        publishEvent(event);
+    }
+
+    void publishUmp(const uint32_t* words, size_t wordCount) noexcept
+    {
+        if (!words) return;
+        size_t index = 0;
+        while (index < wordCount) {
+            const size_t packetWords = umpMessageWords(static_cast<uint8_t>(words[index] >> 28u));
+            if (packetWords == 0 || packetWords > wordCount - index ||
+                packetWords * sizeof(uint32_t) > CM5_MIDI_MAX_EVENT_BYTES) break;
+            MidiEvent event;
+            event.protocol = 2;
+            event.size = static_cast<uint8_t>(packetWords * sizeof(uint32_t));
+            std::memcpy(event.data, words + index, event.size);
+            publishEvent(event);
+            index += packetWords;
+        }
+    }
 
     bool autoConnect_ = false;
     std::string selectedOutput_;
@@ -542,11 +629,12 @@ private:
                     payload,
                     payloadSize);
 
-                handleUmp(
-                    alignedWords.data(),
-                    payloadSize / sizeof(uint32_t));
+                const size_t wordCount = payloadSize / sizeof(uint32_t);
+                handleUmp(alignedWords.data(), wordCount);
+                publishUmp(alignedWords.data(), wordCount);
             } else if (control->type == SPA_CONTROL_Midi) {
                 handleMidi1(payload, payloadSize);
+                publishMidi1(payload, payloadSize);
             }
         }
     }
@@ -675,8 +763,54 @@ public:
         }
     }
 
+    ~MidiPitchShifterProcessor() override
+    {
+        if (graphMidiQueue_ && midi_)
+            midi_->removeEventQueue(graphMidiQueue_);
+    }
+
+    void attach_midi_input(const std::string& portId,
+                           const std::shared_ptr<MidiEventQueue>& queue) override
+    {
+        if (portId != "midi_in" || !queue || queue == graphMidiQueue_)
+            return;
+        if (graphMidiQueue_)
+            midi_->removeEventQueue(graphMidiQueue_);
+        graphMidiQueue_ = queue;
+        midi_->addEventQueue(graphMidiQueue_);
+    }
+
+    void process(AudioProcessContext& context) override
+    {
+        // PipeWire MIDI capture and graph-connected MIDI both arrive through
+        // the declared MIDI input queue. Apply graph events to the same MIDI
+        // state used by the audio algorithm, then retain legacy audio behavior.
+        for (size_t inputIndex = 0; inputIndex < context.midi_input_count; ++inputIndex) {
+            const MidiInputBuffer& input = context.midi_inputs[inputIndex];
+            if (!input.events) continue;
+            for (size_t eventIndex = 0; eventIndex < input.event_count; ++eventIndex)
+                midi_->applyEvent(input.events[eventIndex]);
+        }
+
+        AudioProcessor::process(context);
+
+        // These processors are MIDI-controlled effects, not MIDI generators.
+        // Forward incoming events unchanged so their declared MIDI output can
+        // participate in downstream graph connections when desired.
+        for (size_t outputIndex = 0; outputIndex < context.midi_output_count; ++outputIndex) {
+            MidiOutputBuffer& output = context.midi_outputs[outputIndex];
+            for (size_t inputIndex = 0; inputIndex < context.midi_input_count; ++inputIndex) {
+                const MidiInputBuffer& input = context.midi_inputs[inputIndex];
+                if (!input.events) continue;
+                for (size_t eventIndex = 0; eventIndex < input.event_count; ++eventIndex)
+                    output.push(input.events[eventIndex]);
+            }
+        }
+    }
+
 private:
     std::shared_ptr<MidiInputService> midi_;
+    std::shared_ptr<MidiEventQueue> graphMidiQueue_;
 
     unsigned listenChannel_ = 9;
     float pitchRange_ = 2.0f;
@@ -720,7 +854,7 @@ private:
 
 void register_midi_pitch_shifter_processor(ProcessorRegistry& registry)
 {
-    registry.register_processor({
+    ProcessorDescriptor descriptor{
         "midi_pitch_shifter",
         "MIDI Pitch Shifter",
         "MIDI-controlled audio pitch shifter. Supports MIDI 1.0 and "
@@ -804,5 +938,16 @@ void register_midi_pitch_shifter_processor(ProcessorRegistry& registry)
                 channel,
                 pitchRange);
         }
-    });
+    };
+    descriptor.ports = {
+        {"audio_in", "Audio Input", ProcessorPortType::AUDIO,
+         ProcessorPortDirection::INPUT, ProcessorChannelLayout{1, 8, 1}, {}},
+        {"audio_out", "Audio Output", ProcessorPortType::AUDIO,
+         ProcessorPortDirection::OUTPUT, ProcessorChannelLayout{1, 8, 1}, {}},
+        {"midi_in", "MIDI Input", ProcessorPortType::MIDI,
+         ProcessorPortDirection::INPUT, ProcessorChannelLayout{}, "midi_output"},
+        {"midi_out", "MIDI Output", ProcessorPortType::MIDI,
+         ProcessorPortDirection::OUTPUT, ProcessorChannelLayout{}, {}}
+    };
+    registry.register_processor(std::move(descriptor));
 }

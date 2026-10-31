@@ -1,175 +1,542 @@
-# Built-in C++ processor discovery
+# Native C++ processors, plugin nodes, composite chains, and MIDI
 
-The backend registry declared in `include/processor_registry.h` and implemented in
-`src/processor_registry.cpp` is the source of truth for route processor names,
-parameters, defaults, ranges and construction. Each built-in processor keeps its
-implementation and descriptor/factory in `src/plugins/`; the dashboard contains
-no effect-specific menu entries or parameter defaults.
+This document describes the plugin architecture implemented in the `cm5audio` source tree at commit [`368779fa884f6e5a1512249218190bddf7eca22d`](https://github.com/Synergyst/cm5audio/commit/368779fa884f6e5a1512249218190bddf7eca22d).
 
-This is a **compiled-in processor registry**, not a VST/LV2 loader and not runtime
-shared-library hot loading. Rebuild and restart the program after changing C++.
-Reload the dashboard (or use REFRESH); opening a route inspector also refreshes
-its discovery metadata.
+The backend registry is the source of truth for processor identity, parameter definitions, port declarations, audio channel layouts, and composite-chain channel mode. The dashboard discovers this metadata from `GET /api/dsp/available`; it should not maintain a separate hard-coded plugin/parameter catalogue.
 
-## Available processors
+This is a **compiled-in native processor system**. It is not a VST/LV2/LADSPA/CLAP host, a plugin-directory scanner, or a runtime shared-library loader. Changing C++ implementation/descriptor code requires rebuilding and restarting `cm5audio`.
 
-- **Gain**: linear gain, default 1, range 0..8.
-- **Compressor**: linear threshold, default 0.5, range 0..1; ratio, default 4,
-  range 1..100; attack, default 0.01 seconds; release, default 0.1 seconds.
-  Attack/release range 0.0001..10 seconds. This is a basic hard-knee compressor
-  with smoothed gain reduction, not a soft-knee or dB-domain compressor.
-- **Passthrough**: no parameters.
+## Contents
 
-EQ and Limiter are not implemented and are not advertised. Unknown types no
-longer silently become passthrough. Existing saved chains with unsupported types
-or invalid values (including the old UI's compressor threshold `-20`) are
-preserved but **bypassed**, logged at startup and shown with a warning in the
-inspector. Remove the unavailable processor or correct the invalid values and
-APPLY. To use -20 dBFS with the current compressor, enter the equivalent linear
-threshold **0.1**. Settings files are never automatically rewritten by discovery.
+- [Processing models](#processing-models)
+- [Built-in processors](#built-in-processors)
+- [Processor interface and real-time rules](#processor-interface-and-real-time-rules)
+- [Typed port descriptors](#typed-port-descriptors)
+- [Parameter descriptors and validation](#parameter-descriptors-and-validation)
+- [Composite-chain channel modes](#composite-chain-channel-modes)
+- [Plugin-chain nodes and presets](#plugin-chain-nodes-and-presets)
+- [MIDI event model](#midi-event-model)
+- [Registry discovery API](#registry-discovery-api)
+- [Plugin-node and chain HTTP APIs](#plugin-node-and-chain-http-apis)
+- [Route DSP compatibility API](#route-dsp-compatibility-api)
+- [Registration and development workflow](#registration-and-development-workflow)
+- [Persistence, restoration, and schema compatibility](#persistence-restoration-and-schema-compatibility)
+- [Publication, ownership, and thread boundaries](#publication-ownership-and-thread-boundaries)
+- [Validation and verification](#validation-and-verification)
+- [Current limitations](#current-limitations)
 
-## Add a processor entirely in C++
+## Processing models
 
-1. Implement an `AudioProcessor` declared through `include/audio_processor.h`
-   with `process(float*, size_t frames, unsigned channels)`. Route processors
-   currently receive a single channel at 48 kHz. Never allocate, lock, do I/O, or
-   throw from `process()`.
-2. Keep the processor implementation, descriptor, and factory together in a
-   plugin source under `src/plugins/`. Add a small registration function there,
-   declare/call it in `src/plugins/register_builtin_processors.cpp`, and include
-   the source in `APP_SRCS` in the Makefile. Registration is explicit and
-   startup-only; no registry implementation, routing, HTTP handler, settings, or
-   frontend effect-specific code needs to change. The factory receives validated,
-   complete parameters: omitted values are filled from descriptors, not the UI.
-3. Rebuild with `make` and restart cm5audio. Reload the dashboard or click
-   REFRESH. No HTML/JavaScript/API factory edits are needed.
+There are three related but distinct ways a processor can be used.
 
-For example, after implementing `MyFilterProcessor`, a registration looks like:
+### 1. Route-attached DSP chain
+
+A route connects one source channel to one destination channel. Its optional DSP chain belongs to that route and receives a **mono** buffer. The route's ordered processors run in sequence, then DSP master gain is applied (when DSP is active), then ordinary route gain is applied before summing into the destination.
+
+Route DSP remains useful for small per-edge processing changes and compatibility with the original route inspector. It cannot represent a linked stereo processor across two separate mono routes.
+
+### 2. Individual graph-native plugin node
+
+An individual plugin node owns one processor instance, a stable plugin instance ID, parameters, active/bypass state, and its declared typed ports. Audio input/output ports become patchbay endpoints; MIDI ports participate in the MIDI event graph. The general `AudioProcessContext` allows a processor to receive multiple named audio input/output buses and MIDI input/output buffers.
+
+A standard legacy one-input/one-output descriptor is normalized by the registry into `audio_in` and `audio_out` typed audio ports. A processor that declares more than the primary pair, or declares MIDI, must implement the context-based processing interface to consume/produce those additional buses/events. The default legacy adapter only handles the primary audio bus.
+
+### 3. Composite plugin-chain node
+
+A composite chain node is a graph-native node whose internal definition is an ordered list of registered processors. It currently represents **one serial audio bus** with one symmetric channel width from 1 to 8. The chain engine prepares each stage's processor instance(s) before publishing the new node state.
+
+- `per_channel`: create an independent mono processor instance/state for every channel.
+- `multichannel`: create one processor instance and call its buffer processor with the complete interleaved bus and the channel count.
+- `mono_only`: reject a composite chain wider than one channel.
+
+The chain's `chain_gain` is applied after its internal stages. A composite chain is not an arbitrary multi-bus container: its stored chain array contains serial stages sharing the same bus.
+
+## Built-in processors
+
+The registry in `src/plugins/register_builtin_processors.cpp` registers these types in this revision:
+
+| Type | Display name | Notes |
+|---|---|---|
+| `passthrough` | Passthrough | No-op processor. |
+| `gain` | Gain | Linear amplitude multiplier. |
+| `compressor` | Compressor | Hard-knee compressor with a linear-amplitude threshold and smoothed gain reduction. |
+| `echo` | Echo | Delay/echo effect. |
+| `chorus` | Chorus | Modulated chorus effect. |
+| `reverb` | Reverb | Reverb effect. |
+| `lush_reverb` | Lush Reverb | Extended reverb effect. |
+| `eq` | EQ | Equalizer. |
+| `autotune` | Autotune | Pitch correction. |
+| `vowel_filter` | Vowel Filter | Vowel/formant-style filtering. |
+| `soft_clipper` | Soft Clipper | Soft clipping/saturation. |
+| `hpf` | High-Pass Filter | Removes low-frequency content. |
+| `lpf` | Low-Pass Filter | Removes high-frequency content. |
+| `deesser` | De-Esser | Sibilance reduction. |
+| `normalize` | Normalize | Automatic gain control/level normalization. |
+| `expander` | Expander | Downward expansion. |
+| `noise_gate` | Noise Gate | Gate/noise reduction. |
+| `bitcrusher` | Bitcrusher | Bit-depth/rate reduction. |
+| `limiter` | Limiter | Look-ahead limiting. |
+| `midi_pitch_shifter` | MIDI Pitch Shifter | Audio pitch processor with MIDI control. |
+| `midi_harmonizer` | MIDI Harmonizer | MIDI-controlled harmony processor. |
+| `rnnoise` | RNNoise | RNNoise-based denoising. |
+
+Always query discovery for the exact parameters/defaults/ranges/ports in the executable being run. The table above is a type overview, not a replacement for registry metadata.
+
+## Processor interface and real-time rules
+
+Primary interface: `include/audio_processor.h`.
 
 ```cpp
-register_processor({
-    "my_filter", "My Filter", "A custom filter.",
-    {{"frequency", "Frequency", "number", 1000.0,
-      20.0, 20000.0, 1.0, "Hz", {}}},
-    [](const nlohmann::json& params) {
-        return std::make_unique<MyFilterProcessor>(
-            params.at("frequency").get<float>());
-    }
-});
+class AudioProcessor {
+public:
+    virtual ~AudioProcessor() = default;
+
+    virtual void process(float* buffer,
+                         size_t frames,
+                         unsigned channels);
+
+    virtual void process(AudioProcessContext& context);
+
+    virtual void attach_midi_input(
+        const std::string& portId,
+        const std::shared_ptr<MidiEventQueue>& queue);
+};
 ```
 
-Application-owned processors may alternatively call
-`ProcessorRegistry::instance().register_processor(...)` from startup code
-**before** loading settings or starting worker/server threads. Registration is
-startup-only; concurrent registration is not supported. Descriptors and factories
-are both required: C++ cannot infer meaningful UI ranges/units from an arbitrary
-DSP implementation. Duplicate type/parameter IDs and invalid defaults are
-rejected. Each added source must be included in the Makefile's `APP_SRCS` (or
-otherwise compiled/linked).
+The actual declarations and default implementations in `include/audio_processor.h` are authoritative; the excerpt above is a shape summary.
 
-### Parameter descriptor fields
+### Legacy in-place processor
 
-`ProcessorParameter` fields, in aggregate-initializer order:
+Existing/simple processors can override:
+
+```cpp
+void process(float* buffer, size_t frames, unsigned channels) override;
+```
+
+The buffer is interleaved float32. The `channels` argument is the actual number of channels represented by the buffer, not a compile-time constant. A route-attached DSP processor receives `channels == 1`. A composite-chain `multichannel` stage receives the entire interleaved chain bus; a `per_channel` stage receives one channel per independent instance.
+
+When used as a normal graph-native plugin node, the base `process(AudioProcessContext&)` adapter copies the first audio input bus into the first audio output bus and calls the legacy in-place method on the output buffer. If there is no valid primary input, it fills the primary output with silence. The adapter does not process auxiliary buses or MIDI ports.
+
+### Context-based processor
+
+Override:
+
+```cpp
+void process(AudioProcessContext& context) override;
+```
+
+`AudioProcessContext` contains:
+
+- Legacy primary-bus aliases: `input`, `output`, `frames`, `input_channels`, `output_channels`.
+- `sample_rate` (engine default 48,000 Hz).
+- `audio_inputs` and `audio_input_count`.
+- `audio_outputs` and `audio_output_count`.
+- `midi_inputs` and `midi_input_count`.
+- `midi_outputs` and `midi_output_count`.
+
+Each `AudioBusBuffer` has a stable descriptor `port_id`, input pointer, output pointer, and channel count. Inputs/outputs are interleaved float32. Pointers are prepared by the engine for the call and must not be retained after `process()` returns.
+
+A context-based processor is required when the descriptor declares auxiliary audio ports or MIDI ports. It should look up the bus by `port_id` (or use the declared/stable descriptor ordering deliberately), handle absent/empty optional inputs safely, and write every sample of every declared output bus that it owns for the current block. Do not assume the first input and first output are the only ports if the descriptor declares more.
+
+### Real-time processing contract
+
+Native processors execute on the DSP worker. Inside `process()` and other audio-thread callbacks:
+
+- Do not allocate/free memory or grow containers.
+- Do not acquire mutexes or wait on condition variables.
+- Do not perform filesystem, network, device, logging, or other blocking I/O.
+- Do not throw exceptions.
+- Do not retain engine-provided buffer pointers beyond the call.
+- Keep loops bounded by `frames`, the declared channel count, and the finite capacities in the context.
+- Preallocate state, scratch buffers, delay lines, and event output storage during construction/configuration on the control thread.
+
+This is a processor-level contract. It does not mean the whole engine/server process is completely lock-free or allocation-free: graph rebuilds, metrics maps, API work, endpoint retirement, and control-side publication use locks/containers outside the processor callback.
+
+## Typed port descriptors
+
+The registry data model is in `include/processor_registry.h`.
+
+A processor declares up to `CM5_MAX_PLUGIN_PORTS` (16) unique ports. Each port has:
 
 | Field | Meaning |
 |---|---|
-| `id` | Stable JSON parameter key used by the factory and settings |
-| `name` | Human-readable label |
-| `type` | `number`, `integer`, `boolean`, `string`, or `enum` |
-| `default_value` | JSON default; must satisfy its own descriptor |
-| `min`, `max` | Optional numeric bounds (`{}` means absent) |
-| `step` | Optional positive numeric UI increment; integer defaults to 1 in UI |
-| `unit` | Display-only units, e.g. `Hz`, `s`, `linear` |
-| `choices` | For enum only: `{{"Label", jsonValue}, ...}` |
+| `id` | Stable port identifier used in endpoint names, graph/preset metadata, and processing context. |
+| `name` | Human-readable port label. |
+| `type` | `AUDIO` or `MIDI`. |
+| `direction` | `INPUT` or `OUTPUT`. |
+| `channels` | `ProcessorChannelLayout` for audio ports; MIDI ports do not have audio channels. |
+| `source_parameter` | Optional string/enum parameter ID used by legacy MIDI processor input selection. |
 
-Example nonnumeric descriptors:
+`ProcessorChannelLayout` has `minimum`, `maximum`, and `default_channels`. Valid audio layouts have minimum at least 1, maximum no greater than `CM5_MAX_CHANNELS` (254), and default within the range.
 
-```cpp
-{"enabled", "Enabled", "boolean", false, {}, {}, {}, "", {}},
-{"mode", "Mode", "enum", "fast", {}, {}, {}, "",
-    {{"Fast", "fast"}, {"Smooth", "smooth"}}},
-{"label", "Label", "string", "", {}, {}, {}, "", {}}
+Port direction maps to graph semantics:
+
+| Processor port | Application patchbay endpoint direction |
+|---|---|
+| Audio input | Destination (a source route connects into it). |
+| Audio output | Source (it can connect to downstream destinations). |
+| MIDI input | Destination in the MIDI route API. |
+| MIDI output | Source in the MIDI route API. |
+
+A plugin node port endpoint uses:
+
+```text
+plugin/<plugin-instance-id>/<port-id>
 ```
 
-Numeric values must be finite and within bounds; integer values must be whole.
-`step` controls editing increments, not backend quantization. Units are not
-converted automatically. Boolean/string/enum values retain their JSON types.
-The API rejects unknown parameter keys instead of ignoring them. If a parameter
-is renamed or removed, old saved configurations require correction; there is no
-automatic schema migration.
+For compatibility, descriptors that leave `ports` empty are normalized by the registry into two typed audio ports: `audio_in` and `audio_out`, using the legacy `audio_input` and `audio_output` channel layout fields. New code should prefer explicit `ports` declarations.
 
-## HTTP API
+### Multiple audio buses
 
-All discovery/route DSP responses are JSON.
+A normal graph-native plugin instance can declare multiple named audio input and output buses, each with its own channel layout. Its `AudioProcessContext` receives the buses for one block. If it declares auxiliary buses but only implements the legacy `process(float*,frames,channels)` method, those auxiliary buses will not be processed by the default adapter.
 
-### `GET /api/dsp/available`
+The composite chain format is narrower: it serializes one audio stream through an ordered list of processors. Supporting arbitrary multi-bus subgraphs inside a composite chain would require a different chain model; it is not implied by the typed port feature.
 
-Returns current compiled-in processors, sorted by type, with `Cache-Control:
-no-store`. Example (abbreviated):
+### MIDI source parameters
 
-```json
+A MIDI input port may set `source_parameter` to a descriptor parameter whose type is `string` or `enum`. The registry verifies that reference. This is used by the current MIDI processors to retain their existing external MIDI source selection behavior. It should not be mistaken for a generic central MIDI device manager.
+
+## Parameter descriptors and validation
+
+`ProcessorParameter` includes:
+
+| Field | Meaning |
+|---|---|
+| `id` | Stable JSON parameter key. |
+| `name` | Human-readable label. |
+| `type` | `number`, `integer`, `boolean`, `string`, or `enum`. |
+| `default_value` | JSON value used for new instances and omitted parameter keys. |
+| `min`, `max` | Optional numeric bounds. |
+| `step` | Optional positive UI editing increment. |
+| `unit` | Display-only unit string, such as `Hz`, `s`, `linear`, or `ms`. |
+| `choices` | Enum label/value pairs. |
+
+Example numeric and enum definitions:
+
+```cpp
 {
-  "schema_version": 1,
-  "max_chain_length": 16,
-  "processors": [
-    {
-      "type": "gain",
-      "name": "Gain",
-      "description": "Linear amplitude multiplier (1 = unity, 0 = silence).",
-      "defaults": {"gain": 1.0},
-      "parameters": [
-        {"id": "gain", "name": "Gain", "type": "number", "default": 1.0,
-         "min": 0.0, "max": 8.0, "step": 0.01, "unit": "linear"}
-      ]
-    }
-  ]
+    "gain", "Gain", "number", 1.0,
+    0.0, 8.0, 0.01, "linear", {}
 }
 ```
 
-### `GET /api/routes/{id}/dsp`
+```cpp
+{
+    "mode", "Mode", "enum", "fast",
+    {}, {}, {}, "",
+    {{"Fast", "fast"}, {"Smooth", "smooth"}}
+}
+```
 
-Returns `{ "active": false, "gain": 1.0, "chain": [] }` for an existing route
-without configured DSP, or its saved/canonical configuration. An optional
-`warning` describes bypassed invalid saved chains. Malformed IDs return 400;
-nonexistent routes return 404. Existing routes outside DSP capacity return 400.
+Validation rules:
 
-### `POST /api/routes/{id}/apply` — whole inspector acceptance
+- Parameter IDs must be nonempty and unique within a processor.
+- Parameter type must be one of the five supported types.
+- Numeric min/max/step must be finite and internally valid; step must be positive.
+- Numeric defaults/updates must be finite and within bounds.
+- Integer parameters require whole-number JSON values.
+- Enum choices must be nonempty, scalar, finite where numeric, and unique by value.
+- Non-enum parameters cannot declare choices.
+- Units are display-only; the backend does not convert them.
+- `step` controls the dashboard increment; it is not backend quantization.
+- Unknown parameter keys are rejected.
+- Omitted parameter keys are filled from descriptor defaults before factory invocation.
 
-The dashboard now uses **one JSON request** for ordinary route gain/enabled and
-the complete route DSP state. For example:
+Renaming/removing a parameter or changing its JSON type can invalidate old presets/settings. There is no general processor schema migration framework in this revision. Keep IDs stable when possible; when a schema break is unavoidable, provide explicit migration logic in settings restoration or document the manual correction.
+
+## Composite-chain channel modes
+
+A descriptor's `chain_channel_mode` tells the composite chain builder how to instantiate and call that processor. The enum and JSON names are defined in `include/processor_registry.h`.
+
+### `per_channel`
+
+The default mode. At chain-node preparation time, the manager creates one independent mono processor instance per channel. During processing, it extracts one channel into preallocated mono scratch, calls that channel's processor with `channels == 1`, then writes the result back into the interleaved bus. State is independent between channels.
+
+Use this for a processor whose implementation is intrinsically mono or whose behavior should be independent for each channel. It does not provide linked stereo detection or state.
+
+### `multichannel`
+
+The chain manager creates one processor instance for the stage and calls its legacy buffer processing entry with the full interleaved bus and actual channel count. The implementation must iterate by frame/channel correctly and deliberately decide whether to link channel detectors/state or process channels independently.
+
+Examples explicitly declared `multichannel` in this revision:
+
+- `gain`: multiplies every interleaved sample by the same linear gain.
+- `compressor`: calculates the peak across each complete frame and applies one shared envelope/gain value to all channels for that frame.
+- `normalize`: detects a shared peak across channels and applies a shared gain state.
+- `limiter`: detects a shared per-frame peak and applies linked gain across channels.
+- `hpf`: keeps filter state per channel while processing a full multichannel interleaved bus.
+
+These implementations do not all have identical stereo semantics. A multichannel declaration means one instance receives the entire bus; the code determines whether internal detector/state is linked or channel-specific.
+
+### `mono_only`
+
+The chain builder rejects any width greater than one. `rnnoise` is explicitly declared `mono_only` in this revision. This is the appropriate declaration when an effect's algorithm/model/processing assumptions should not be widened by per-channel cloning or interleaved multi-channel invocation.
+
+Do not infer the mode from the implementation's buffer loop alone. The descriptor is authoritative. If a future processor is changed to support multi-channel chain use, update its descriptor and implementation together, and verify linked/per-channel state semantics.
+
+## Plugin-chain nodes and presets
+
+### Chain definition
+
+A composite chain definition is an ordered JSON array:
+
+```json
+[
+  {"type": "compressor", "params": {"threshold": 0.5, "ratio": 4.0}},
+  {"type": "normalize", "params": {"target": 0.25, "speed": 0.1, "max_gain": 4.0}},
+  {"type": "limiter", "params": {"threshold": 0.9, "attack": 0.005, "release": 0.05, "lookahead": 20.0}}
+]
+```
+
+The chain must be nonempty and no longer than 16 stages. Each element must have a registered `type` and a `params` object. Missing parameter keys receive defaults; unknown types/keys and invalid values reject the entire requested chain.
+
+### Chain-node properties
+
+A chain node contains:
+
+- `id`: live plugin instance ID.
+- `name`: node label.
+- `chain`: canonical ordered processor definition.
+- `chain_gain`: finite linear multiplier in 0..8.
+- `active`: chain active/bypass state.
+- `channels`: symmetric input/output bus width, 1..8.
+- audio input/output ports (usually `audio_in` and `audio_out`) and their channel widths.
+
+The chain stages execute in array order. Chain gain is applied after the stages. Each stage's `chain_channel_mode` determines its processor instance count and call width.
+
+### Preset properties and lifecycle
+
+Presets are persistent definitions stored independently of live `plugin_nodes`. A preset carries an ID, name, chain, chain gain, active state, and channel count. Operations:
+
+- Create a preset from a chain definition or dashboard chain.
+- Edit a preset's name, processor parameters, processor list/order, chain gain, active state, and channel count.
+- Instantiate a preset to create a new live node.
+- Replace an existing live chain node from a preset. This updates the internal chain while retaining the live node ID and its existing graph connections where compatible.
+- Delete a preset without deleting nodes already instantiated from it.
+- Delete a live node without deleting the preset it may have originated from.
+
+Editing a preset does not retroactively update already-instantiated nodes. The user must explicitly instantiate or replace from the revised preset to apply the new definition.
+
+### Route extraction semantics
+
+`POST /api/plugins/extract-chain` converts the complete DSP chain attached to **one route** into one composite chain node. Since a route represents one source channel connected to one destination channel and route DSP is mono, the extracted chain is normally created as a one-channel node. The handler splits the selected route into an upstream route feeding the node and a downstream route from the node output.
+
+`POST /api/plugins/extract` extracts one processor at a selected index from one route DSP chain into an individual plugin node, splitting the original route's processing into before/after route chains around the new node.
+
+These operations do not automatically combine multiple separate mono channel routes into a stereo chain node. For that, create/set the chain node to the desired width and explicitly connect each channel.
+
+## MIDI event model
+
+MIDI definitions are in `include/audio_processor.h`.
+
+`MidiEvent` contains:
+
+- `time`: event time field carried through the queue.
+- `protocol`: `1` for MIDI 1.0, `2` for UMP.
+- `size`: number of payload bytes.
+- `data`: fixed payload array, maximum 16 bytes.
+
+`MidiEventQueue` is a bounded multi-producer/single-consumer queue with capacity 1,024. It does not allocate or lock in its push/pop operations. When full, a push fails and increments a dropped-event counter. `MidiInputBuffer` exposes a pointer/count pair for events received in the current processing block. `MidiOutputBuffer::push()` appends to its preallocated bounded output array and returns false when invalid/full.
+
+A MIDI-capable context processor should:
+
+1. Locate the declared MIDI input/output buffer by port ID.
+2. Treat input events as a read-only array valid for the current call.
+3. Validate the protocol/size before interpreting payload bytes.
+4. Write outgoing events with `MidiOutputBuffer::push()` and check the return value.
+5. Avoid allocation, locks, I/O, exceptions, or unbounded processing.
+6. Handle event-queue overflow as a normal bounded-capacity condition; do not block waiting for space.
+
+The graph MIDI route API connects only declared plugin MIDI outputs to declared plugin MIDI inputs. The engine prepares dispatch destinations and routes events through the bounded queues. Audio and MIDI port topology is validated by the graph manager; use its API instead of creating arbitrary endpoint strings.
+
+### Physical MIDI input
+
+In this revision, `midi_pitch_shifter` and `midi_harmonizer` retain their own PipeWire MIDI input services. They discover/select external MIDI sources through plugin parameters and attach incoming events to their graph-side input queue. The shared plugin MIDI graph can then forward events between declared plugin ports.
+
+This is not a centralized host-level MIDI device manager. Physical devices are not general source nodes that can be routed to any plugin without an existing plugin-specific service. A future central MIDI engine/device layer should move discovery/link ownership out of individual processors while preserving the graph queue interface.
+
+## Registry discovery API
+
+### `GET /api/dsp/available`
+
+Returns no-store JSON describing the current compiled-in processors. The schema at this baseline is version 2 and includes limits such as `max_chain_length`, `max_plugin_ports`, and `max_chain_channels`.
+
+A processor discovery object includes:
 
 ```json
 {
-  "gain": 0.5,
-  "enabled": true,
-  "dsp": {
-    "active": true,
-    "gain": 1.0,
-    "chain": [
-      {"type": "gain", "params": {"gain": 0.5}},
-      {"type": "compressor", "params": {"threshold": 0.1, "ratio": 4.0}}
-    ]
+  "type": "gain",
+  "name": "Gain",
+  "description": "Linear amplitude multiplier (1 = unity, 0 = silence).",
+  "defaults": {"gain": 1.0},
+  "parameters": [
+    {
+      "id": "gain",
+      "name": "Gain",
+      "type": "number",
+      "default": 1.0,
+      "min": 0.0,
+      "max": 8.0,
+      "step": 0.01,
+      "unit": "linear"
+    }
+  ],
+  "ports": [],
+  "chain_channel_mode": "multichannel"
+}
+```
+
+The exact fields depend on the processor; this example is abbreviated. Discovery also returns normalized audio input/output layout information. Use the endpoint instead of treating examples or this document's descriptions as a hard-coded list of parameter values.
+
+If `ports` is omitted/empty in the C++ descriptor, registration synthesizes `audio_in` and `audio_out` from the legacy audio layout fields. Discovery reports the normalized typed ports.
+
+## Plugin-node and chain HTTP APIs
+
+All processor/node/preset mutation requests use JSON bodies unless specified otherwise. `application/json` should be sent for these endpoints.
+
+### Individual plugin nodes
+
+Create a registered processor instance:
+
+```http
+POST /api/plugins
+Content-Type: application/json
+```
+
+```json
+{
+  "type": "gain",
+  "name": "Stereo Gain",
+  "params": {"gain": 0.75},
+  "input_channels": 2,
+  "output_channels": 2
+}
+```
+
+For multi-bus descriptors, use `port_channels` keyed by audio port ID:
+
+```json
+{
+  "type": "some_multi_bus_processor",
+  "name": "Example",
+  "params": {},
+  "port_channels": {
+    "main_in": 2,
+    "sidechain_in": 2,
+    "main_out": 2
   }
 }
 ```
 
-All three outer fields are required. Ordinary route `gain` must be numeric,
-finite and 0..8; `enabled` must be a JSON boolean; `dsp` must be an object using
-the schema below. The handler parses/validates the **whole request**, fills
-processor defaults and constructs processors before publishing route or DSP
-state. Invalid DSP cannot partially accept a valid ordinary gain edit.
+The second example is a schema illustration; the named processor/ports must actually be registered. The server validates all requested port IDs and channel counts against the descriptor.
 
-A 200 response contains canonical DSP fields at the **top level** (`active`,
-DSP `gain`, `chain`), ordinary `route_gain` and `enabled`, `status:"ok"`, and the
-completion fields below. It confirms **engine adoption**, not disk saving.
-Validation rejection is 400 and leaves both route and DSP field groups unchanged;
-nonexistent route is 404. Malformed/zero/overflowing numeric IDs are 400; the
-route DSP capacity is still IDs **1..1023**, not an unlimited route rack.
+Other individual-node endpoints:
 
-### DSP object schema and legacy `POST /api/routes/{id}/dsp`
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/plugins` | List live plugin nodes and configured MIDI graph routes. |
+| POST | `/api/plugins/{id}` | Update instance name, params, active/bypass, and audio channel widths/`port_channels`. |
+| DELETE | `/api/plugins/{id}` | Delete the live plugin instance; waits for adoption and saves. |
+| POST | `/api/midi/routes` | Create plugin MIDI output → input graph route. |
+| GET | `/api/midi/routes` | List MIDI graph routes. |
+| DELETE | `/api/midi/routes/{id}` | Delete MIDI graph route. |
 
-A DSP object replaces the **whole** route DSP configuration, not a partial
-parameter patch:
+The plugin node response contains `id`, `name`, `type`, `active`, `params`, endpoint IDs, channel counts, and a normalized `ports` array. Composite chain nodes additionally return `chain`, `chain_gain`, `channels`, and `processor_count`.
+
+### Composite chain nodes
+
+Create a chain node:
+
+```http
+POST /api/plugins/chains
+Content-Type: application/json
+```
+
+Body:
+
+```json
+{
+  "name": "VOIPProc",
+  "channels": 2,
+  "active": true,
+  "chain_gain": 1.0,
+  "chain": [
+    {"type": "compressor", "params": {"threshold": 0.5, "ratio": 4.0}},
+    {"type": "normalize", "params": {"target": 0.25, "speed": 0.1, "max_gain": 4.0}},
+    {"type": "limiter", "params": {"threshold": 0.9, "attack": 0.005, "release": 0.05, "lookahead": 20.0}}
+  ]
+}
+```
+
+Update an existing chain node:
+
+```http
+POST /api/plugins/{id}/chain
+Content-Type: application/json
+```
+
+The body requires `chain`; optional `name`, `chain_gain`, `active`, and `channels` default to the current values. The whole replacement chain is validated/prepared before publication.
+
+Replace from a preset:
+
+```http
+POST /api/plugins/{id}/replace-chain-preset
+Content-Type: application/json
+```
+
+```json
+{"preset_id": 2}
+```
+
+The backend verifies the target is a composite chain node and the preset exists. Its update path retains the live node ID, port IDs, meter banks, and existing graph cables when valid for the replacement.
+
+### Preset endpoints
+
+| Method | Endpoint | Body/behavior |
+|---|---|---|
+| GET | `/api/plugin-chain-presets` | Return `{presets:[...]}`. |
+| POST | `/api/plugin-chain-presets` | Required `name` and `chain`; optional `chain_gain`, `active`, `channels`. Creates a preset. |
+| POST | `/api/plugin-chain-presets/{id}/update` | Partial JSON update. Omitted fields preserve the existing preset values. |
+| POST | `/api/plugin-chain-presets/{id}/instantiate` | Creates a live node from the preset; optional JSON `name` override. |
+| DELETE | `/api/plugin-chain-presets/{id}` | Deletes only the preset definition. |
+
+Preset data is separately persisted in `plugin_chain_presets`. Preset mutations are auto-saved by the current API wrapper. Live chain-node mutations via `/api/plugins/chains`, `/api/plugins/{id}/chain`, and `/api/plugins/{id}/replace-chain-preset` are also auto-saved. A preset being edited does not alter already-instantiated nodes until explicitly re-instantiated/replaced.
+
+### MIDI graph endpoint format
+
+A route source/destination string must identify a declared MIDI port and must have the correct direction. For example:
+
+```json
+{
+  "source": "plugin/4/midi_out",
+  "destination": "plugin/6/midi_in"
+}
+```
+
+The source must be MIDI output; the destination must be MIDI input. Audio port IDs are not accepted by the MIDI route API.
+
+## Route DSP compatibility API
+
+The legacy route processor system remains supported. It is not the composite chain-node API.
+
+Discovery:
+
+```http
+GET /api/dsp/available
+```
+
+Read an existing route's DSP:
+
+```http
+GET /api/routes/{id}/dsp
+```
+
+Apply the complete route DSP definition (legacy DSP-only endpoint):
+
+```http
+POST /api/routes/{id}/dsp
+Content-Type: application/json
+```
 
 ```json
 {
@@ -182,198 +549,205 @@ parameter patch:
 }
 ```
 
-Omitted DSP fields default to `active:false`, `gain:1`, `chain:[]`. `active`, if
-supplied, must be boolean. Each processor must supply a string `type` and a
-`params` object; use `params:{}` to select all defaults (also for passthrough).
-Missing keys inside `params` are filled from registry defaults. DSP master gain
-must be finite and 0..8. Maximum chain length is reported by discovery (currently
-16). Unknown processor types/parameter keys, wrong types and out-of-range values
-are rejected, not silently ignored or clamped.
+This replaces the whole DSP configuration. Omitted `active`, `gain`, and `chain` fields use defaults (`false`, `1.0`, and `[]`). Every processor element requires `type` and `params` object. Unknown types/keys, wrong JSON types, non-finite values, invalid integer values, and out-of-range parameters reject the request with HTTP 400; the previous state remains in place.
 
-The legacy DSP-only endpoint accepts this object directly and still works for
-API clients; it does **not** change ordinary route gain/enabled. Its 200 response
-is `{status:"ok",active,gain,chain,...completionFields}` with defaults materialized.
-Validation fails with 400 and leaves the prior chain/cache untouched; missing
-route returns 404. The dashboard no longer sends this request followed by a
-separate `/api/routes/update` request for APPLY.
+The dashboard's normal Route Inspector uses:
 
-### Acceptance, adoption, and persistence are distinct
+```http
+POST /api/routes/{id}/apply
+Content-Type: application/json
+```
 
-POST handlers are wrapped by a shared recursive **control mutex**. The mutex
-serializes validation/publication, the engine completion wait and any save;
-other accepted writers cannot interleave those steps. Successful handlers request
-an engine revision and wait up to **1,500 ms** (or until the engine stops) for a
-completed processing block to acknowledge it. Accepted POST responses contain:
+with a complete `{gain, enabled, dsp}` object. It validates ordinary route gain/enabled and the complete DSP definition before publishing. The inspector treats the work as a local draft until APPLY. Closing/discarding the draft sends no mutation.
 
-| Field | Meaning |
-|---|---|
-| `accepted_revision` | Target requested for this operation |
-| `adopted_revision` | Highest revision acknowledged after a completed engine block |
-| `adopted` | Whether this target's adoption was confirmed |
-| `persisted` | Whether this request wrote settings successfully; false for APPLY/DSP-only updates |
-| `persisted_revision` | Last revision successfully saved through this WebServer; initially 0 |
+## Registration and development workflow
 
-**200 APPLY** means `status:"ok"`, `adopted:true`, `persisted:false`. Saving is
-separate. **503 pending** means the request was accepted but adoption was not
-confirmed; it **may still apply later**. This is neither cancellation nor rollback.
-Refresh graph/DSP state before retrying, particularly after a lost response. A
-stopping server can also reject a new request with 503 before acceptance, without
-these fields. Validation/lookup/unsupported errors need not carry revision fields.
+### Add a simple processor
 
-`GET /api/graph` now returns real changing `revision` (requested engine revision),
-`adopted_revision`, and `persisted_revision`, plus `dsp_active` on each route for
-cable highlighting. Counters are process-local, can advance for barriers or
-endpoint changes without a visible route edit, and are not disk schema versions,
-ETags or compare-and-swap tokens. Restoring settings does not restore historical
-revision counters. Acknowledgement is an engine-block completion guarantee, not
-proof that a downstream hardware/network buffer has drained.
+1. Implement an `AudioProcessor` subclass in `src/plugins/` (or an existing plugin source) and include its declaration/header as appropriate.
+2. Give the implementation a registry descriptor and factory. The factory must build a fully initialized processor from the normalized `params` object.
+3. Add a small `register_<name>_processor(ProcessorRegistry&)` function.
+4. Declare/call it in `src/plugins/register_builtin_processors.cpp`, unless registering an application-owned processor during startup through the registry singleton.
+5. Add any new `.cpp` file to `APP_SRCS` in the Makefile.
+6. Rebuild `cm5audio`, restart it, then reload the dashboard / refresh discovery.
 
-`POST /api/settings/save` waits for adoption before writing the server's accepted
-state. It never reads browser fields/drafts. A successful response has **both**
-`adopted:true` and `persisted:true`. If adoption is unconfirmed it returns **503**,
-`persisted:false`, and **does not call the settings serializer**. If adoption
-succeeds but saving fails it returns **500**, `adopted:true`, `persisted:false`:
-the applied state remains live; only persistence failed. Fix the path/storage and
-retry SAVE rather than assuming live-state rollback.
+No plugin-specific JavaScript menu/parameter UI should be needed when the descriptor correctly advertises its metadata.
 
-### Related controls and restoration
+### Minimal registration shape
 
-- `POST /api/routes/update` remains the legacy ordinary gain/enabled-only update.
-  Active DSP master gain **multiplies** ordinary route gain rather than replacing
-  it. Bypassing DSP bypasses the chain and DSP master gain, not ordinary route gain.
-- Route create/update/delete/APPLY, DSP-only, tone and fixed-global updates do not
-  automatically save. Device activation/deactivation also save **after** adoption
-  and surface pending-adoption or save failure; they can save other accepted state.
-- Route DELETE uses the same mutex/completion wait and returns accepted/adopted
-  fields and `persisted:false`, but currently omits `persisted_revision`; read it
-  from the graph when needed.
-- Canonical/default-filled route chain parameters are persisted and restored after
-  the engine is constructed/linked. Invalid saved chains remain preserved and
-  bypassed with a warning; discovery alone does not rewrite settings.
-- `GET/POST /api/dsp` remains the fixed global hardware-playback Gain + Compressor,
-  separate from this registry-backed route editor. It is now persisted/restored
-  in optional top-level `global_dsp:{gain,threshold,ratio}`. Older files without
-  that key retain defaults. It is not a dynamic global plugin rack and is not run
-  on client playback.
-- Hardware per-channel `POST /api/control` now explicitly returns **501 unsupported**
-  because those legacy control banks do not affect samples. Previously saved banks
-  are restored/preserved, not made audible. Use route gain or a Gain processor.
-- Endpoint IDs remain bound to stable numeric nodes across disconnect/deactivation;
-  settings loading registers saved endpoint strings even offline. Reconnecting the
-  same identity refreshes its handler binding. Full strings, including embedded
-  slashes, are matched. This has a finite limit of **255 non-tone endpoint identities**
-  per process; identities are not recycled for unrelated endpoints. A client usually
-  consumes two slots. New registration can fail at capacity.
+```cpp
+#include "processor_registry.h"
+#include <memory>
 
-Settings saves use a unique same-directory `PATH.tmp.XXXXXX` file, checked full
-writes, file `fsync`, checked `close`, and checked rename under the control mutex.
-They clean up temporary files on failure where possible and leave the destination
-unchanged until rename. There is **no directory fsync**, crash/power-loss rollback,
-automatic `.bak` recovery or previous-good snapshot selection. Multiple independent
-processes are not coordinated by the in-process mutex. Keep one settings owner and
-backups; crash rollback is deferred work.
+class MyFilter final : public AudioProcessor {
+public:
+    explicit MyFilter(float frequency) : m_frequency(frequency) {}
 
-## Dashboard behavior
+    void process(float* buffer, size_t frames, unsigned channels) override {
+        // Process the interleaved buffer in-place.
+        // Do not allocate, lock, throw, log, or perform I/O here.
+        (void)buffer;
+        (void)frames;
+        (void)channels;
+    }
 
-Click a cable to open Route Inspector & DSP Chain. The dropdown lists only
-registered processors. Add/remove/reorder processors and edit generated controls.
-Existing values come from the route API; new instances use discovery defaults.
+private:
+    float m_frequency;
+};
 
-- All inspector edits are **local drafts** until **APPLY**. **CLOSE** (formerly labelled CANCEL), close, or
-  clicking the outside overlay discards the draft without sending it to the server.
-  CLOSE is disabled while APPLY/delete is in flight; late load responses
-  cannot repopulate a closed inspector.
-- **APPLY** sends the whole `{gain,enabled,dsp}` request, checks `adopted:true`, uses
-  canonical returned DSP values, refreshes the graph, and then closes. Validation,
-  unconfirmed adoption or refresh errors keep the inspector open with an error.
-  Review authoritative state before retrying: an accepted 503 request can still
-  apply, and a graph-refresh failure after adoption does not undo the change.
-- Top-level **SAVE** persists only accepted, engine-adopted server state. It does
-  not apply an open draft or recover an abandoned one; it also ignores unapplied
-  tone/global form values. Closing after acceptance discards only remaining local
-  edits, not an already accepted request. A draft/applied comparison modal is a
-  future requirement, not implemented behavior.
-- Dashboard mutation requests are promise-queued so SAVE cannot overtake an earlier
-  APPLY from the same page; rejection does not poison subsequent requests. This
-  ordering is not a cross-browser stale-revision/CAS protocol.
-- Discovery failures disable adding/applying processors and show an error instead
-  of substituting hardcoded placeholders. Missing saved DSP state also disables
-  APPLY to avoid overwriting unknown state.
+void register_my_filter_processor(ProcessorRegistry& registry) {
+    ProcessorDescriptor descriptor{
+        "my_filter",
+        "My Filter",
+        "Example filter processor.",
+        {{"frequency", "Frequency", "number", 1000.0,
+          20.0, 20000.0, 1.0, "Hz", {}}},
+        [](const nlohmann::json& params) {
+            return std::make_unique<MyFilter>(
+                params.at("frequency").get<float>());
+        }
+    };
+    descriptor.audio_input = {1, 1, 1};
+    descriptor.audio_output = {1, 1, 1};
+    registry.register_processor(std::move(descriptor));
+}
+```
 
-## Publication, ownership, and real-time boundaries
+The sample algorithm is intentionally omitted; it demonstrates the descriptor/factory shape only. In a real implementation, choose the right input/output channel layout and chain mode. `PER_CHANNEL` is the default if no chain mode is set.
 
-DSP publication uses three preallocated **state** slots per route with an audio
-reader pin and serialized control-side writers. Each slot contains chain, DSP
-master gain and active/bypass state, published together; even bypassed readers pin
-the slot. Processor creation/destruction and metadata/JSON work occur on control
-threads, not during processing. Ordinary route gain/enabled reside in the separate
-immutable route snapshot. Whole-route validation plus the completion barrier does
-**not** promise a single instantaneous sample-level swap of both publications
-while the request is in flight.
+### Register explicit typed ports
 
-Graph rebuilds use dirty/revision tracking so a publication during a rebuild is
-not erased by that rebuild's completion. Handler pointers are backed by shared
-hardware/session owners retained with the graph and retired on control threads.
-Session sender joins are deferred to a reaper, never done in IX close callbacks.
-One lifecycle owner coordinates HTTP/DSP/WS shutdown; project-owned HTTP socket
-cancellation wakes stalled accepted reads before joining HTTP workers. The local
-matching-static-IX TLS/socket-server compatibility objects and accepted-worker
-wrapper address stalled handshakes, accepted-fd ownership and late workers. The vendored-miniaudio uninit path also wakes synchronous
-backend data loops before joining, without a preliminary stop wait when backend
-and device states disagree. See [README ownership/shutdown](../README.md#ownership-and-shutdown).
+For a plugin with separate main and sidechain buses and a MIDI input, declare ports explicitly:
 
-The engine is still **64 frames at 48 kHz**, eight channels wide. Enabled cycles
-remain **unsupported**: Kahn sorting can omit cyclic nodes; existing feedback
-buffers are not reliable cycle support. Disabled/invalid routes no longer affect
-topological dependencies. Active media-ready client endpoints are included even
-without enabled routes so playback can receive silence; short captures are
-zero-filled. These changes do not implement automatic cyclic graph scheduling.
+```cpp
+descriptor.ports = {
+    {"main_in", "Main Input", ProcessorPortType::AUDIO,
+     ProcessorPortDirection::INPUT, {1, 8, 2}, {}},
+    {"sidechain_in", "Sidechain Input", ProcessorPortType::AUDIO,
+     ProcessorPortDirection::INPUT, {1, 8, 2}, {}},
+    {"main_out", "Main Output", ProcessorPortType::AUDIO,
+     ProcessorPortDirection::OUTPUT, {1, 8, 2}, {}},
+    {"midi_in", "MIDI Input", ProcessorPortType::MIDI,
+     ProcessorPortDirection::INPUT, {}, {}}
+};
+```
 
-This is **not zero-allocation or lock-free audio processing**. Graph rebuilding
-still allocates/locks on the worker. Meter-map structures now have a mutex shared
-by updates, reads and reset; meter channel values are atomic but map insertion may
-allocate. Endpoint snapshots/retirement also use locks/containers. PCM rings have
-RAII ownership and bounded wrap-aware SPSC reads/writes without application-side
-locks/allocations, but init/destruction require both users quiesced. A plugin's
-`process()` must still never allocate, lock, throw or do I/O.
+This is a descriptor illustration. A plugin that declares these buses must override `process(AudioProcessContext&)` and actually process the auxiliary bus/MIDI event data. The default legacy adapter only copies/processes the first audio input/output bus.
 
-## Checks and verification status
+### Register a multichannel chain processor
+
+If a processor is intended to run as one linked/full-bus stage in a composite chain:
+
+1. Implement `process(float*,frames,channels)` for arbitrary supported interleaved channel counts.
+2. Ensure all sample addressing uses `frame * channels + channel` (or an equivalent correct interleaved traversal).
+3. Decide and document whether detector/envelope/state is linked across channels or independent per channel.
+4. Preallocate any per-channel state for the descriptor's maximum width; do not resize in `process()`.
+5. Set `descriptor.chain_channel_mode = ProcessorChainChannelMode::MULTICHANNEL`.
+6. Set the descriptor's audio input/output channel layouts to the supported range.
+7. Test mono, stereo, and the maximum advertised width.
+
+For processors that must never be widened in a composite chain, explicitly declare `MONO_ONLY` and expose a one-channel-only layout. Do not rely on UI-only restrictions; backend chain validation must reject invalid widths.
+
+### Registration timing
+
+Built-ins are registered during `ProcessorRegistry` construction. Application-owned processors may call `ProcessorRegistry::instance().register_processor(...)` from startup code **before settings are restored and before worker/server threads start**. Registration is startup-only; concurrent registration is not supported. The registry rejects duplicate type/parameter/port IDs and invalid descriptors.
+
+## Persistence, restoration, and schema compatibility
+
+The default file is `./cm5audio_settings.json`, override with `CM5AUDIO_SETTINGS`.
+
+Relevant plugin keys:
+
+```json
+{
+  "plugin_nodes": [
+    {
+      "id": 10,
+      "name": "VOIPProc",
+      "type": "plugin_chain",
+      "input_channels": 2,
+      "output_channels": 2,
+      "port_channels": {"audio_in": 2, "audio_out": 2},
+      "active": true,
+      "params": {},
+      "channels": 2,
+      "chain_gain": 1.0,
+      "chain": [
+        {"type": "compressor", "params": {"threshold": 0.5, "ratio": 4.0}}
+      ]
+    }
+  ],
+  "plugin_chain_presets": [
+    {
+      "id": 2,
+      "name": "VOIPProc",
+      "channels": 2,
+      "active": true,
+      "chain_gain": 1.0,
+      "processor_count": 1,
+      "chain": [
+        {"type": "compressor", "params": {"threshold": 0.5, "ratio": 4.0}}
+      ]
+    }
+  ],
+  "midi_routes": [
+    {
+      "id": 1,
+      "source": "plugin/4/midi_out",
+      "destination": "plugin/6/midi_in",
+      "enabled": true
+    }
+  ]
+}
+```
+
+This is an abbreviated shape illustration; the server writes other application settings in the same document. Live instances and saved presets are separate. A preset can exist without a live node; a live node can continue after its source preset is deleted.
+
+On startup, registered processors are used to reconstruct plugin instances and validate saved chain definitions. A missing/unavailable type or invalid parameters can cause that instance/preset to be skipped with a diagnostic rather than manufacturing a placeholder processor. Keep processor type and parameter IDs stable to preserve old settings.
+
+Settings saves use the server's accepted state and a same-directory temporary file/rename. `POST /api/settings/save` waits for engine adoption before serialization. Device activation/deactivation, tone updates, plugin-chain preset operations, composite chain-node operations, chain extraction, and plugin-node deletion have specific automatic save paths. Ordinary route edits, route DSP updates, fixed global DSP edits, and ordinary plugin-node create/update operations require explicit SAVE. Check response fields (`adopted`, `persisted`) rather than assuming every accepted POST was written.
+
+The settings `version` is currently `1`; it is not a comprehensive migration system. Renaming/removing parameters or changing descriptor compatibility can require explicit migration/manual configuration correction. The server does not automatically recover `.bak` files.
+
+## Publication, ownership, and thread boundaries
+
+The registry is immutable after startup registration. Discovery/factory lookup occurs on control/API paths; processor factories, parameter normalization, and object construction are not audio-thread work.
+
+Route DSP uses multiple preallocated state slots per route and a reader pin so a control-side replacement does not destroy a chain still being used by the DSP worker. Plugin-node and graph publications retain endpoint/plugin owners across graph rebuilds and retire old owners on control-side paths. The engine reports a revision as adopted after a completed processing block has acknowledged the requested graph/state revision.
+
+This acknowledgement means the engine has completed a block using the adopted revision. It does not prove hardware/network buffers have drained or that an external device has rendered audible samples.
+
+The processor callback itself must obey the no-allocation/no-lock/no-I/O/no-throw rule. The entire application is not lock-free: graph rebuilds, metrics map management, endpoint lifecycle, HTTP handlers, and persistence use mutexes/containers on their respective threads.
+
+Enabled graph cycles are unsupported. The graph uses a topological order; a cycle can prevent cyclic nodes from appearing in the processing order. Do not use existing feedback buffers as a supported feedback/looping API.
+
+## Validation and verification
+
+The Makefile defines:
 
 ```bash
 make test-plugins
+make test-channels
 make test-reliability
 ```
 
-`test-plugins` builds/runs registry/typed-validation/processing tests, pinned-reader
-lifetime stress, HTTP discovery/rejection, persistence and unavailable-plugin
-recovery, then Node.js dashboard DOM-logic tests. It uses temporary settings,
-loopback **28182/28183** and `DeviceManager(false)`, with **no backend initialization**
-or physical audio activation. Node.js is required for dashboard tests only.
+- `test-plugins` exercises registry metadata/validation, processor behavior, chain lifetime, API discovery/persistence and dashboard DOM logic. Its native test server uses loopback ports 28182/28183 and `DeviceManager(false)`; it does not activate physical devices.
+- `test-channels` runs synthetic channel-width and route/meter tests with manually driven callbacks; it does not qualify physical connector mapping.
+- `test-reliability` exercises API/adoption/persistence, null-device lifecycle, and process shutdown behavior.
 
-`test-reliability` builds the native application and `tests/reliability_test.cpp`,
-runs that C++ test with a 45-second timeout, runs `tests/device_lifecycle_test.cpp`
-with a 20-second timeout on null/synthetic backend loops, then runs `tests/shutdown_test.py`.
-The C++ suite uses temporary settings/loopback **28184/28185** for ring, deterministic
-rebuild-race, sample gain/bypass/disable, slash-ID/reconnect, full APPLY/validation,
-adoption, concurrent-save/failure/no-adoption and fresh-restore checks. The Python
-harness uses only its own `--no-audio` processes, disposable settings/certificates
-and selected **nonzero** loopback ports. Its assertions cover WS samples,
-plain/TLS shutdown under traffic/stalled handshakes, reconnect and hello restrictions,
-repeated/startup exits, invalid TLS, bind failure and port reuse. It needs Python 3
-and the `openssl` CLI. No normal service/settings/system configuration is changed.
+A new processor should add deterministic tests for parameter defaults/range/type rejection, correct mono processing, channel-width behavior matching its declared mode, state independence/linking, bypass behavior, saved-state restoration, and graph routing. MIDI processors should test bounded queue overflow, protocol/size handling, event ordering/forwarding, and no allocation/locking in the processing callback.
 
-**Observed verification (2026-10-17):** `make test-plugins` and the complete
-`make test-reliability` target passed, including null-device lifecycle and a
-controlled blocking-data-loop wakeup check. Process tests recorded **21 graceful
-exits**, including loaded plain/TLS SIGINT/SIGTERM, connection churn and startup;
-slowest exit was approximately **1.015 s**, below the test's five-second bound.
-Actual WS samples confirm route gain, DSP/bypass, disable/silence and reconnect.
-An ASan/UBSan C++ reliability build also passed without a runtime report; prebuilt
-miniaudio/IX objects were not instrumented. This does not prove general memory
-safety. Visual browser behavior, physical listening, multichannel hardware
-mapping/teardown and end-to-end latency remain unverified by those isolated tests.
+## Current limitations
 
-**User confirmation (2026-10-17):** Ctrl+C shutdown and runtime hot-apply/hot-save
-were also tested successfully in the user's normal setup. Ctrl+C replaces the
-previous need for Ctrl+\\. This confirms the original reported failures in that
-setup, not comprehensive device/backend qualification.
+- No VST/LV2/LADSPA/CLAP host or runtime plugin loading.
+- Composite plugin-chain definitions model one serial audio bus, not arbitrary nested/multi-bus plugin subgraphs.
+- Route-attached DSP remains mono per route.
+- Processor channel-mode metadata must match the real algorithm; unsupported modes should not be advertised.
+- RNNoise is mono-only for composite chains in this revision.
+- Physical PipeWire MIDI source discovery/connection is still owned by individual MIDI processors; no generic physical MIDI graph-source manager exists.
+- MIDI queue/event capacities are bounded; a full queue may drop events.
+- No general MIDI timeline, host clock/scheduler, or external MIDI device graph endpoint model.
+- Enabled audio graph cycles are not supported.
+- The processor interface is native C++ and requires rebuilding/restarting after registration changes.
+
+For the application-level architecture, startup, routing API, settings and security notes, see the [main README](../README.md).

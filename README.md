@@ -1,209 +1,199 @@
 # cm5audio
 
-**A low-latency Linux audio patchbay with channel-level routing, a browser-based visual patchbay, and extensible C++ DSP chains.**
+**A Linux audio patchbay and DSP graph with channel-level routing, native C++ processors, composite plugin-chain nodes, MIDI event routing, and a browser-based control surface.**
 
-cm5audio routes and mixes audio between multiple local capture/playback devices, a built-in sine generator, and remote WebSocket audio clients. It is developed on a Raspberry Pi Compute Module 5, but the application is not tied to a particular audio board, manufacturer, or fixed input-to-output wiring arrangement. USB microphones, USB interfaces, onboard/I²S audio, and endpoints exposed by the selected Linux audio backend can participate, subject to their capabilities and the current engine limits.
+`cm5audio` routes and mixes audio between local capture/playback endpoints, a built-in sine-wave generator, and remote WebSocket audio clients. The native application is developed on Raspberry Pi Compute Module 5 hardware, but its audio-device layer uses miniaudio and is not hard-coded to one audio board or connector layout.
 
-The project combines a C++17 audio engine, miniaudio device access, an HTTP(S) control API, a WebSocket transport, and a dashboard served directly by the native application. Routing and DSP are controlled at runtime; adding a compiled-in processor does not require adding matching plugin-specific frontend code.
+The project combines:
 
-> **Deployment status:** active development. P0 control/adoption, persistence, endpoint ownership, and shutdown changes have passed the isolated plugin, sample-output, null-device lifecycle and plain/TLS process suites described below. The user also confirmed Ctrl+C now exits where Ctrl+\ was previously required, and runtime hot-apply/hot-save works in their normal setup. This is not comprehensive backend/hardware qualification; channel mapping, broader teardown scenarios and latency still need dedicated validation. Designed for a trusted development/LAN environment—not the public Internet. See [Security](#security-and-deployment-boundaries), especially the existing certificate/private-key download routes.
+- A C++17 audio engine and device manager.
+- A channel-addressable audio routing graph.
+- A compiled-in C++ processor registry.
+- Route-attached mono DSP chains and graph-native plugin instances.
+- Composite plugin-chain nodes with configurable channel widths and persistent presets.
+- Typed audio and MIDI ports, plus plugin-to-plugin MIDI event routing.
+- HTTP/HTTPS control APIs and WebSocket/WSS audio transport.
+- A monolithic HTML/CSS/JavaScript dashboard served by the native executable.
+
+> **Documentation baseline:** This document describes the repository tree at commit [`368779fa884f6e5a1512249218190bddf7eca22d`](https://github.com/Synergyst/cm5audio/commit/368779fa884f6e5a1512249218190bddf7eca22d). Build-time registry metadata and API discovery remain the runtime source of truth where noted below. The project is actively developed; this document is not a guarantee that every hardware/backend combination has been qualified.
 
 ## Contents
 
 - [Capabilities and boundaries](#capabilities-and-boundaries)
-- [Audio format, timing, and limits](#audio-format-timing-and-limits)
-- [Backend selection and device compatibility](#backend-selection-and-device-compatibility)
+- [Architecture overview](#architecture-overview)
+- [Audio format, timing, and resource limits](#audio-format-timing-and-resource-limits)
+- [Backends and hardware devices](#backends-and-hardware-devices)
 - [Dependencies and setup](#dependencies-and-setup)
-- [Build and tests](#build-and-tests)
+- [Build and verification](#build-and-verification)
 - [Running and configuration](#running-and-configuration)
 - [Dashboard workflow](#dashboard-workflow)
-- [DSP processors and extension](#dsp-processors-and-extension)
-- [Routing architecture](#routing-architecture)
+- [Routing model](#routing-model)
+- [DSP processors and plugin chains](#dsp-processors-and-plugin-chains)
+- [MIDI support](#midi-support)
+- [Tone generator, global DSP, and meters](#tone-generator-global-dsp-and-meters)
 - [HTTP API reference](#http-api-reference)
-- [WebSocket protocol](#websocket-protocol)
-- [Persistence and restoration](#persistence-and-restoration)
-- [TLS and browser microphone access](#tls-and-browser-microphone-access)
-- [Security](#security-and-deployment-boundaries)
+- [WebSocket audio protocol](#websocket-audio-protocol)
+- [Settings persistence and restoration](#settings-persistence-and-restoration)
+- [TLS, browser access, and security](#tls-browser-access-and-security)
 - [Source map](#source-map)
 - [Diagnostics and troubleshooting](#diagnostics-and-troubleshooting)
-- [Known limitations and roadmap](#known-limitations-and-roadmap)
+- [Known limitations](#known-limitations)
 
 ## Capabilities and boundaries
 
-### Implemented
+### Implemented in this revision
 
-- Enumerate and independently activate/deactivate multiple audio devices.
-- Route individual source channels to individual destination channels.
-- Fan out one source channel to several destinations, or sum several routes into one destination channel.
-- Route local hardware, tone, and connected client endpoints through the same engine.
-- Adjust route gain, enable/bypass a route, or remove its connection.
-- Apply an ordered DSP chain to each route, independently of other routes.
-- Discover available processors and their parameter metadata from C++ through `GET /api/dsp/available`.
-- Generate plugin menus and typed parameter controls in the dashboard without duplicating processor definitions in JavaScript.
-- Add, remove, and reorder processors; edit route/DSP settings as local drafts, discard on CLOSE/outside click, and submit one validated whole-route APPLY request.
-- Display endpoint RMS/peak metering through the API and live patchbay meters.
-- Generate a configurable sine tone for routing tests.
-- Save accepted, engine-adopted routes/DSP, activated device IDs, tone, fixed global DSP, legacy hardware control banks, and known client names. Report adoption and persistence separately.
-- Serve HTTP/HTTPS and WS/WSS, including an optional Emscripten/WASM browser audio terminal.
-- Maintain browser client names and IDs in browser storage and reject simultaneous identity claims.
+- Enumerate local audio devices and independently activate/deactivate capture and playback directions.
+- Request a channel count per device direction, including automatic selection or an explicit count up to the application/miniaudio channel limit.
+- Route one source channel to one destination channel, fan one source channel out to several destinations, and sum several routes into one destination channel.
+- Use hardware, tone-generator, plugin-node, and connected WebSocket-client endpoints in the application's routing graph.
+- Apply an ordered mono DSP chain to an individual route.
+- Instantiate registered processors as independent graph-native plugin nodes with typed audio/MIDI ports.
+- Create composite plugin-chain nodes from ordered processor definitions, with a configurable symmetric audio width from one to eight channels.
+- Save, edit, instantiate, replace from, and delete named plugin-chain presets.
+- Convert a route's complete DSP chain into a composite plugin-chain node, or extract one processor from a route chain into an individual plugin node.
+- Declare processor ports and parameters in C++; generate discovery metadata and dashboard controls from the registry.
+- Support per-channel, multichannel, and mono-only processor behavior inside composite chains.
+- Connect declared plugin MIDI outputs to declared plugin MIDI inputs through bounded event queues.
+- Receive physical MIDI through the existing per-plugin PipeWire MIDI services used by the MIDI processors.
+- Display per-channel capture/playback, tone-generator, and plugin audio-port meters.
+- Generate a configurable mono sine tone and persist its enabled/frequency/amplitude settings.
+- Persist activated-device selections, route state, plugin instances, plugin-chain presets, MIDI graph routes, tone state, global DSP settings, and known client names.
+- Serve the main dashboard and optional browser audio terminal over HTTP/HTTPS and WS/WSS.
+- Optionally display a separate PipeWire topology graph when started with `--enable-pipewire-patchbay`.
 
-### Important distinctions
+### Important boundaries
 
-- **Device-agnostic does not mean unlimited compatibility.** Hardware/graph endpoints support variable widths up to the vendored miniaudio bound (254); not every backend/device combination has been validated. See [Backend selection](#backend-selection-and-device-compatibility).
-- **Capture is a source; playback is a destination**, from the patchbay's perspective. A USB microphone need not have a playback endpoint, and an output-only DAC need not have capture.
-- There is **no automatic input-N-to-output-N connection**. Create the routes you want.
-- The plugin system is a **compiled-in C++ registry**, not a VST/LV2 host, plugin-directory scanner, or runtime shared-library loader.
-- Client media remains raw PCM over WebSockets. Versioned frames, sequence tracking, clock-drift handling, and network jitter control are future work.
-- **Hardware channel gain/mute is not implemented in the sample path.** `POST /api/control` now returns **501** explicitly; it no longer acknowledges or stores a new inaudible change. Existing `AudioControls` banks are restored/preserved in settings for compatibility but do not affect samples. Use route gain or a Gain processor for operational level control.
+- **This is not a VST, LV2, LADSPA, CLAP, or external plugin host.** Processors are compiled into `cm5audio` and registered at startup. There is no runtime shared-library scanner or hot loader.
+- **Route DSP and plugin-chain nodes are different mechanisms.** Route DSP is attached to one channel-to-channel route and processes a mono signal. A composite plugin-chain node is a graph node with a one-to-eight-channel audio bus.
+- **A composite chain is not an arbitrary multi-bus container.** Its internal processor list is a serial single-bus chain. The general `AudioProcessContext` supports multiple typed buses for processors instantiated as graph-native plugin nodes, but the composite chain format itself represents one audio stream plus chain-level settings.
+- **Multichannel support is processor-specific.** A processor must declare how it participates in a wide composite chain. A processor that is not declared `multichannel` is normally instantiated independently per channel. A `mono_only` processor prevents a chain wider than one channel.
+- **RNNoise is declared `mono_only` in this revision.** Do not widen a chain containing RNNoise.
+- **MIDI device management is not yet centralized.** Plugin-to-plugin MIDI graph connections exist, while physical PipeWire MIDI discovery/connection remains in the existing MIDI processor-specific services. Physical MIDI devices are not general-purpose source nodes in the main patchbay graph.
+- **WebSocket audio is raw PCM, not a fully negotiated network-media protocol.** It has no versioned binary frame header, sequence tracking, jitter buffer, or clock-drift compensation.
+- **Hardware channel gain/mute is not wired into the sample path.** `POST /api/control` returns HTTP 501. Legacy hardware control banks may be retained in settings for compatibility, but they do not change audio samples. Use route gain or a Gain processor instead.
+- **A successful API request is not proof of audible output.** Device activation, graph adoption, persistence, physical routing, and downstream buffering are distinct concerns.
+- **The intended deployment is a trusted development/LAN environment.** The current server has no application authentication and exposes sensitive download routes; review [TLS, browser access, and security](#tls-browser-access-and-security) before exposing it to an untrusted network.
 
-## Audio format, timing, and limits
+## Architecture overview
 
-| Property | Current value / behavior |
+### Main components
+
+| Component | Responsibility |
 |---|---|
-| Language | C++17 |
-| Internal sample format | Interleaved 32-bit float PCM |
+| `DeviceManager` | miniaudio context selection, device enumeration, stream activation/deactivation, hardware ownership, and optional PipeWire topology access. |
+| `HardwareDevice` | Separate capture/playback stream handling, callbacks, and PCM ring buffers. |
+| `ClientManager` | Endpoint identity/NodeId mapping, routes, plugin instances, MIDI graph routes, presets, client sessions, and settings persistence. |
+| `DspEngine` | Internal graph construction/order, audio processing, route DSP, plugin-node execution, tone generation, MIDI dispatch, and meters. |
+| `ProcessorRegistry` | Compiled-in processor descriptors, port metadata, parameter validation, discovery, and factories. |
+| `WebServer` | HTTP API, static dashboard serving, WebSocket sessions, settings/API coordination, and registry bridge. |
+| `web_client/dashboard.html` | Main monolithic dashboard and visual routing/plugin-node editor. |
+
+Normal startup creates the device manager and engine, restores saved state, then starts the DSP worker and web services. `--no-audio` bypasses miniaudio context initialization and hardware enumeration; the HTTP/WS application, logical graph, tone source, and client-related code can still be exercised, but physical hardware cannot be activated in that mode.
+
+### Two different graphs
+
+`cm5audio` exposes two graph views which should not be confused:
+
+1. **Application patchbay graph** (`GET /api/graph`): the graph the `DspEngine` uses to route audio between hardware, tone, clients, and plugin-node audio ports. MIDI plugin-to-plugin routes are returned separately in `midi_routes`.
+2. **Optional PipeWire topology graph** (`GET /api/pipewire/graph`): an inspection of PipeWire's own nodes and links. It is enabled only when the executable receives `--enable-pipewire-patchbay`. When disabled, the endpoint returns HTTP 200 with `{ "enabled": false, "nodes": [], "links": [] }`; disabled is a normal feature state, not an API failure.
+
+The optional PipeWire topology view does not replace the application's own route graph and does not change the selected miniaudio backend.
+
+## Audio format, timing, and resource limits
+
+The implementation constants in `include/constants.h` are the source of truth for these fixed limits.
+
+| Property | Value in this revision |
+|---|---:|
+| Language standard | C++17 |
+| Internal sample representation | Interleaved 32-bit floating-point PCM |
 | Engine sample rate | 48,000 Hz |
-| Internal node width | Per-endpoint variable stride, 1..254 channels |
-| Channel indices in APIs | Zero-based, bounded by endpoint width and `0..253`; dashboard labels start at `CH1` |
-| Engine processing block | **64 frames**, nominally **1.333 ms** at 48 kHz |
-| Worker wake interval | Calculated from block/rate; integer-microsecond interval is currently 1,333 µs |
-| Requested hardware period | 64 frames; backend may negotiate a larger actual period/buffer |
-| Hardware ring-buffer requested capacity | 3 × engine block = 192 frames |
-| Node handler/buffer slots | 256; tone at node 0, at most **255 distinct non-tone endpoint identities** per process lifetime |
-| Route DSP slots | 1,024 array entries; supported route DSP IDs are `1..1023` |
-| Processors per route | Maximum 16; discovery API advertises this limit |
-| Media staging size | `CM5_MAX_AUDIO_FRAMES = 4320`; **not** the engine processing block |
+| DSP block | **256 frames** (nominally 5.333 ms at 48 kHz) |
+| Maximum hardware/application endpoint width | 254 channels |
+| Maximum WebSocket-client input/output width | 8 channels each |
+| Maximum channel width of a composite plugin chain | 8 channels |
+| Maximum typed ports on one processor descriptor | 16 |
+| Maximum processors in a route DSP chain | 16 |
+| Maximum processors in a composite plugin chain | 16 |
+| Maximum application graph node slots | 256, including the tone node slot |
+| Route DSP ID range | 1..1023 (slot 0 is not a supported route DSP ID) |
+| Audio media staging constant | `CM5_MAX_AUDIO_FRAMES = 4320` (not the DSP block size) |
+| MIDI event payload | Up to 16 bytes per event |
+| MIDI event queue capacity | 1,024 events per queue |
+| MIDI events per output buffer/block | Up to 256 events |
 
-These are implementation values, not latency guarantees. The 64-frame block is the low-latency target, not a statement that microphone-to-speaker latency is 1.333 ms. Backend buffering, sample/format conversion, scheduling, separate device clocks, and network transport add latency. For example, PulseAudio can accept a 64-frame request while reporting a larger actual buffer.
+Channel indices in HTTP/settings data are **zero-based**. The dashboard generally labels the first channel `CH1`, corresponding to API channel index `0`.
 
-Hardware sample formats may differ from float32; miniaudio converts as needed. The application requests a 48 kHz client-facing device stream. The sample rate reported by device enumeration is capability metadata, not proof of the currently opened hardware format.
+The engine allocates three float sample-buffer banks for 256 graph node slots, 256 frames, and 254 channels per node. Based on those declared dimensions, the sample backing storage is approximately **190 MiB** (`3 × 256 × 256 × 254 × sizeof(float)`) before vector/object overhead and other application memory. Some comments in the source still contain the older 64-frame/48-MiB estimate; the constants and allocation dimensions above describe the code at this documentation baseline.
 
-The hardware sample path uses each opened stream's actual channel width, including more than eight channels, within the explicit 254-channel miniaudio/application limit. This is not unlimited or universal hardware support. Graph audio backing storage is allocated before DSP starts: three banks × 256 nodes × 64 frames × 254 float samples (about 48 MiB), with only each node's active width processed. Network clients retain a separately bounded 1..8-channel protocol. Endpoint-to-node IDs survive disconnect/deactivation and are reused for the **same endpoint identity**, not recycled for unrelated identities. New node registration returns `NODE_INVALID` when the 255 non-tone slots are exhausted. A client normally needs two slots (capture/playback). Cycling through new client IDs can exhaust capacity; this is not an unlimited/recycling endpoint pool. Route IDs also increase without reuse; DSP is available only for IDs `1..1023`, even if earlier routes have been deleted.
+The 256-frame block corresponds to about 5.333 ms of samples at 48 kHz. It is **not** an end-to-end latency guarantee. Hardware/backend periods, ring buffering, format conversion, scheduling, independent device clocks, and network transport add latency. The engine's 48 kHz internal rate also does not prove that every physical device is operating at a native 48 kHz mode; miniaudio may perform format/rate conversion.
 
-## Backend selection and device compatibility
+Hardware endpoints may use widths beyond eight channels, subject to the explicit 254-channel bound and actual backend/device capability. WebSocket clients remain separately capped at eight channels. The graph node/identity pool is finite: tone uses its reserved node slot, leaving at most 255 non-tone endpoint identities for a process lifetime. A client commonly consumes a capture and playback identity. Endpoint identities are retained/reused for the same endpoint identity; unrelated identities are not freely recycled.
+
+## Backends and hardware devices
+
+### miniaudio backend selection
 
 `DeviceManager` supplies this priority list to `ma_context_init`:
 
-1. **JACK**
-2. **PulseAudio**
-3. **ALSA**
+1. JACK
+2. PulseAudio
+3. ALSA
 
-miniaudio selects the **first backend that initializes successfully**. It falls back only when an earlier backend fails. One context uses one selected backend; it does not merge the devices from all three backends or switch backends separately for each activation.
+miniaudio selects the first backend that initializes successfully. One context uses one selected backend; it does not merge all three device lists or select a different backend for each activated device. The startup log prints the candidate list and selected backend.
 
-The constructor prints the candidate list and the selected backend. `MA_DEBUG_OUTPUT` in `src/miniaudio_impl.cpp` also enables detailed library/device logging. A failed load of an unversioned library name followed by a successful load of its versioned `.so` is not by itself an error.
+PipeWire is not a separate candidate in this list. PipeWire can expose devices through a PulseAudio-compatible or JACK-compatible server; in that case the selected miniaudio backend is still reported as PulseAudio or JACK. The optional PipeWire topology viewer is separate.
 
-A default `ma_context_config` and a null configuration both use miniaudio's default configuration values; constructing that object is **not** what enables fallback. The backend array and its count are the first two `ma_context_init` arguments. They are not members of `ma_context_config` in the vendored header.
+The project strongly recommends PipeWire's PulseAudio compatibility layer for general desktop/device use, but actual behavior depends on the selected backend, server permissions, device visibility, stream format/rate compatibility, channel layout, and hardware configuration. The application does not automatically change PulseAudio/PipeWire profiles, JACK connections/configuration, or ALSA system configuration.
 
-### What devices can be used?
+### Enumerating and activating devices
 
-The intended scope is general Linux audio devices, not a specific sound card. Multiple mono, stereo, or multichannel capture/playback endpoints can be active together. Unless using PipeWire-Pulse with Pulseaudio backend **(strongly recommended)** - Compatibility still depends on:
+- Enumeration does not automatically activate every device.
+- Capture and playback are separate directions. A microphone can be capture-only; a DAC can be playback-only.
+- The Hardware Manager groups directions by backend device ID and allows separate `capture_channels` and `playback_channels` requests.
+- `0` means let the selected backend choose. It does **not** mean zero channels or necessarily the maximum available width.
+- `1..254` explicitly requests a width. Deactivate the device before changing an already-open direction's width.
+- Explicit paired channel requests are validated as a pair; activation reports failure rather than pretending that a partial requested pair succeeded. Legacy all-automatic activation may retain a usable direction when its peer fails and reports active directions/warnings.
+- The selected backend may negotiate different channel positions/maps. `/api/devices` and `/api/graph` include opened stream layout metadata for diagnostics.
+- Device capability probing is an explicit operation and may open/query a hardware device. Routine enumeration does not probe every device.
 
-- The selected backend and its running server, permissions, and device visibility.
-- Ability to open a stream compatible with the application's requested format/rate.
-- Channel enumeration and mapping, including backend-provided conversions.
-- Valid stream/channel layout selection and remaining lifecycle/clock handling limitations.
+Device IDs are backend identities, not friendly names. Use IDs returned by `/api/devices`; do not construct IDs from display labels. Existing ALSA/PulseAudio identifiers remain name-based where provided; JACK identifiers use the `jack:` prefix. IDs may differ when the selected backend changes.
 
-Device identities are serialized using the selected backend's ID representation: existing ALSA/PulseAudio name IDs stay compatible; JACK uses `jack:0`. Name-based eight-channel overrides and maximum-channel guessing are removed. Virtual ALSA-name filtering and the `plughw` activation fallback remain ALSA-only. Backend stream layouts and physical connector identities still require real-device validation. A server's endpoint is not necessarily an independent physical device; PulseAudio/PipeWire profiles and JACK port connections remain externally managed.
+### Capability probe
 
-PipeWire is not a separate candidate in this list. It may provide a PulseAudio- or JACK-compatible server, in which case the selected backend name remains PulseAudio or JACK. Device visibility can differ from `aplay -l`/`arecord -l`, which inspect ALSA rather than the chosen sound server.
-
-There is no backend-selection command-line flag. Change the constructor's list/order if a different preference is required; changing a running sound server or `/etc` configuration is not necessary for ordinary plugin development. `DeviceManager(false)` and the application's **`--no-audio`** mode bypass context initialization entirely: no JACK, PulseAudio, ALSA, or miniaudio null backend is initialized, enumeration returns no hardware, and hardware activation fails. Tone, client routing, DSP, HTTP, and WS can still run for isolated checks.
-
-### Channel-width regression coverage
-
-**Verification for this change:** the application build, channel-width test,
-C++ reliability/API/persistence test, null-device lifecycle/negotiation test,
-native plugin test and mocked dashboard test passed. The process-level shutdown
-suite also passed (21 graceful exits; slowest approximately 1.015 seconds). This
-is synthetic/null/backend-disabled evidence; no physical hardware or visual browser
-qualification was performed. Working runtime settings and system audio configuration
-were not changed.
-
-`make test-channels` runs deterministic synthetic hardware callback → PCM ring →
-engine routing/DSP → playback ring → hardware callback checks at widths
-**1, 2, 3, 6, 8, 12, 16, 24, 32, and 254**. It checks frame/channel identity,
-reverse mapping, unequal-width fan-out/summing, actual meter widths/values,
-partial capture and playback silence, out-of-range/direction rejection, high-index
-save/restore, and same-identity reopen at a narrower/wider width. These callbacks
-are manually driven; no backend or physical device is opened. The null lifecycle
-tests additionally open actual null streams at unequal widths and simulate a
-backend accepting an eight-channel client over a stereo internal stream to verify
-that the latter is rejected. They do not certify real connectors or clock drift.
-
-### Hardware stream selection and channel diagnostics
-
-The Hardware Manager groups capture/playback by exact device ID and offers a separate
-channel request for each direction: **0 = backend automatic**, or **1..254** explicit.
-Automatic does not mean maximum. In particular, ALSA may choose stereo for a device
-that also supports a larger mode. Choose that larger width explicitly when desired.
-Counts are stream requests, not OS profile controls. Deactivate before changing an
-active width, then activate with the new request; the rest of the application stays up.
-With explicit counts, paired activation either opens all requested available directions
-or reports an error without publishing newly opened partial directions. Legacy all-auto
-activation may retain one usable direction when the other cannot open; the response
-includes `active_directions` and a `warning`, also shown in the dashboard.
-
-`POST /api/devices/activate` still accepts `id`, with optional query/form
-`capture_channels` and `playback_channels`. Omitted values reuse the saved request,
-or automatic for an unconfigured device. Negative, malformed and >254 requests return
-400. Backend-open failures include their cause. A successful client stream whose
-channel count differs from the backend stream is rejected rather than accepting
-miniaudio channel up/downmix as if independent channels existed. Native sample-format
-conversion and sample-rate conversion to the 48 kHz float32 engine remain supported.
-The existing adoption/autosave completion contract still applies. Requested counts
-are saved in optional `device_streams:{ID:{capture_channels:N,playback_channels:N}}`.
-
-`GET /api/devices` keeps the basic array shape and adds `backend`, `active`,
-`capture_channels`, `playback_channels`, `max_channels`, and (when opened) `layout`.
-`/api/graph` hardware endpoints also include `layout`: `requested_channels`,
-`client_channels`, `client_sample_rate`, `client_format`, `client_channel_map`,
-`internal_channels`, `internal_sample_rate`, `internal_format`, `internal_channel_map`,
-`backend`, and `backend_device_id` (the actual opened/fallback ID). Maps contain
-miniaudio channel-position IDs, not connector labels.
-Backend/internal describes the opened backend stream—not physical ports hidden behind
-an audio server or an ALSA plugin.
-
-The optional **PROBE CAPABILITIES** button explicitly confirms a potentially
-hardware-opening query. `GET /api/devices/capabilities?id=ID&is_capture=true|false`
-returns `native_formats:[{format,channels,sample_rate,flags}]`. Each entry is a **joint
-tuple**. Unknown format / zero channels / zero rate are wildcards; entries may be
-incomplete or truncated. A maximum from one tuple cannot be combined with a rate
-from another. The actual open validates the request. Routine enumeration does not
-probe every device and never queries detailed info inside miniaudio's enumeration
-callback. This application does not change PulseAudio/PipeWire profiles, JACK server
-configuration or ALSA system configuration.
-
-**RaspiAudio observation remains unverified:** neither these diagnostics nor synthetic
-sample tests certify its physical connector mapping. Use low-amplitude identification
-signals one playback channel at a time, recording all capture channels and both maps.
-Compare channel identity separately from analog gain/crosstalk and timing. No equality
-of playback/capture meter levels is assumed and no pointer-bug diagnosis is asserted.
+`GET /api/devices/capabilities?id=DEVICE_ID&is_capture=true|false` returns native format tuples. Each tuple is a joint `(format, channels, sample_rate, flags)` observation. Do not combine the maximum channel count from one tuple with the sample rate from another tuple. Unknown/zero tuple fields may represent wildcards or incomplete data; the actual activation validates the request.
 
 ## Dependencies and setup
 
-### Native application
+### Native build dependencies
 
-- Linux with an audio backend usable by miniaudio.
+- Linux with a miniaudio-supported backend.
 - C++17 compiler (`g++`), GNU Make, and pthreads.
 - ALSA development headers/library (`libasound2-dev` on Debian/Ubuntu).
 - OpenSSL development headers/libraries (`libssl-dev`).
 - zlib development headers/library (`zlib1g-dev`).
-- TLS-enabled IXWebSocket headers and the matching **static** library, normally installed under `/usr/local`; see the local compatibility objects below.
-- nlohmann/json headers. The Makefile defaults to **`../json/include`** and accepts `NLOHMANN_JSON_INCLUDE` overrides.
+- TLS-enabled IXWebSocket headers and matching installed library (the Makefile expects `/usr/local` include/library paths by default).
+- nlohmann/json headers. The Makefile defaults to `../json/include` and supports `NLOHMANN_JSON_INCLUDE`.
 
-miniaudio and cpp-httplib are vendored in `include/`. nlohmann/json and the full IXWebSocket distribution are external dependencies. Emscripten is needed only for the optional browser audio bundle. Node.js is needed only for dashboard tests; Python 3 and the `openssl` CLI are used by process-level reliability tests.
+miniaudio and cpp-httplib are vendored in `include/`. The nlohmann/json checkout and the full IXWebSocket distribution are external dependencies. PipeWire/SPA development packages are required for the build paths using PipeWire headers. Emscripten is needed only for the optional browser audio bundle. Node.js is used by dashboard tests; Python 3 and the OpenSSL CLI are used by process-level reliability tests.
 
-**Local IX compatibility objects:** the Makefile builds the matching `IXSocketOpenSSL.cpp`, `IXSocketServer.cpp` and `IXWebSocketServer.cpp` under `third_party/ixwebsocket/`, linking the three compatibility objects before `-lixwebsocket`. These narrowly patched sources match the installed static IX library used for development; they bound server TLS handshakes, fix accepted-descriptor ownership on failure/stop and retain immutable callbacks during shutdown to prevent a connection-churn `bad_function_call` race. This does **not** modify installed headers/libraries. It is not a general IX upgrade or a drop-in fix for arbitrary shared/static IX versions: compare source/ABI and matching TLS-enabled installed headers before changing IX. See `third_party/ixwebsocket/README.md` for provenance and limits. A separate project-owned `ReliableWebSocketServer` handles late accepted-worker shutdown ownership.
+The Makefile links ALSA, PipeWire, IXWebSocket, OpenSSL, zlib, RNNoise, and pthreads. It also compiles three local IXWebSocket compatibility translation units under `third_party/ixwebsocket/` (`IXSocketOpenSSL.cpp`, `IXSocketServer.cpp`, and `IXWebSocketServer.cpp`) against the installed IX headers/library. These are project-specific compatibility sources, not a general replacement for matching IXWebSocket headers and library ABI.
 
-For Debian/Ubuntu, a manual prerequisite starting point is:
+### Debian/Ubuntu prerequisite starting point
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config cmake git \
-    libasound2-dev openssl libssl-dev zlib1g-dev nlohmann-json3-dev
+    libasound2-dev libpipewire-0.3-dev libspa-0.2-dev \
+    libssl-dev zlib1g-dev nlohmann-json3-dev
 ```
 
-If using distribution JSON headers, build with `NLOHMANN_JSON_INCLUDE=/usr/include`. If using a sibling nlohmann/json checkout, its layout should provide `../json/include/nlohmann/json.hpp`.
+Install/configure the matching TLS-enabled IXWebSocket development library as required by the machine. If the distribution's nlohmann/json headers are used instead of a sibling checkout:
+
+```bash
+make -j7 NLOHMANN_JSON_INCLUDE=/usr/include
+```
 
 ### Setup helper
 
@@ -213,60 +203,46 @@ From the repository root:
 ./scripts/setup.sh --install-ixwebsocket --no-wasm --host YOUR_SERVER_IP_OR_DNS
 ```
 
-The helper installs/checks prerequisites, prepares development TLS files, and builds the native application. Without `--no-wasm`, it also builds the browser audio bundle. Its package list currently includes Emscripten even if WASM building is skipped; it does **not** cover all native dependencies above, notably ALSA/JSON. Install those separately when necessary.
+The helper checks/installs some prerequisites, prepares development TLS files, and can build the native executable. Without `--no-wasm`, it also builds the optional browser audio bundle. The helper's package list does not replace checking all native prerequisites (notably ALSA and JSON development headers). It can modify the machine by installing packages/libraries and creating or regenerating TLS files; it is not required for every rebuild.
+
+Useful helper options:
 
 | Option | Purpose |
 |---|---|
-| `--no-install` | Skip Debian package installation; still check required tools |
-| `--no-build` | Skip the native build; use `--no-wasm` too if no builds are wanted |
-| `--no-wasm` | Skip the browser bundle build |
-| `--install-ixwebsocket` | Install IXWebSocket when `pkg-config` cannot find it |
-| `--host IP_OR_DNS` | Select the development certificate subject/SAN |
-| `-h`, `--help` | Show script usage |
+| `--no-install` | Skip package installation while retaining tool checks. |
+| `--no-build` | Skip the native build. |
+| `--no-wasm` | Skip the browser audio bundle. |
+| `--install-ixwebsocket` | Install IXWebSocket if the expected package is not found. |
+| `--host IP_OR_DNS` | Set the development certificate subject/SAN. |
+| `-h`, `--help` | Show helper usage. |
 
-The standalone IXWebSocket installer is:
+The standalone installer is `./scripts/install_ixwebsocket.sh`. It defaults to IXWebSocket `v12.0.1`, enables OpenSSL TLS/zlib, and installs under `/usr/local`; `IXWEBSOCKET_VERSION` and `IXWEBSOCKET_PREFIX` can override this. A custom prefix requires corresponding include/link configuration; the Makefile does not automatically discover arbitrary prefixes.
 
-```bash
-./scripts/install_ixwebsocket.sh
-```
+## Build and verification
 
-It defaults to release `v12.0.1`, enables OpenSSL TLS/zlib, and installs under `/usr/local`. `IXWEBSOCKET_VERSION` and `IXWEBSOCKET_PREFIX` override these choices. With a custom prefix, adjust application include/link flags and `PKG_CONFIG_PATH` as appropriate; the Makefile does not automatically discover that prefix.
+### Build the native application
 
-**Setup changes the machine:** it can install packages/libraries and create/regenerate TLS files. It is not required for every rebuild. Its TLS bundle contains the server private key; see [Security](#security-and-deployment-boundaries).
-
-## Build and tests
-
-### Build the native server
+From the repository root:
 
 ```bash
-make -j2
+make -j7
 ```
 
-Use a parallelism level appropriate for available memory. On a configured development machine, `make -j7` may also be appropriate; large C++ translation units can be memory-intensive.
-
-With distribution JSON headers:
-
-```bash
-make -j2 NLOHMANN_JSON_INCLUDE=/usr/include
-```
-
-Clean application rebuild:
+Choose parallelism based on available memory. The main output is `./cm5audio`. For a full rebuild:
 
 ```bash
 make clean
-make -j2
+make -j7
 ```
 
-`make clean` removes application objects/dependency files, the native server, plugin/reliability C++ test artifacts, and the local IX TLS/socket-server compatibility objects. It intentionally retains `build/miniaudio_impl.o` to avoid repeatedly compiling the large vendored implementation.
-
-After changing miniaudio implementation macros or compiler settings affecting it, explicitly rebuild that object:
+`make clean` removes application objects/dependency files, the main executable, plugin/channel/reliability test artifacts, and local IX compatibility objects. It intentionally retains `build/miniaudio_impl.o`; use `make clean-miniaudio` if that object must be rebuilt after changing miniaudio headers/macros/compiler settings:
 
 ```bash
 make clean-miniaudio
-make -j2
+make -j7
 ```
 
-Compiler-generated `.d` files track header dependencies, including processor definitions, for subsequent builds. These dependency files and build outputs live under ignored `build/`.
+The Makefile emits dependency files under `build/` so header changes are tracked. If a downloaded archive produces clock-skew warnings, normalize timestamps with `touch` on the replaced files before interpreting incremental-build results. `make -B -j7` forces a rebuild of all targets.
 
 ### Optional browser audio bundle
 
@@ -274,416 +250,559 @@ Compiler-generated `.d` files track header dependencies, including processor def
 ./web_client/build_wasm.sh
 ```
 
-Requires `emcc` in `PATH`. Produces:
+Requires `emcc` in `PATH`. It creates `web_client/dist/client_audio.js` and `web_client/dist/client_audio.wasm`. These generated files are ignored by Git and must be rebuilt on a fresh checkout before using the browser audio terminal. The main native dashboard itself is plain HTML/CSS/JavaScript and does not require WASM.
 
-- `web_client/dist/client_audio.js`
-- `web_client/dist/client_audio.wasm`
-
-The script resolves the repository root automatically. Generated files are ignored by Git and must be rebuilt on a fresh checkout before using the browser audio terminal. The native dashboard itself does **not** require WASM and is plain HTML/CSS/JavaScript.
-
-### Focused plugin tests
+### Test targets
 
 ```bash
 make test-plugins
-```
-
-This builds/runs C++ registry, parameter validation, processor behavior, chain-reader lifetime, HTTP discovery, and persistence tests, followed by Node.js dashboard DOM-logic tests.
-
-Tests use temporary settings, loopback listeners on **28182/28183**, and `DeviceManager(false)`: no audio backend is initialized and no physical devices are enumerated/activated. They do not restart the normal server. These are not a complete visual browser, hardware lifecycle, or end-to-end latency test.
-
-### P0 reliability and shutdown checks
-
-```bash
+make test-channels
 make test-reliability
 ```
 
-This target builds the application and both C++ reliability fixtures, runs the main C++ test under a 45-second timeout and null-device lifecycle checks under 20 seconds, then invokes `python3 tests/shutdown_test.py`:
+| Target | Coverage / constraints |
+|---|---|
+| `test-plugins` | C++ registry, parameter validation, processor behavior, graph/plugin lifetime, HTTP discovery/rejection/persistence paths, and Node.js dashboard DOM-logic tests. Uses temporary settings, loopback ports 28182/28183, and `DeviceManager(false)`; it does not initialize a physical audio backend. Node.js is required for its dashboard test. |
+| `test-channels` | Synthetic/manual hardware-callback and DSP-block tests at widths 1, 2, 3, 6, 8, 12, 16, 24, 32, and 254; checks channel mapping, routing, fan-out/summing, meters, partial reads/silence, bounds, and same-identity reopen behavior. It does not open a physical audio device. |
+| `test-reliability` | Builds the application and reliability/device lifecycle fixtures, then runs the C++ reliability test, null-device lifecycle tests, and `tests/shutdown_test.py`. Requires Python 3 and OpenSSL CLI for process/TLS checks. |
 
-- **C++ reliability:** PCM ring wrap/RAII; a deterministic publication-during-rebuild race; sample-level gain, DSP master gain, bypass and disabled-route behavior; endpoint IDs containing slashes; reconnect identity; full-route HTTP APPLY/validation/adoption; concurrent settings saves, save failure, refusal to save without adoption, and restoration into a fresh engine including global DSP and an offline endpoint route. It uses temporary settings and loopback ports **28184/28185**.
-- **Python process integration:** launches only its own `cm5audio --no-audio` children with temporary settings/certificates and selected nonzero loopback ports. It checks real WS sample output, APPLY/bypass/disable/reconnect, repeated-hello restrictions, SIGINT/SIGTERM under traffic, idle/startup exits, plain/TLS listeners, stalled handshakes, invalid TLS and bind failure, and listener reuse. Each graceful-exit assertion has a five-second deadline; that is a test criterion, not a universal shutdown-time guarantee. TLS verification is disabled only inside this isolated self-signed test.
-
-These plugin/reliability targets do not read normal settings, initialize physical audio backends, manage a service, or change system audio configuration. `tests/device_lifecycle_test.cpp`, included in `test-reliability`, exercises initialized/never-started/stopped devices, idempotent activation, exact IDs and retained owners using an explicitly selected **null backend**. It also substitutes a controlled blocking data loop to verify uninitialization invokes the backend wakeup after setting terminal state; the old uninit sequence hangs that test. Null is distinct from `DeviceManager(false)` and is not physical-backend qualification. The Python harness needs Python 3 and `openssl`; the C++ targets use `timeout`.
-
-**Verification observed on this CM5 (2026-10-17):** `make test-plugins` and the full `make test-reliability` target passed. The latter includes deterministic PCM assertions, **72 concurrent HTTP saves**, an injected short write (`RLIMIT_FSIZE`) preserving the previous file, no-adoption/no-save, fresh restore, null-device lifecycle and the blocked-loop wakeup regression. Python recorded **21 graceful child-process exits**: loaded plain/TLS SIGINT/SIGTERM, ten connection-churn shutdowns, six idle launches and one early-startup exit, plus expected-failure invalid-TLS/bind checks. The final process matrix was also repeated three consecutive times (63 additional graceful exits). The slowest measured graceful exit was approximately **1.015 seconds**, below its five-second assertion; all tested listener ports were reusable. An additional ASan/UBSan build of the C++ reliability suite passed with no runtime sanitizer report (application sources instrumented; prebuilt miniaudio/IX objects were not). These results do not establish universal shutdown bounds or memory safety. Physical capture/playback, actual multichannel mapping, real-backend teardown, visual browser operation, overload behavior and measured end-to-end latency remain unverified.
-
-**User-confirmed operation (2026-10-17):** after testing the rebuilt application in their normal setup, the user reported that a single **Ctrl+C** now exits where **Ctrl+\\** had previously always been required, and that **hot-apply/hot-save works**. This confirms the two originally reported failures are resolved in that tested setup. It is distinct from assistant-run isolated regressions and does not certify every device/backend, multichannel mapping, overload condition or latency measurement.
-
-### Optional ALSA diagnostic tools
-
-```bash
-make alsatools
-./alsa_caps
-```
-
-`alsa_caps` probes ALSA devices and prints native capability tables. Devices held by a sound server may report busy/restricted. The `alsa_bridge_test` target is an experimental standalone bridge with development-machine assumptions; inspect its source/device choices before running it. It is not the normal cm5audio server or a general hardware certification test. `make clean-alsatools` cleans these optional targets.
+These are focused software/synthetic tests, not a substitute for validating actual physical connectors, channel mapping, backend clock behavior, browser display, or end-to-end latency on the target system.
 
 ## Running and configuration
 
-Start the process **from the repository root**, so relative web asset, certificate, and settings paths resolve correctly:
+Start the executable from the repository root so the relative dashboard/static-asset paths resolve correctly.
+
+### Common launch commands
+
+Plain HTTP and WebSocket:
 
 ```bash
 ./cm5audio --plain-text
 ```
 
-Or, with TLS certificate/key files present:
+Default behavior (TLS is selected when both configured certificate and key are readable):
 
 ```bash
 ./cm5audio
 ```
 
-Stop with Ctrl+C or SIGTERM. Signal handlers only flag shutdown and notify a nonblocking self-pipe; the lifecycle owner performs teardown outside signal/callback context. Do not assume stopping the process automatically saves unsaved changes. See [Ownership and shutdown](#ownership-and-shutdown).
+Without the optional PipeWire topology viewer:
 
-For isolated API/tone/client testing without touching an audio backend or normal settings:
+```bash
+./cm5audio --plain-text
+```
+
+With the optional PipeWire topology viewer:
+
+```bash
+./cm5audio --plain-text --enable-pipewire-patchbay
+```
+
+Without initializing miniaudio or enumerating physical audio devices:
 
 ```bash
 CM5AUDIO_SETTINGS=/tmp/cm5audio-isolated-settings.json \
 CM5AUDIO_BIND_ADDRESS=127.0.0.1 \
-CM5AUDIO_HTTP_PORT=28186 CM5AUDIO_WS_PORT=28187 \
+CM5AUDIO_HTTP_PORT=28182 CM5AUDIO_WS_PORT=28183 \
 ./cm5audio --no-audio --plain-text
 ```
 
-Choose unused ports and a disposable settings path. This is not a physical-audio test.
+`--no-audio` is useful for isolated HTTP/API testing. It cannot activate physical devices or qualify audio output.
 
-### Listener URLs
+### Command-line options
 
-Replace `HOST` with your server's reachable address:
+| Option | Effect |
+|---|---|
+| `-h`, `--help` | Print usage and exit. |
+| `--plain-text` | Force plain HTTP/WS instead of selecting TLS. |
+| `--no-audio` | Skip audio context initialization and hardware enumeration. |
+| `--enable-pipewire-patchbay` | Enable the optional PipeWire topology viewer. |
+
+Unknown arguments fail startup. There are no command-line flags for HTTP/WS ports or the audio backend.
+
+### Default listener URLs
+
+Replace `HOST` with the server's reachable address.
 
 | Service | Plain text | TLS |
 |---|---|---|
 | Main dashboard | `http://HOST:8182/` | `https://HOST:8182/` |
+| Dashboard static mount | `http://HOST:8182/client/dashboard.html` | `https://HOST:8182/client/dashboard.html` |
 | Browser audio terminal | `http://HOST:8182/client/index.html` | `https://HOST:8182/client/index.html` |
-| Auxiliary device scan | `http://HOST:8182/client/scan.html` | `https://HOST:8182/client/scan.html` |
+| Auxiliary scan page | `http://HOST:8182/client/scan.html` | `https://HOST:8182/client/scan.html` |
 | Audio WebSocket | `ws://HOST:8183/ws/audio` | `wss://HOST:8183/ws/audio` |
 
-The table shows defaults. `CM5AUDIO_HTTP_PORT`, `CM5AUDIO_WS_PORT`, and `CM5AUDIO_BIND_ADDRESS` override **8182**, **8183**, and **`0.0.0.0`** respectively. Port values are parsed as integers `0..65535`; use explicit nonzero WS ports. HTTP port 0 binds an ephemeral port and the listener log/`WebServer::http_port()` reports the result. **Do not rely on WS port 0 discovery:** IX `getPort()` may still return the requested 0 rather than the assigned port; tests deliberately select nonzero WS ports. The browser audio terminal still defaults its editable WS URL to port 8183—update it manually when overriding that port. There are no port CLI flags; accepted switches are `--plain-text` and `--no-audio`, and unknown arguments fail startup.
+The server defaults to binding `0.0.0.0`, not loopback only.
 
-Without `--plain-text`, TLS is selected when both certificate and key files are readable; otherwise the application falls back to plain HTTP/WS. Invalid readable TLS credentials can fail startup rather than produce a usable TLS listener. Check the listener logs and actual sockets; a startup failure returns a nonzero exit status.
+### Runtime environment variables
 
-Only one instance should own the normal ports:
+| Variable | Default | Purpose |
+|---|---|---|
+| `CM5AUDIO_HTTP_PORT` | `8182` | HTTP(S) listener. `0` requests an ephemeral HTTP port. |
+| `CM5AUDIO_WS_PORT` | `8183` | WS(S) listener. Use a nonzero port; do not rely on discovering an ephemeral WS port. |
+| `CM5AUDIO_BIND_ADDRESS` | `0.0.0.0` | Bind address shared by HTTP and WS listeners. Use `127.0.0.1` for loopback-only tests. |
+| `CM5AUDIO_SETTINGS` | `./cm5audio_settings.json` | Settings file load/save path. |
+| `CM5AUDIO_TLS_CERT` | `./certs/server.crt` | TLS server certificate and certificate download route. |
+| `CM5AUDIO_TLS_KEY` | `./certs/server.key` | TLS private key and private-key download route. |
+| `CM5AUDIO_TLS_P12` | `./certs/server.p12` | PKCS#12 download path; not required to enable TLS. |
+
+Setup-only variables include `CM5AUDIO_HOST` (development certificate subject/SAN; default `192.168.168.172`) and `CM5AUDIO_P12_PASSWORD` (setup bundle password; default `cm5audio`). They do not select the audio backend, change the engine sample rate, or set the native listener bind address.
+
+Without `--plain-text`, TLS is selected when both certificate and key files are readable; otherwise the server falls back to plain HTTP/WS. Readable but invalid credentials can fail startup. Check startup logs and actual listening sockets:
 
 ```bash
 ss -ltnp | grep -E ':8182|:8183'
 ```
 
-### Runtime environment
-
-| Variable | Default | Used for |
-|---|---|---|
-| `CM5AUDIO_HTTP_PORT` | `8182` | HTTP(S) listener port; 0 requests an ephemeral HTTP port |
-| `CM5AUDIO_WS_PORT` | `8183` | WS(S) listener port; use a nonzero value |
-| `CM5AUDIO_BIND_ADDRESS` | `0.0.0.0` | Bind address for both listeners; `127.0.0.1` for isolated tests |
-| `CM5AUDIO_SETTINGS` | `./cm5audio_settings.json` | Settings load/save path |
-| `CM5AUDIO_TLS_CERT` | `./certs/server.crt` | HTTPS/WSS server certificate and certificate download |
-| `CM5AUDIO_TLS_KEY` | `./certs/server.key` | HTTPS/WSS server key and **private-key download** |
-| `CM5AUDIO_TLS_P12` | `./certs/server.p12` | PKCS#12 download file; not needed to enable HTTPS/WSS |
-
-Example:
-
-```bash
-CM5AUDIO_SETTINGS=/path/to/cm5audio_settings.json \
-CM5AUDIO_TLS_CERT=/path/to/server.crt \
-CM5AUDIO_TLS_KEY=/path/to/server.key \
-./cm5audio
-```
-
-Use writable settings directories. Absolute settings/certificate paths do not change the relative dashboard/static asset path requirement.
-
-Setup-only variables include `CM5AUDIO_HOST` (default certificate address `192.168.168.172`) and `CM5AUDIO_P12_PASSWORD` (default `cm5audio`). They do not set the native server bind address, change engine sample rate, or select an audio backend. `etc/environment` and `etc/asound.conf` contain machine-specific examples; cm5audio does not automatically install/read them as application configuration. Do not copy them over system files without adapting them.
+Only one normal instance should own the default ports and settings file at a time.
 
 ## Dashboard workflow
 
-The main UI is **`web_client/dashboard.html`**, served at `/`. It has two tabs.
+The main user interface is `web_client/dashboard.html`, served at `/`. It is intentionally a monolithic HTML/CSS/JavaScript application. Plugin parameter controls and port declarations are generated from the backend registry rather than being duplicated as effect-specific JavaScript definitions.
 
 ### Patchbay
 
-1. Open **Hardware & DSP**, activate the devices to use, then return to **Patchbay**.
-2. Capture endpoints appear as sources; playback endpoints appear as destinations. The tone generator is also a source.
-3. Connect channels by dragging a source channel toward a destination channel, or selecting source then destination.
-4. Drag endpoint headers to reposition nodes. Pan the canvas and use wheel/buttons to zoom; reset zoom or positions when needed.
-5. Click a cable to open **Route Inspector & DSP Chain**.
-6. Adjust route gain/enabled, active/bypass, DSP master gain, and ordered processors. These edits are **local drafts**. **CLOSE** or clicking outside the inspector discards the draft; none sends it to the server. Closing is disabled while APPLY/delete is in flight.
-7. Click **APPLY** to submit the complete route/DSP draft in one request. The inspector closes only after successful engine-adoption acknowledgement and graph refresh; an unconfirmed/error result leaves it open for review.
-8. Use top-level **SAVE** to persist the server's accepted, engine-adopted state. SAVE never reads or applies inspector fields, including an open or abandoned draft, or unapplied tone/global form values.
+1. Open **Hardware & DSP** and activate the capture/playback devices you intend to use.
+2. Return to **Patchbay**. Capture endpoints are sources; playback endpoints are destinations. The tone generator is a mono source. Plugin nodes expose their declared audio input/output ports.
+3. Connect channels by dragging from a source port/channel to a destination port/channel, or use the dashboard's source-then-destination selection interaction.
+4. One source channel can feed multiple destinations. Multiple routes can sum into one destination channel. The engine does not automatically normalize sums.
+5. Move endpoint/plugin nodes by dragging their headers. Pan and zoom the viewport using its canvas controls.
+6. Click a cable to open **Route Inspector** for that specific route. Route gain, enabled state, and route DSP are edited as a local draft.
+7. Click **APPLY** to validate and publish the whole route edit. Closing the inspector or clicking outside before APPLY discards the local draft.
+8. Use top-level **SAVE** to write accepted server state. SAVE does not read, apply, or serialize unsubmitted browser drafts.
 
-Multiple inputs routed to the same output are **summed**, not automatically normalized. Start with low levels: route gain, processor Gain, and DSP master gain can multiply together. A zero gain silences a route; 1 is unity.
+Node positions are browser-local (`localStorage`), not part of `cm5audio_settings.json`. Different browsers or cleared site data do not inherit the same viewport layout.
 
-DSP-active cables receive an effect highlight; disabled routes use a different color. Endpoint meters are polled approximately every 100 ms by the page. This is visual monitoring, not the engine audio processing interval.
+### Individual plugin nodes
 
-Node positions are stored in that browser's `localStorage`, separately from server settings. A different browser or cleared site storage will not inherit the same layout. REFRESH updates hardware/graph/discovery; node positioning does not require a server-side layout API.
+Use the plugin-node creation UI to instantiate a registered processor as an independent graph node. Each node has its own instance ID, parameters, active/bypass state, and declared ports. Audio connections attach to the plugin's audio ports; MIDI connections use the separate MIDI route model.
 
-Inspector APPLY now uses **`POST /api/routes/{id}/apply`** with JSON `{gain,enabled,dsp}`. All route and DSP fields are validated, normalized, and processors constructed before publication; invalid DSP cannot leave an otherwise valid route-gain edit partially accepted. A successful response confirms a completed engine block has adopted the accepted revision, not that downstream hardware/network buffers are empty. Route and DSP are not promised to switch as one instantaneous sample-level transaction during the in-flight request. A **503 pending** is not a rollback: the accepted change may still apply later. Refresh/review authoritative state before retrying; closing afterward discards only the remaining local draft, not an already accepted request. Dashboard non-GET requests also use a promise queue so a subsequent SAVE cannot overtake an earlier APPLY from that page; a rejected request does not poison later queued requests. This is not cross-browser compare-and-swap. There is no draft/applied comparison modal yet.
+Plugin-node configuration controls are generated from registry metadata. An individual plugin node is not the same as an entry inside a composite plugin-chain node.
 
-### Hardware & DSP
+### Route Inspector conversion
 
-- **Hardware Manager:** enumerate devices and activate/deactivate them.
-- **Tone Generator:** enabled, frequency, amplitude, APPLY TONE.
-- **Global DSP:** master gain and UPDATE DSP.
-- **System Info:** endpoint and route counts.
+- **Extract processor / add as node:** removes one selected processor from a route's DSP chain and creates an individual plugin node between the route's remaining upstream and downstream DSP sections.
+- **Upgrade entire chain to node:** converts the selected route's full ordered DSP chain into one composite plugin-chain node, splitting the original route into upstream and downstream audio connections.
+- A route is one source-channel-to-destination-channel edge. Therefore, converting one route produces a one-channel chain node. The conversion does not automatically group two separate mono routes into a stereo chain; create or configure a multichannel chain node and explicitly connect each channel when stereo processing is required.
 
-The global UI currently exposes only global gain; global compressor threshold/ratio are API-configurable. Tone/global gain fields are not automatically hydrated from their GET APIs on dashboard load; use those APIs to inspect authoritative state. The current dashboard does not provide a general hardware per-channel mute/gain editor, metering history charts, or raw-value visibility toggle.
+### Composite plugin-chain nodes and presets
 
-The auxiliary `/client/scan.html` page also lists/activates devices, but the dashboard Hardware Manager is the primary workflow. Its scan text still mentions ALSA even when another backend is selected.
+A composite chain node has a single serial audio chain and a symmetric width from 1 to 8 channels. Every processor in the chain is configured according to its `chain_channel_mode` declaration:
 
-## DSP processors and extension
+- `per_channel`: an independent mono processor instance/state is created for each channel.
+- `multichannel`: one processor instance receives the entire interleaved bus.
+- `mono_only`: the chain must have exactly one channel; wider chains are rejected.
 
-### Built-in route processors
+The UI supports editing the chain's processors/parameters, order, chain gain, active state, and channel count. Chain presets are independent saved definitions: they can be edited, instantiated as new nodes, or applied to replace an existing chain node's internal chain. Deleting a preset does not delete live nodes previously instantiated from it; deleting a live node does not delete its saved presets.
 
-| Type | Function | Parameters (defaults; accepted ranges) |
-|---|---|---|
-| `gain` | Linear amplitude multiplier | `gain`: 1.0; 0..8 |
-| `compressor` | Basic hard-knee, linear-threshold compression with smoothed gain reduction | `threshold`: 0.5; 0..1. `ratio`: 4; 1..100. `attack`: 0.01 seconds; 0.0001..10. `release`: 0.1 seconds; 0.0001..10 |
-| `passthrough` | No sample processing | Empty `params` object |
+See [`docs/PLUGINS.md`](docs/PLUGINS.md) for implementation and compatibility rules.
 
-EQ, limiter, and other processors are not implemented or advertised. The live discovery response is the authoritative list for the running binary.
+## Routing model
 
-**Threshold is linear amplitude, not dBFS.** For example, −20 dBFS corresponds to `0.1`, not `-20`. To convert an amplitude level from dBFS, use `10^(dBFS/20)`. Older invalid saved configurations are bypassed with a warning rather than silently executed.
+### Endpoint identifiers
 
-The route signal path is conceptually:
+Application graph endpoint strings use these forms:
 
 ```text
-source channel
-  -> ordered processor chain (when DSP active)
-  -> route gain × DSP master gain (when DSP active)
-  -> sum into destination channel
-```
-
-When DSP is bypassed, the chain and DSP master gain are bypassed; ordinary route gain remains effective. Route processors receive a **mono** block at the engine sample rate.
-
-A separate fixed global Gain + Compressor stage runs on **hardware playback** after mixing; it does not run on client playback. Defaults are gain 1, threshold 0.7 linear, ratio 4. Its compressor is stateful and shared between hardware playback calls, so it is not an independently instantiated dynamics processor per hardware channel/device. Its settings are separate from the route registry and are now saved/restored in the optional top-level `global_dsp` settings object (`gain`, `threshold`, `ratio`); older files without it keep defaults.
-
-### Add an effect without editing the dashboard
-
-1. Implement an `AudioProcessor` class using the interface in `include/audio_processor.h`.
-2. Keep its descriptor and factory with its implementation under `src/plugins/`, add a registration function, and include/call it from `src/plugins/register_builtin_processors.cpp` and the Makefile. Application-owned processors can instead register during startup before settings/worker threads.
-3. Rebuild and restart the native program.
-4. Reload the dashboard or refresh processor discovery. The menu and controls follow the backend metadata.
-
-Supported metadata types are numeric, integer, boolean, string, and enum, with defaults and optional numeric bounds/increments/units. Saved current values come from the route API; defaults are used for new instances/missing parameter keys. Unknown parameters/types and invalid values are rejected server-side.
-
-C++ cannot infer useful parameter names, units, or ranges from an arbitrary processing function: **the descriptor and factory are required**, but all of this plugin-specific knowledge stays in C++. A new separate source file must also be compiled/linked. Registration is startup-only; there is no runtime hot reload.
-
-See **[docs/PLUGINS.md](docs/PLUGINS.md)** for descriptor fields, a C++ registration example, API details, concurrency rules, and migration behavior. `process()` implementations must not allocate, lock, throw, or perform I/O on the audio thread.
-
-## Routing architecture
-
-### Main components
-
-| Component | Responsibility |
-|---|---|
-| `DeviceManager` | miniaudio context, enumeration, activation/deactivation, active hardware ownership |
-| `HardwareDevice` | Separate capture/playback stream, hardware callback, PCM ring buffers |
-| `ClientManager` | WebClient sessions, endpoint-to-node mapping, immutable route snapshots, persistence |
-| `DspEngine` | Graph rebuild/order, capture, tone, per-route processing/summing, playback, metering |
-| `ProcessorRegistry` | Processor descriptors, discovery, default filling, validation, construction (`include/processor_registry.h`, `src/processor_registry.cpp`) |
-| `WebServer` | HTTP control/static files, WebSocket sessions, canonical route DSP cache |
-
-Normal startup enumerates hardware, constructs/links the engine, restores settings and processor chains, then starts DSP and web service threads. `--no-audio` skips backend initialization/enumeration and cannot activate restored hardware, while retaining logical settings/routes. DSP must exist before settings restoration to apply saved route chains and global DSP.
-
-### Graph and processing
-
-- Routes reference numeric `NodeId` values internally; HTTP/settings use endpoint strings.
-- A dirty flag plus monotonically increasing requested revision triggers graph rebuilding with **Kahn's topological sorting algorithm**. A publication during rebuilding forces a subsequent pass instead of being lost when the current rebuild finishes.
-- A fixed-size handler array resolves node handlers during processing.
-- Node and route scratch buffers are preallocated; per-source adjacency lists avoid scanning all routes for every node.
-- Audio is processed in 64-frame blocks. For fixed block size, routing work scales with active connections; sample work is proportional to routes × frames plus processor cost.
-- A node without a bound physical/client handler can become an internal virtual handler. There is no public virtual-bus creation/list/editor API yet.
-- Route DSP uses **three preallocated state slots** with audio-reader pinning and serialized control-thread writers. Each slot contains the chain **and** DSP master gain/active state; these are published together. Processors are constructed/destroyed on control threads, not while executing the chain. Ordinary route gain/enabled still reside in the separate immutable route snapshot.
-- Disabled/invalid routes do not enter execution-order dependencies. Active media-ready client endpoints and active hardware are included even without an enabled route so playback can receive silence. Short capture reads are zero-filled rather than replaying stale samples.
-- After a full block completes, the engine publishes `adopted_revision` and wakes control-side waiters. POST writers are serialized through this barrier; GET snapshots remain concurrent (the graph GET also takes the control mutex).
-
-This is a DAG-oriented engine, not a guaranteed arbitrary feedback graph. Feedback pools and delay-selection code exist, but cycles are not removed from Kahn's dependency graph before sorting; cyclic nodes can be omitted from execution. **Do not rely on feedback loops as a supported feature.** The current topological ready queue selects the lowest available numeric NodeId first; this does not make cycles supported.
-
-Preallocated buffers and safe publication are improvements, **not** a claim of zero-allocation, lock-free, or hard real-time processing. Graph rebuilding still happens from `process_audio()` and allocates/locks. Meter-map structure is now guarded by a shared **mutex** in both engine updates and API readers/reset; channel values remain atomic, but inserting an endpoint may allocate. Session/device snapshots and retirement queues also use locks/containers.
-
-PCM rings are noncopyable RAII-owned SPSC buffers. Reads/writes handle wraparound and bound work to available complete frames without application-side allocation/locks. Both producer and consumer must be quiesced before init/uninit/destruction. This narrower property does not make the entire audio engine lock-free; network framing/jitter/drift work is still outstanding.
-
-### Ownership and shutdown
-
-`WebServer` has one serialized lifecycle/shutdown owner. Teardown stops HTTP acceptance and cancels accepted stalled/trickling socket reads through the project-owned `ReliableHttpServer`, then joins HTTP workers while DSP is still available to finish accepted mutations, stops/joins DSP, shuts down WS acceptance/workers, joins the session reaper, and drains session/endpoint retirement. An IX close callback only marks/removes the session and queues retirement: it never joins its own sender. A separate reaper joins retired senders and reclaims endpoint owners outside IX callback/transport locks.
-
-Graph snapshots retain shared hardware/session owners for their raw handler pointers until a later graph or stop releases them. Retired owners are collected on a control thread, not destroyed on the audio worker. Hardware buffers are prepared after channel negotiation but **before** device start; initialized devices are uninitialized even if start failed. Device stop/destruction happens outside the manager lock. A local vendored-miniaudio uninit fix wakes synchronous backend data loops (notably ALSA poll) after setting terminal state, before joining; it avoids a preliminary `ma_device_stop()` wait when backend/state can disagree. Main releases the engine/graph owners before device/context teardown. The local IX TLS/socket-server objects and `ReliableWebSocketServer` address stalled handshakes, accepted-descriptor ownership and late accepted workers. Accepted HTTP connections fail closed if tracking-descriptor allocation fails; both normal stop and startup rollback cancel accepted reads before joining. These are implemented ownership rules, not a claim that physical-backend shutdown has been fully validated.
-
-## HTTP API reference
-
-**Base URL:** `http://HOST:8182` or `https://HOST:8182` according to runtime mode. All API responses are JSON; web/download responses use their appropriate content types.
-
-Unless specifically marked **JSON body**, POST handlers read URL query or form parameters through cpp-httplib. Sending a JSON body to `/api/tone` or `/api/routes` is not equivalent. Whole-route APPLY and route DSP POST accept JSON bodies.
-
-Gains are linear amplitude multipliers, not decibels. Channels are zero-based. Use the exact IDs returned by enumeration/graph; names are display labels, not stable identifiers. APIs do not provide application authentication.
-
-### Mutation completion and save contract
-
-Successful POST handlers run under the shared recursive **control mutex**, covering mutation, adoption wait, and any requested persistence. They request a fresh engine revision and wait up to **1,500 ms** for a complete processing block to acknowledge it (or fail earlier if the engine stops). Responses from accepted POSTs include:
-
-| Field | Meaning |
-|---|---|
-| `accepted_revision` | Target revision accepted/requested for this operation |
-| `adopted_revision` | Highest revision acknowledged after a completed engine block |
-| `adopted` | Whether adoption of this request's target was confirmed |
-| `persisted` | Whether this request successfully wrote settings; false for ordinary APPLY |
-| `persisted_revision` | Last revision successfully saved through this WebServer; initially 0 |
-
-A normal APPLY is **200**, `status:"ok"`, `adopted:true`, `persisted:false`: applied is not saved. Device activation/deactivation also save **after** adoption. Explicit SAVE waits for adoption and writes the accepted server state, never browser drafts.
-
-- **400/404**: validation/lookup rejection where documented; full-route APPLY validates the whole request before changing route/DSP state.
-- **503**, `status:"pending"`, `adopted:false`, `persisted:false`: the request was accepted but adoption was not confirmed within the wait. **It may apply later; this is not cancellation or rollback.** Refresh `/api/graph` and route DSP before retrying. A stopping server can also reject a new request with 503 without acceptance fields.
-- **500**, `adopted:true`, `persisted:false`: accepted state is applied, but SAVE (or device-change autosave) failed. Fix the storage issue and retry SAVE; the live change was not rolled back.
-- SAVE **does not call the serializer** if adoption was not confirmed. It must not report success or replace the file in that case.
-
-Graph GET exposes real `revision` (the requested/accepted engine revision), `adopted_revision`, and `persisted_revision`. These are process-local progress counters, not persisted scene versions, ETags, a compare-and-swap concurrency API, or proof that a physical device has rendered/flushed the block. Revisions can advance for barriers and endpoint lifecycle changes, not only visible route edits. They reset with a new process; restored settings do not initialize `persisted_revision` to a historical disk revision. Legacy route DELETE also waits for adoption and returns accepted/adopted fields and `persisted:false`, but currently omits `persisted_revision`; read it from the graph if needed. Validation/unsupported responses need not include completion fields.
-
-### Pages, static assets, and credential downloads
-
-| Method | URL/path | Behavior |
-|---|---|---|
-| GET | `/` | Main dashboard HTML |
-| GET | `/favicon.ico` | Dashboard icon |
-| GET | `/client/*` | Static mount of `./web_client`; includes the pages/assets below and any other present files |
-| GET | `/client/dashboard.html` | Same dashboard file through the static mount |
-| GET | `/client/index.html` | Browser audio terminal |
-| GET | `/client/scan.html` | Auxiliary device scan page |
-| GET | `/client/dist/client_audio.js` | Generated browser bridge JavaScript |
-| GET | `/client/dist/client_audio.wasm` | Generated WASM module |
-| GET | `/client/favicon.ico` | Icon through the static mount |
-| GET | `/server.crt` | Configured server certificate download; 404 if unavailable |
-| GET | `/server.key` | **Configured server private-key download, unauthenticated**; 404 if unavailable |
-| GET | `/server.p12` | **PKCS#12 bundle download, potentially containing the server key**; 404 if unavailable |
-
-`/client/*` is a directory mount, not a whitelist. Source/build scripts/backups placed in `web_client/` may also be served. Remove/block unwanted files and protect credential routes before wider deployment. Credential routes remain registered in plain-text mode too.
-
-### Device and endpoint discovery
-
-| Method | Endpoint | Parameters / returned data |
-|---|---|---|
-| GET | `/api/devices` | Basic enumeration plus saved requests and active stream diagnostics; no detailed hardware probing |
-| GET | `/api/devices/capabilities` | Explicit, potentially device-opening probe; required `id`, optional `is_capture` |
-| POST | `/api/devices/activate` | Required `id`; opens matching capture/playback entries, registers stable nodes, waits for adoption then saves; activation failure 400, adoption pending 503, applied/save-failed 500 |
-| POST | `/api/devices/deactivate` | Required `id`; removes active bindings while preserving logical node IDs/routes, waits for adoption then saves; completion/error fields as above |
-| GET | `/api/clients` | `{clients:[...]}` with session `id`, `client_id`, `name`, `ip`, `input_channels`, `output_channels`, `input_meters`, `output_meters` |
-| GET | `/api/graph` | `{revision,adopted_revision,persisted_revision,endpoints:[...],routes:[...]}`; endpoint IDs/names/directions/channels, connected flags for known clients, route state including `dsp_active` |
-
-`revision` is now the real changing engine requested revision, not the old hardcoded 1; adoption and persistence can lag it. Tone is mono and has no explicit `name` field in the graph; clients should tolerate optional endpoint fields. Active hardware endpoints include `layout` diagnostics. Disconnected known clients are advertised with placeholder counts (1 input/2 output), not persisted negotiated channel counts. Inactive enumeration channel count 0 means unknown/native selection; it does not mean the device has no channels. Active enumeration reports the opened stream's client width.
-
-Repeated activation succeeds when the matching device is already active at the requested width. A different explicit width is rejected until deactivation; unrelated endpoints and the whole application need not restart. Device state autosave is serialized after adoption and **does report** failure: 503 if adoption is unconfirmed (no save), or 500 if applied but writing settings failed. A 200 acknowledges both adoption and persistence, not physical listening/channel verification.
-
-### Routes
-
-| Method | Endpoint | Parameters / behavior |
-|---|---|---|
-| POST | `/api/routes` | `source_node`, `destination_node` **endpoint strings**; `source_channel`, `destination_channel` 0..253, further bounded by active endpoint width; optional `gain` (default 1, finite 0..8), `enabled` (default true) |
-| POST | `/api/routes/update` | Legacy route-only update: required `id`; `gain` default 1, finite 0..8; `enabled` default true. Missing values reset to defaults, not preserve old values. Failure 400 |
-| POST | `/api/routes/{id}/apply` | **JSON body** `{gain,enabled,dsp}`; whole inspector request validated before route/DSP publication, then engine-adoption acknowledgement; does not save |
-| DELETE | `/api/routes/{id}` | Delete route and cached DSP configuration; 404 if not found |
-
-Route creation returns `status:"ok"`, `id:"X"` plus the shared completion fields: the creation response ID is currently a **string**, while graph/settings route IDs are numbers. Duplicate source-channel/destination-channel connections are rejected with 400. Graph routes use keys `source` and `destination` for endpoint strings, not the POST parameter names `source_node`/`destination_node`.
-
-Route creation rejects invalid/unregistered numeric nodes, indices beyond 0..253, channels/directions outside a known active endpoint's layout, duplicate edges, invalid gain, and exhausted route IDs. Offline/virtual endpoint widths cannot be physically validated; preserved routes are rechecked against actual widths by the graph at reconnect. Fixed node registration is bounded. Enabled cycles are still not comprehensively rejected. Prefer known source/destination endpoints from `/api/graph` and avoid cycles. There is no separate `GET /api/routes`; obtain routes through `/api/graph`.
-
-Endpoint naming:
-
-```text
-hardware/<device-id>/capture
-hardware/<device-id>/playback
+hardware/<backend-device-id>/capture
+hardware/<backend-device-id>/playback
 client/<client-id>/capture
 client/<client-id>/playback
 tone/generator
+plugin/<plugin-instance-id>/<audio-port-id>
 ```
 
-### DSP discovery and per-route chains
+Use the exact endpoint IDs returned by `/api/graph`. The display name is not an identifier. Plugin input ports are destinations; plugin output ports are sources. MIDI plugin-port connections use `plugin/<id>/<midi-port-id>` but are represented in the separate `midi_routes` collection rather than as audio channel routes.
 
-| Method | Endpoint | Parameters / returned data |
+### Channel mapping, fan-out, and mixing
+
+`POST /api/routes` creates a connection between one source channel and one destination channel. Channel indices are zero-based. There is no automatic `capture CH1 -> playback CH1` mapping; configure every connection explicitly.
+
+- Fan-out: the same source endpoint/channel can be connected to multiple destination endpoint/channels.
+- Summing: multiple source routes can target one destination channel. Samples are summed; the engine does not apply an automatic normalization/limiter just because routes converge.
+- Gain: route gain is a linear amplitude multiplier, finite and bounded from 0 to 8. `1.0` is unity, `0.0` is silence.
+- Direction and width: a source must be a source endpoint, a destination must be a destination endpoint, and channel indices must fit the known endpoint width. The 254-channel index bound corresponds to `0..253`.
+- Duplicated identical source-channel/destination-channel routes are rejected.
+
+The application graph is scheduled using a topological order. **Enabled graph cycles are unsupported.** Existing feedback buffers are not general cycle support; cyclic nodes may be omitted from the execution order. Avoid creating feedback loops.
+
+### Route DSP versus graph-native processing
+
+A route DSP chain is stored on a route and processes that route's single source channel as mono. Its conceptual signal path is:
+
+```text
+source endpoint/channel
+    -> route DSP processors in order (when active)
+    -> DSP master gain (when active)
+    -> ordinary route gain
+    -> sum into destination endpoint/channel
+```
+
+When route DSP is bypassed, the processor chain and DSP master gain are bypassed; ordinary route gain remains active. Route gain and DSP master gain multiply each other.
+
+A composite plugin-chain node is a separate graph node, not a special route DSP setting. Its audio input and output can have multiple channels, it owns its ordered internal processor chain, and its output can fan out to multiple destinations. Use a composite chain node for stereo/multichannel processing rather than trying to make one route DSP chain span several unrelated channel routes.
+
+A separate fixed global Gain + Compressor stage operates on **hardware playback** after mixing. Its default values are gain `1.0`, threshold `0.7` (linear amplitude), and ratio `4`. The compressor state is shared across hardware playback calls; it is not an independently instantiated dynamics processor for every hardware channel/device. This fixed stage does not run on client playback and is separate from the registry-backed route/plugin processors.
+
+## DSP processors and plugin chains
+
+The registry is compiled into the native executable. It currently registers these 22 types:
+
+| Type | Display name / purpose |
+|---|---|
+| `passthrough` | No-op sample processor. |
+| `gain` | Linear amplitude multiplier. |
+| `compressor` | Hard-knee compressor; threshold is linear amplitude, with smoothed gain reduction. |
+| `echo` | Delay/echo effect. |
+| `chorus` | Modulated chorus effect. |
+| `reverb` | Reverb effect. |
+| `lush_reverb` | Extended/lusher reverb implementation. |
+| `eq` | Equalizer. |
+| `autotune` | Pitch-correction processor. |
+| `vowel_filter` | Vowel/formant-style filter. |
+| `soft_clipper` | Soft clipping/saturation. |
+| `hpf` | High-pass filter. |
+| `lpf` | Low-pass filter. |
+| `deesser` | De-essing processor. |
+| `normalize` | Automatic gain control/level normalization. |
+| `expander` | Downward expansion. |
+| `noise_gate` | Noise gate. |
+| `bitcrusher` | Bit-depth/rate-reduction effect. |
+| `limiter` | Look-ahead limiter. |
+| `midi_pitch_shifter` | MIDI-controlled audio pitch shifting. |
+| `midi_harmonizer` | MIDI-controlled harmonizer. |
+| `rnnoise` | RNNoise-based denoising processor. |
+
+The registry's runtime discovery endpoint (`GET /api/dsp/available`) is authoritative for the exact compiled list, parameter defaults/ranges, port layouts, and channel mode of the running binary. A type listed above does not imply that every conceivable port layout is supported; use discovery.
+
+### Parameter values and validation
+
+The supported descriptor parameter types are:
+
+- `number`
+- `integer`
+- `boolean`
+- `string`
+- `enum`
+
+Numeric descriptors can specify minimum, maximum, positive UI step, and a display-only unit. Units are not converted by the backend. A step is a UI increment, not a promise that the backend quantizes values to that step. Numeric values must be finite and within declared bounds; integer values must be whole. Enum values must match a declared choice and retain their JSON type. Unknown parameter keys and invalid types/ranges are rejected rather than silently clamped or ignored.
+
+**Compressor thresholds and other linear-amplitude controls are not dBFS values.** For example, -20 dBFS corresponds to an amplitude value of `0.1`, using `10^(dBFS/20)`. Do not pass `-20` to a parameter whose descriptor range is `0..1`.
+
+### Chain channel modes
+
+A processor descriptor declares one of three `chain_channel_mode` values that control how the processor is embedded in a composite plugin-chain node:
+
+| Mode | Composite chain behavior |
+|---|---|
+| `per_channel` | Create one independent mono processor instance/state for every chain channel. The processor receives one channel at a time. This is the default for descriptors that do not explicitly declare a mode. |
+| `multichannel` | Create one processor instance and call it with the full interleaved chain buffer and actual channel count. The processor implementation must correctly process interleaved samples and preserve intended cross-channel linking. |
+| `mono_only` | Reject the composite chain if its channel count is greater than one. |
+
+In this revision, `gain`, `compressor`, `normalize`, `limiter`, and `hpf` explicitly declare `multichannel`. `rnnoise` declares `mono_only`. Other processors use the descriptor's declared mode; descriptors default to `per_channel` unless they override it. Check discovery rather than assuming a processor is multichannel merely because its implementation loops over a `channels` argument.
+
+Multichannel does not always mean linked stereo behavior. The processor implementation defines that behavior. For example, the compressor calculates a frame peak across the entire bus and applies one smoothed gain value to every channel in that frame; Normalize shares its envelope/gain state across channels. A `per_channel` compressor configuration uses independent mono instances/state, so it is not linked stereo compression.
+
+### Composite chain limits and behavior
+
+- Channel count is 1..8 and is symmetric for the chain's main audio input and output.
+- The ordered chain must contain at least one processor and no more than 16.
+- Chain gain must be finite and within 0..8.
+- Every processor type and parameter object is validated by the registry.
+- A `mono_only` processor makes any chain width greater than one invalid.
+- `chain_gain` is applied after the internal processor stages.
+- Each channel follows the same processor order; `per_channel` stages maintain independent per-channel state, while `multichannel` stages receive the complete interleaved bus.
+- Existing chain presets without a `channels` value default to mono when restored, preserving compatibility with older settings.
+
+### Presets and live nodes
+
+Presets are stored in `plugin_chain_presets` and live node instances in `plugin_nodes`. They are separate collections. Editing a preset does not automatically mutate already-created nodes. Instantiate a preset to create a new node, or use the replace-preset operation to replace an existing chain node while retaining the node identity and its graph cabling where valid. Deleting a preset does not delete live nodes instantiated from it; deleting a live node does not delete the saved preset.
+
+See [`docs/PLUGINS.md`](docs/PLUGINS.md) for the processor interface, port descriptors, channel-mode rules, MIDI event queues, registration steps, and plugin-specific constraints.
+
+## MIDI support
+
+### Typed MIDI ports and graph routes
+
+A processor descriptor may declare MIDI input and/or output ports. MIDI is event data, not a channel-count audio bus. The native graph supports routes from a declared plugin MIDI output to a declared plugin MIDI input.
+
+Endpoint names follow:
+
+```text
+plugin/<plugin-instance-id>/<midi-port-id>
+```
+
+Use `GET /api/plugins`, `GET /api/graph`, or `GET /api/midi/routes` to inspect declared ports and configured MIDI graph routes. `POST /api/midi/routes` requires a valid declared MIDI output source and MIDI input destination. MIDI graph connections are not audio routes and do not appear in the ordinary `.routes` array.
+
+### Event representation and bounds
+
+`MidiEvent` preserves the event timestamp/value field, a protocol marker (`1` for MIDI 1.0, `2` for UMP), a payload size, and up to 16 payload bytes. The bounded `MidiEventQueue` is a multi-producer/single-consumer queue with capacity 1,024 and a dropped-event counter. A `MidiOutputBuffer` has fixed capacity (up to 256 events per block in the current constants). This is bounded event transport, not an unrestricted MIDI stream or a full DAW MIDI scheduler.
+
+### Physical MIDI-device boundary
+
+The MIDI Pitch Shifter and MIDI Harmonizer still own their current PipeWire MIDI discovery/input services. Their source-selection parameters are compatibility controls for those existing services; they are not evidence that physical MIDI devices are already generic graph endpoints. The graph can route events between plugin MIDI ports, and the existing services can feed their plugin's input queue, but a centralized physical MIDI device manager/source-node system is not implemented in this revision.
+
+See `docs/PLUGINS.md` for event-buffer usage and requirements for MIDI-aware processors.
+
+## Tone generator, global DSP, and meters
+
+### Tone generator
+
+The tone generator is a mono source endpoint named `tone/generator`, channel index `0`. It generates a sine wave with:
+
+- `enabled`: enabled/disabled state.
+- `frequency_hz`: 1..20,000 Hz.
+- `amplitude`: 0..1 linear peak amplitude.
+
+Use `GET /api/tone` to read authoritative values. `POST /api/tone` accepts query/form parameters `enabled`, `frequency`, and `amplitude`; the POST field is called `frequency`, while GET/settings use `frequency_hz`. Accepted tone changes are applied and automatically persisted by the server wrapper after engine adoption.
+
+### Global DSP
+
+`GET/POST /api/dsp` controls the fixed hardware-playback Gain + Compressor stage (gain, threshold, ratio). It is not a dynamic registry processor chain and does not affect WebSocket-client playback. The global DSP object is stored in settings under `global_dsp`; use top-level SAVE after changing it if the endpoint does not report persistence.
+
+### Meter API
+
+`GET /api/meters` and its alias `GET /api/metrics` return a structure with endpoint and plugin meter collections:
+
+```json
+{
+  "capture": {
+    "hardware/<device-id>/capture": [
+      {
+        "ch": 0,
+        "raw_value": 0.1,
+        "raw_peak": 0.2,
+        "rms_db": -20.0,
+        "peak_db": -14.0,
+        "peak_hold_db": -12.0,
+        "clipped": false
+      }
+    ]
+  },
+  "playback": {},
+  "tone": [],
+  "plugins": {
+    "<plugin-instance-id>": {
+      "audio_in": [],
+      "audio_out": []
+    }
+  }
+}
+```
+
+Actual numeric values depend on the audio signal. Meter entry fields:
+
+| Field | Meaning |
+|---|---|
+| `ch` | Zero-based channel index. |
+| `raw_value` | RMS amplitude for the last measured block. |
+| `raw_peak` | Absolute peak amplitude for the last measured block. |
+| `rms_db` | RMS level in dBFS, with a low-level floor used by the implementation. |
+| `peak_db` | Peak level in dBFS, with the same low-level floor. |
+| `peak_hold_db` | Maximum peak level retained by the meter until reset/reinitialization. |
+| `clipped` | Whether the most recently measured block exceeded absolute sample value 1.0; it is not a permanently latched clip-history flag. |
+
+Tone has one meter channel. Plugin meters are grouped by plugin instance ID and audio port ID. The ordinary `capture` and `playback` maps are keyed by endpoint string. `/api/raw` provides a reduced capture/playback-only view with `ch`, `value`, and `peak`. `POST /api/reset_clips` resets clip/peak-hold state; use the endpoint/type/channel selectors or `all` according to the handler contract.
+
+Meter polling in the dashboard is visual telemetry and is not the DSP block interval. Meter maps use synchronization; the values are atomically sampled, but the whole telemetry API should not be described as lock-free.
+
+## HTTP API reference
+
+**Base URL:** `http://HOST:8182` in plain mode or `https://HOST:8182` in TLS mode. API responses are JSON. The server does not provide application authentication.
+
+Unless stated otherwise, POST handlers read URL query/form parameters through cpp-httplib. Endpoints explicitly described as **JSON body** require JSON. Sending JSON to a query/form endpoint is not equivalent.
+
+### General completion fields
+
+Mutating POST handlers are serialized by the shared control mutex and request an engine revision. Where the handler uses the shared adoption wrapper, it waits up to 1,500 ms for a completed DSP block to acknowledge that revision.
+
+| Field | Meaning |
+|---|---|
+| `accepted_revision` | Engine revision requested for this mutation. |
+| `adopted_revision` | Highest engine revision acknowledged after a completed processing block. |
+| `adopted` | Whether this mutation's target revision was confirmed adopted. |
+| `persisted` | Whether this request also wrote the settings file successfully. |
+| `persisted_revision` | Process-local revision most recently saved by this WebServer. |
+
+A normal APPLY can return HTTP 200 with `adopted:true` and `persisted:false`: this means live state was applied but not saved. A 503 `pending` response means the request was accepted but adoption was not confirmed within the timeout; **the request may still apply later**. It is not a rollback/cancellation. Refresh `/api/graph` and the relevant resource before retrying. A 500 response after `adopted:true` means live state was applied but persistence failed; fix the storage issue and retry SAVE. Revisions are process-local progress counters, not settings schema versions, ETags, physical-device flush acknowledgements, or compare-and-swap tokens.
+
+### Pages and static assets
+
+| Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/dsp/available` | `{schema_version:1,max_chain_length:16,processors:[...]}`; each processor includes `type,name,description,defaults,parameters`; `Cache-Control: no-store` |
-| GET | `/api/routes/{id}/dsp` | `{active,gain,chain}`; optional `warning` for bypassed invalid saved configuration |
-| POST | `/api/routes/{id}/dsp` | **JSON body** `{active:bool,gain:number,chain:[{type:string,params:object},...]}`; replaces whole DSP state |
+| GET | `/` | Main dashboard HTML. |
+| GET | `/favicon.ico` | Dashboard icon. |
+| GET | `/client/*` | Broad static mount of `./web_client/`. |
+| GET | `/client/index.html` | Browser audio terminal. |
+| GET | `/client/scan.html` | Auxiliary device scan page. |
+| GET | `/client/dist/client_audio.js` | Generated WASM bridge JS, if built. |
+| GET | `/client/dist/client_audio.wasm` | Generated WASM module, if built. |
+| GET | `/server.crt` | Configured certificate download. |
+| GET | `/server.key` | Configured **private key download**, unauthenticated in this revision. |
+| GET | `/server.p12` | Configured PKCS#12 bundle download, potentially containing the private key. |
 
-Each processor must include `params` (use `{}` for all defaults). Omitted keys inside it are filled from descriptors. Unknown types/keys, invalid parameter types/ranges, chains longer than 16, and invalid master gain fail with 400 before altering the prior configuration. Missing top-level fields default to `active:false`, `gain:1`, `chain:[]`. DSP gain must be finite and 0..8.
+The `/client/*` mount is a directory mount, not a strict whitelist. Files added under `web_client/` can become downloadable.
 
-A valid DSP-only update returns `{status:"ok",active,gain,chain}` plus the shared completion fields, with canonical/default-filled parameter values; 200 confirms adoption, not persistence. Malformed/zero/out-of-range numeric IDs return 400; nonexistent routes return 404; existing routes outside the supported DSP ID range return 400. Supported DSP IDs are currently `1..1023`.
+### Device and client APIs
 
-Whole-route `/apply` requires numeric route `gain` (finite 0..8), boolean `enabled`, and a `dsp` object using the schema above. Validation of all route/DSP fields and processor construction precede publication; 400 leaves both field groups unchanged. It returns canonical DSP fields at the top level (`active`, DSP `gain`, `chain`), plus `route_gain`, `enabled`, and completion fields. Missing route is 404; the same DSP ID capacity applies. The route snapshot and DSP slot are separate publications while the request is in flight; the final adoption barrier confirms completion rather than promising a single instantaneous sample-level swap of both.
-
-See [docs/PLUGINS.md](docs/PLUGINS.md) for the full metadata schema and typed controls.
-
-### Tone and fixed global DSP
-
-| Method | Endpoint | Parameters / returned data |
+| Method | Path | Parameters / response |
 |---|---|---|
-| GET | `/api/tone` | `{enabled,frequency_hz,amplitude}` |
-| POST | `/api/tone` | Optional `enabled`, `frequency` 1..20000 Hz, `amplitude` 0..1; invalid numeric values 400 |
-| GET | `/api/dsp` | Fixed global hardware-playback `{gain,threshold,ratio}` |
-| POST | `/api/dsp` | Optional finite `gain >= 0`, `threshold >= 0`, `ratio >= 1`; invalid values 400 |
+| GET | `/api/devices` | Enumerated devices with backend, active directions, widths, and opened layout metadata where available. |
+| GET | `/api/devices/capabilities` | Required `id`, optional `is_capture`; performs an explicit capability probe that may open/query the device. |
+| POST | `/api/devices/activate` | Required `id`; optional `capture_channels` and `playback_channels`; `0` automatic or `1..254` explicit. Saves after adoption. |
+| POST | `/api/devices/deactivate` | Required `id`; deactivates matching directions, preserves logical endpoint IDs/routes, then saves after adoption. |
+| GET | `/api/clients` | Active WebSocket client sessions and their input/output channel counts. |
+| GET | `/api/graph` | Application graph: `revision`, `adopted_revision`, `persisted_revision`, `endpoints`, `routes`, `plugin_nodes`, `midi_routes`. |
+| GET | `/api/pipewire/graph` | Optional PipeWire topology. Returns `enabled:false` with empty arrays when CLI-disabled; actual topology when enabled. |
 
-Tone POST uses **`frequency`**, while GET/settings use **`frequency_hz`**. The tone graph endpoint advertises one channel and writes **channel 0 (CH1)**. Route that channel to any desired outputs.
+Device activation requests with a changed explicit width are rejected while the device is active; deactivate it first. Capability tuples are advisory; the actual open remains authoritative.
 
-Global DSP is separate from per-route plugin chains and is now saved/restored under optional `global_dsp`. Tone and fixed-global POST handlers gather and validate values before storing fields, then use the shared adoption barrier. Numeric query helpers retain permissive legacy parsing: some unparsable text can fall back to the prior/default value rather than fail. Do not infer strict JSON typing or compare-and-swap semantics from these query endpoints. The global Gain/Compressor parameters remain individual atomic controls, not a dynamic registry rack.
+### Audio route APIs
 
-### Metering, unsupported hardware controls, and settings
-
-| Method | Endpoint | Parameters / returned data |
+| Method | Path | Parameters / response |
 |---|---|---|
-| GET | `/api/meters` | `{capture:{endpoint:[meters...]},playback:{endpoint:[meters...]}}` |
-| GET | `/api/metrics` | Alias of `/api/meters` |
-| GET | `/api/raw` | Same capture/playback map shape, each channel `{ch,value,peak}` |
-| POST | `/api/control` | **501 unsupported** for hardware channel gain/mute; no new control-bank mutation or sample effect. Use route gain or a Gain processor |
-| POST | `/api/reset_clips` | `all=1`, or required `endpoint`, `type`, `ch`; resets `clipped=false`, `peak_hold_db=-60` |
-| POST | `/api/settings/save` | No required body; waits for engine adoption, then serializes accepted applied state. 200 adopted+persisted; 503 pending/no save; 500 applied but save failed |
+| POST | `/api/routes` | Form/query: `source_node`, `destination_node` endpoint strings, `source_channel`, `destination_channel`; optional `gain`, `enabled`. |
+| POST | `/api/routes/update` | Legacy route-only form/query update: required `id`, optional/defaulted `gain`, `enabled`. Omitted values use handler defaults rather than preserving unspecified old values. |
+| GET | `/api/graph` | Use this for the route list; there is no separate `GET /api/routes` route-list endpoint. |
+| DELETE | `/api/routes/{id}` | Remove route and cached route DSP state; adoption is awaited. |
+| GET | `/api/routes/{id}/dsp` | Read `{active,gain,chain}` and optional warning for an invalid/bypassed stored chain. |
+| POST | `/api/routes/{id}/dsp` | **JSON body** replacing the complete route DSP configuration. |
+| POST | `/api/routes/{id}/apply` | **JSON body** `{gain,enabled,dsp}`; validates and applies ordinary route state plus complete DSP draft as one request. |
 
-Meter entries contain `ch`, `raw_value`, `raw_peak`, `rms_db`, `peak_db`, `peak_hold_db`, `clipped`. `raw_value`/`value` is **block RMS**, and `raw_peak`/`peak` is **block absolute peak**, not a stream of individual raw samples. `/api/meters` and `/api/raw` iterate existing metric maps, not a strict active-device snapshot, and emit the stored endpoint bank's actual channel count. Reconnection at a new width replaces the bank; old inactive endpoint banks may remain until process restart. Session meter arrays are also returned by `/api/clients`, but the engine currently updates endpoint metric maps rather than those session arrays; use endpoint maps for engine metering.
+`POST /api/routes` creates a route using exact endpoint strings and zero-based channels. Route create rejects duplicate endpoint/channel edges, invalid directions, out-of-range indices, unknown endpoints, invalid gain, and exhausted IDs. Route IDs are finite; route DSP supports IDs 1..1023.
 
-Peak-hold and clip fields are part of the API, but continuous peak-hold accumulation and latched clipping are not implemented in the current meter update. `clipped` reflects the most recently updated block's peak `> 1.0`. Active hardware/client capture short reads are zero-filled and metered as silence; a disconnected or no-longer-updated endpoint can leave old entries in the metric maps. RESET CLIPS is not a substitute for removing clipping from the signal path.
+Whole route APPLY JSON example:
 
-General tone/route query helpers treat `1`, `true`, and `on` as true. JSON route/DSP controls require actual booleans. `/api/reset_clips` resets all banks whenever the **`all` parameter is present**, even `all=0`. Meter-map access is mutex-protected in readers, reset, and engine updates; this is not lock-free telemetry.
-
-### API examples
-
-Examples modify the running configuration. Use a trusted host, low output levels, and endpoint IDs obtained from your own graph. For HTTPS, replace the base URL and configure certificate trust instead of disabling TLS verification.
-
-```bash
-BASE=http://127.0.0.1:8182
-curl -fsS "$BASE/api/devices"
-curl -fsS "$BASE/api/graph"
-curl -fsS "$BASE/api/dsp/available"
+```json
+{
+  "gain": 0.8,
+  "enabled": true,
+  "dsp": {
+    "active": true,
+    "gain": 1.0,
+    "chain": [
+      {"type": "gain", "params": {"gain": 0.9}},
+      {"type": "compressor", "params": {"threshold": 0.1, "ratio": 4.0}}
+    ]
+  }
+}
 ```
 
-Activate a device, then create a tone route to a chosen playback endpoint:
+All outer fields are required by the whole-route APPLY handler. `dsp` replaces the complete route DSP configuration, not a partial patch. Each chain item requires a known `type` and a `params` object; missing parameter keys receive descriptor defaults. Invalid types, unknown parameter keys, wrong JSON types, non-finite numbers, and out-of-range values are rejected. The maximum processor count is 16.
 
-```bash
-curl -fsS -X POST "$BASE/api/devices/activate" \
-  --data-urlencode 'id=YOUR_DEVICE_ID'
+Route DSP-only example:
 
-curl -fsS -X POST "$BASE/api/routes" \
-  --data-urlencode 'source_node=tone/generator' \
-  --data-urlencode 'destination_node=hardware/YOUR_DEVICE_ID/playback' \
-  --data-urlencode 'source_channel=0' \
-  --data-urlencode 'destination_channel=0' \
-  --data-urlencode 'gain=0.1' \
-  --data-urlencode 'enabled=1'
-
-curl -fsS -X POST "$BASE/api/tone?enabled=1&frequency=440&amplitude=0.05"
+```json
+{
+  "active": true,
+  "gain": 1.0,
+  "chain": [
+    {"type": "gain", "params": {"gain": 0.5}},
+    {"type": "compressor", "params": {"threshold": 0.1, "ratio": 4.0}}
+  ]
+}
 ```
 
-Use the returned route ID (substitute it for `1` here):
+### Processor discovery and plugin-node APIs
 
-```bash
-curl -fsS -X POST "$BASE/api/routes/1/apply" \
-  -H 'Content-Type: application/json' \
-  --data '{"gain":0.1,"enabled":true,"dsp":{"active":true,"gain":1,"chain":[{"type":"gain","params":{"gain":0.5}},{"type":"compressor","params":{"threshold":0.1,"ratio":4,"attack":0.01,"release":0.1}}]}}'
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/dsp/available` | No-store registry discovery, schema version 2, processor parameters/ports/channel modes and resource limits. |
+| GET | `/api/plugins` | `{plugin_nodes, midi_routes}`. |
+| POST | `/api/plugins` | **JSON body** create a registered processor instance; can supply `type`, `name`, `params`, and either `input_channels`/`output_channels` or `port_channels`. |
+| POST | `/api/plugins/{id}` | **JSON body** update instance name, parameters, active state, and channel/port widths. |
+| DELETE | `/api/plugins/{id}` | Remove plugin node; waits for adoption and automatically saves. |
+| POST | `/api/plugins/extract` | **JSON body** `{route_id,processor_index}`: extract one processor from a route DSP chain into an individual node. |
+| POST | `/api/plugins/extract-chain` | **JSON body** `{route_id,name?,channels?}`: convert the selected route's complete DSP chain into a composite plugin-chain node. |
+| POST | `/api/plugins/chains` | **JSON body** `{chain,name?,chain_gain?,active?,channels?}`: create a composite plugin-chain node. |
+| POST | `/api/plugins/{id}/chain` | **JSON body** replacing an existing composite node's chain/configuration. |
+| POST | `/api/plugins/{id}/replace-chain-preset` | **JSON body** `{preset_id}`: replace a live chain node's internal chain from a saved preset. |
 
-curl -fsS "$BASE/api/routes/1/dsp"
-curl -fsS -X POST "$BASE/api/tone?enabled=0"
-curl -fsS -X POST "$BASE/api/settings/save"
+For a standard plugin node, use `port_channels` to set named audio port widths when the processor declares more than the legacy primary pair. The registry descriptor is authoritative; unknown port IDs or invalid widths are rejected.
+
+Example standard node creation:
+
+```json
+{
+  "type": "gain",
+  "name": "Stereo Gain",
+  "params": {"gain": 0.75},
+  "input_channels": 2,
+  "output_channels": 2
+}
 ```
 
-Inspect mutation JSON as well as HTTP status: APPLY should report `adopted:true`; SAVE must report both `adopted:true` and `persisted:true`. On 503, refresh instead of blindly repeating a route create; on 500 save failure, the live accepted state is still applied.
+Composite chain creation example:
 
-## WebSocket protocol
+```json
+{
+  "name": "VOIPProc",
+  "channels": 2,
+  "active": true,
+  "chain_gain": 1.0,
+  "chain": [
+    {"type": "compressor", "params": {"threshold": 0.5, "ratio": 4.0}},
+    {"type": "normalize", "params": {"target": 0.25, "speed": 0.1, "max_gain": 4.0}},
+    {"type": "limiter", "params": {"threshold": 0.9, "attack": 0.005, "release": 0.05, "lookahead": 20}}
+  ]
+}
+```
 
-**Default port:** 8183 (override with `CM5AUDIO_WS_PORT`; use nonzero ports). The browser terminal uses `/ws/audio`; the current server callback does not enforce a specific request path. Use the conventional URL rather than assuming a REST endpoint on that port.
+The chain endpoint validates every processor and the composite width before publication. `channels` is the symmetric main audio bus width and must be 1..8.
 
-### Text identity messages
+### Plugin-chain preset APIs
 
-Client sends:
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/plugin-chain-presets` | `{presets:[...]}`. |
+| POST | `/api/plugin-chain-presets` | **JSON body** create a preset: required `name` and `chain`; optional `chain_gain`, `active`, `channels`. |
+| POST | `/api/plugin-chain-presets/{id}/update` | **JSON body** partial preset update; omitted fields keep their current values. |
+| POST | `/api/plugin-chain-presets/{id}/instantiate` | Create a new live chain node from the preset; optional JSON `name` override. |
+| DELETE | `/api/plugin-chain-presets/{id}` | Delete the preset definition; does not delete existing live nodes. |
+
+Preset operations are persisted by the server after validation/adoption. Preset edits do not automatically rewrite live nodes already created from the preset. Use `/api/plugins/{id}/replace-chain-preset` to apply a chosen preset to an existing chain node. That operation retains the node ID and existing graph connections where the replacement remains compatible with the port layout.
+
+### MIDI graph APIs
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/midi/routes` | `{midi_routes:[...]}` current plugin-to-plugin MIDI connections. |
+| POST | `/api/midi/routes` | **JSON body** `{source,destination}`; source must be a declared MIDI output and destination a declared MIDI input. |
+| DELETE | `/api/midi/routes/{id}` | Remove a MIDI graph connection. |
+
+Example:
+
+```json
+{
+  "source": "plugin/4/midi_out",
+  "destination": "plugin/6/midi_in"
+}
+```
+
+### Tone, fixed global DSP, meters, and settings
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/tone` | Current tone `{enabled,frequency_hz,amplitude}`. |
+| POST | `/api/tone` | Query/form `enabled`, `frequency`, `amplitude`; automatically saves after adoption. |
+| GET | `/api/dsp` | Current fixed global hardware-playback `gain`, `threshold`, `ratio`. |
+| POST | `/api/dsp` | Query/form update of the fixed global controls; use top-level SAVE to persist. |
+| GET | `/api/meters` | Capture/playback/tone/plugin meter banks. |
+| GET | `/api/metrics` | Alias of `/api/meters`. |
+| GET | `/api/raw` | Reduced capture/playback raw RMS/peak view. |
+| POST | `/api/reset_clips` | Reset clip/peak-hold state (`all` or endpoint/type/channel selectors). |
+| POST | `/api/control` | Returns HTTP 501; hardware gain/mute is not wired into samples. |
+| POST | `/api/settings/save` | Wait for engine adoption, then serialize the server's accepted state. |
+
+`POST /api/settings/save` does not apply browser drafts. It saves state already accepted by the backend and adopted by the engine. A 200 response should include `adopted:true` and `persisted:true`; a pending adoption is not saved, and a write failure after adoption is reported as an error.
+
+## WebSocket audio protocol
+
+**Default port:** 8183. The bundled browser terminal conventionally connects to `/ws/audio`; the server callback does not enforce only that literal path. Use an explicit nonzero port. TLS mode uses WSS.
+
+### Text identity message
+
+Client sends a JSON `hello` message:
 
 ```json
 {
@@ -695,250 +814,211 @@ Client sends:
 }
 ```
 
-`input_channels` means **client to server** (client capture); `output_channels` means **server to client** (client playback). Counts are clamped to 1..8, not zero-channel modes. `client_key` and `name` are accepted aliases for `client_id` and `client_name`.
+- `input_channels` means **client to server** (the client's capture stream).
+- `output_channels` means **server to client** (the client's playback stream).
+- Each count is clamped/validated to the supported 1..8 range; zero-channel stream modes are not supported.
+- `client_key` and `name` are accepted aliases for `client_id` and `client_name`.
 
-Server messages:
+The server can send `assigned`, `identity_accepted`, `identity_conflict`, and `media_ready` messages. Application session creation occurs after a successful WebSocket upgrade/open event, not merely after a TCP accept. The browser terminal stores client identities in `localStorage`; identity collision handling is session naming/coordination, **not authentication**.
 
-- `assigned`: sent only after the WebSocket **Open** event/successful upgrade creates the application session; includes `connection_id`, provisional `client_id`, and `name`. A TCP accept or failed/stalled handshake creates no application session/sender.
-- `identity_accepted`: includes accepted `client_id` and `name`.
-- `identity_conflict`: includes the already claimed `client_id`.
-
-The bundled page stores identities in `localStorage`. A duplicate active claim prompts the user before creating a new ID. This is naming/session coordination, **not authentication or secure identity ownership**.
+The first valid hello establishes rings and endpoint identity. Binary media before `media_ready` is ignored. A ready session cannot be resized or renamed in place by sending a different identity/channel configuration; reconnect with a new session when changing those values.
 
 ### Binary media
 
-Payloads are raw interleaved float32 PCM. There is no application header/version, sequence number, timestamp, stream ID, explicit frame count, or byte-order marker. Current deployment assumes the engine's 48 kHz format and compatible float representation/byte order.
+Binary payloads are raw interleaved float32 PCM. There is no application header/version, sequence number, timestamp, stream ID, byte-order marker, or explicit frame count. The current deployment assumes compatible float representation/byte order and a 48 kHz engine. The bundled WASM terminal captures in 480-frame/10 ms units; this is separate from the native engine's 256-frame processing block. The terminal may send `sample_rate` and `format` hello metadata, but the current server does not perform a full rate/format negotiation or compensate for clock drift.
 
-The bundled terminal sends a mono microphone stream and receives stereo playback. Its WASM network tick uses 480-frame/10 ms capture packets; this is separate from the server's 64-frame processing block. The page sends `sample_rate:48000` and `format:"f32"` in its hello, but the server currently **does not negotiate or validate those fields**, nor echo final channel/rate parameters in `identity_accepted`.
+There is no application-level network jitter buffer, backpressure policy, sequence-loss recovery, or clock-drift compensation. Do not equate successful WebSocket delivery with bounded low-latency media under arbitrary network conditions.
 
-The first valid hello initializes PCM rings once, starts the sender, claims the endpoint identity, then publishes `media_ready`. Binary media before readiness is ignored. Once ready, a repeated hello with the **same identity and clamped channel counts** is acknowledged without reinitializing buffers. Changing identity or channel counts returns `identity_conflict` with a reconnect instruction; a ready session is not resized/renamed in place (a new display name on an otherwise identical hello is not adopted). Duplicate identity or endpoint-capacity failure also rejects the claim and closes that connection.
+## Settings persistence and restoration
 
-Endpoint numeric IDs and route endpoint strings survive disconnect; graph handler binding refreshes on reconnect with the same client identity. Senders are retired/joined outside IX callbacks. Transport still lacks framing, jitter policy, underrun/overrun statistics, backpressure diagnostics, rate/format negotiation, and clock-drift compensation. Do not equate WebSocket reliability with bounded real-time latency.
+Default settings path: `./cm5audio_settings.json`, overridden by `CM5AUDIO_SETTINGS`.
 
-## Persistence and restoration
+The settings file is runtime state, not a portable/versioned project interchange format. The current top-level `version` marker is `1`; it is not a comprehensive migration framework.
 
-Default file: **`./cm5audio_settings.json`**, overridden by `CM5AUDIO_SETTINGS`.
-
-Stored top-level data:
-
-| Key | Contents |
+| Top-level key | Contents |
 |---|---|
-| `version` | Current settings marker, 1; not a full migration framework |
-| `activated_devices` | Device IDs to attempt to activate at startup |
-| `tone` | Enabled, `frequency_hz`, amplitude |
-| `global_dsp` | Optional fixed hardware-playback DSP `gain`, `threshold`, `ratio`; older files without it keep defaults |
-| `hardware.capture`, `hardware.playback` | Endpoint/channel stored gain/mute banks |
-| `routes` | Route IDs, endpoint strings, channels, gain, enabled, optional DSP state/chain |
-| `clients` | Known client IDs mapped to display names |
+| `version` | Current settings marker (`1`). |
+| `activated_devices` | Backend device IDs the application should attempt to activate at startup. |
+| `device_streams` | Optional per-device requested capture/playback channel counts. Missing entries use automatic selection. |
+| `tone` | Tone generator `enabled`, `frequency_hz`, and `amplitude`. |
+| `global_dsp` | Optional fixed hardware-playback DSP `gain`, `threshold`, and `ratio`. |
+| `routes` | Route IDs, source/destination endpoint strings, source/destination channel indices, gain, enabled state, and optional route DSP object. |
+| `plugin_nodes` | Live plugin instances: IDs, type/name, active state, parameters, audio port widths; chain nodes also include chain, chain gain, and channel width. |
+| `plugin_chain_presets` | Named reusable chain definitions, parameters, chain gain, active state, and channel count. |
+| `midi_routes` | Plugin MIDI output-to-input endpoint connections. |
+| `clients` | Known client IDs mapped to display names. |
+| `hardware.capture`, `hardware.playback` | Legacy per-channel gain/mute banks retained for compatibility; not applied to samples in this revision. |
 
-Save is serialized under the control mutex with snapshot construction and other accepted mutations. It creates a **unique same-directory `PATH.tmp.XXXXXX`** file with `mkstemp`, checks the complete write loop (including short writes/EINTR), checks file `fsync` and `close`, then checks rename over the destination. Failure returns false and removes the temporary file where possible; the old destination remains until a successful rename. Unique names prevent temporary-file collisions, but do not coordinate multiple independent processes writing the same destination—use one owner.
+The serializer builds a snapshot and writes a unique same-directory `PATH.tmp.XXXXXX` file using `mkstemp`, checks the full write loop, `fsync`s and closes the file, then renames it over the destination. A failed write/rename reports failure and cleans up the temporary file where possible. The existing file remains in place until successful rename.
 
-**Durability boundary:** there is no parent-directory `fsync`, crash/power-loss rollback, previous-good snapshot selection, or automatic `.bak` recovery. A successful API save is not a guarantee that the rename survives a sudden power loss. Crash rollback and a draft/applied comparison modal are deferred requirements, not P0 features. Back up important configurations yourself.
+Durability and ownership limitations:
 
-- Top-level **SAVE** / `POST /api/settings/save` waits for adoption and persists accepted applied state only. No adoption means 503 and **no file write**; an I/O failure after adoption means 500, not a false success or live-state rollback.
-- Device activation/deactivation also saves after adoption, potentially including other already accepted changes; failures are surfaced in the response.
-- Route create/update/delete/APPLY, route DSP, tone, and fixed global controls do not automatically save. Apply first, then SAVE. Browser-local drafts, including abandoned inspector edits, are never serialized.
-- Global DSP **is** persisted. Optional `device_streams` stores requested capture/playback widths by backend device ID. Older files without it use backend automatic selection. Browser canvas layout, browser identity storage, and negotiated client channel counts are **not** part of server settings persistence.
-- Legacy hardware gain/mute banks are loaded and preserved on save but remain inaudible; `/api/control` rejects new edits with 501.
-- Invalid/unavailable processor chains are preserved and bypassed with a warning. Correct/remove the offending processor and APPLY; recreating the route is also possible, but discards the old chain.
-- There is no settings import/reload HTTP endpoint. Change an offline file carefully and restart the application to load it.
+- There is no parent-directory `fsync`, automatic previous-good snapshot selection, `.bak` recovery, or crash/power-loss rollback.
+- The in-process mutex coordinates one server instance only. Use one process as the owner of a settings path.
+- Keep your own backups before migrations or offline edits.
+- Settings loading occurs at startup; there is no live settings-file reload/import endpoint. Stop the process, edit carefully, then restart.
+- Invalid/unavailable saved processor definitions may be skipped or retained as invalid/bypassed route DSP with a warning, depending on the state type. Discovery does not rewrite the file merely because a parameter/type is no longer valid.
+- Disconnected device/client endpoints and their routes can remain logically registered. A reconnect with the same identity can rebind the existing endpoint. Routes that do not fit the currently active width are retained but cannot process until a compatible width is available.
 
-**Endpoint restoration:** loading registers nonempty saved source/destination strings even when endpoints are offline, instead of resolving them to an invalid transient node. A same-identity reconnect/reactivation binds the preserved node to its new handler; full endpoint strings (including embedded slashes) are matched. Offline source buffers start silent. Invalid/out-of-capacity saved routes or indices beyond 253 are skipped. Routes that no longer fit an active endpoint's width are retained in configuration but do not process; they can become valid again after reopening at a suitable width. This is finite process-local identity mapping, not universal hardware hotplug discovery or identity migration across different audio backends. Verify physical device IDs and routes after changing backend/hardware; disconnected known-client channel counts remain placeholders until hello.
+### What is automatically saved?
 
-If you want to test without your normal wiring, stop the application and use a separate settings path rather than deleting a working configuration. A missing settings file starts without restored routes.
+The current API has path-specific persistence behavior. In broad terms:
 
-## TLS and browser microphone access
+- Tone updates automatically save after engine adoption.
+- Device activation/deactivation save after adoption.
+- Plugin-chain preset create/update/delete operations save.
+- Composite chain-node create/update/replace and chain extraction operations save.
+- Plugin-node deletion saves after adoption.
+- Ordinary route changes, route DSP changes, fixed global DSP changes, and ordinary non-chain plugin-node create/update operations require top-level SAVE if they are to survive restart.
 
-The dashboard can be used over plain HTTP on a trusted LAN. Browser microphone access is different: `getUserMedia()` generally requires a **secure context** (HTTPS or localhost) and explicit browser permission. A LAN IP served over HTTP is usually not a secure context.
+Check the response's `persisted` field rather than assuming every accepted mutation was written. A successful `POST /api/settings/save` writes accepted engine state, not the dashboard's unsaved drafts.
 
-### Prepare a development certificate
+Browser-local viewport positions and local client identity storage are not included in `cm5audio_settings.json`.
 
-```bash
-./scripts/setup.sh --no-install --no-build --no-wasm --host YOUR_SERVER_IP_OR_DNS
-```
+## TLS, browser access, and security
 
-The helper validates existing certificate/key files and their host/SAN, regenerating them if needed. It creates `certs/server.crt`, `certs/server.key`, and a PKCS#12 bundle. Override `CM5AUDIO_P12_PASSWORD` if creating the bundle; default password is `cm5audio`. **The bundle contains the server private key and is not a safe general-purpose client trust distribution format.**
+The dashboard can be used over plain HTTP on a trusted LAN. Browser microphone capture via `getUserMedia()` generally requires a secure context (HTTPS or localhost) and explicit browser permission; a LAN IP served over HTTP is usually not treated as a secure context.
 
-Start normally (without `--plain-text`) and use `https://HOST:8182/client/index.html` with `wss://HOST:8183/ws/audio`.
+TLS is selected when the certificate and key paths are readable and `--plain-text` is not supplied. TLS files are configurable through `CM5AUDIO_TLS_CERT`, `CM5AUDIO_TLS_KEY`, and `CM5AUDIO_TLS_P12`. `CM5AUDIO_TLS_P12` is a download path, not a prerequisite for enabling HTTPS/WSS.
 
-### Trust a self-signed certificate on Ubuntu/Chromium
+### Current deployment warnings
 
-Copy **only the public certificate** and the trust helper to the browser machine via a trusted channel. For example, adjust server username/path/host for your installation:
+This revision is designed for trusted development/LAN use, not direct Internet exposure:
 
-```bash
-scp USER@HOST:/path/to/cm5audio/certs/server.crt /tmp/cm5audio.crt
-scp USER@HOST:/path/to/cm5audio/scripts/trust_server_cert.sh /tmp/trust_server_cert.sh
-chmod +x /tmp/trust_server_cert.sh
-/tmp/trust_server_cert.sh /tmp/cm5audio.crt
-```
+- The default bind address is `0.0.0.0`.
+- The application API has no authentication or authorization layer.
+- `/server.key` serves the configured server private key when present.
+- `/server.p12` can serve a PKCS#12 bundle containing the server key.
+- These credential download routes are registered even in plain-text mode.
+- `/client/*` is a broad static directory mount and can expose any file placed beneath `web_client/`.
+- The WebSocket listener is a separate port from HTTP; securing/reverse-proxying HTTP alone does not secure or proxy the WS listener.
 
-Run the helper as the **normal desktop/browser user**, not root and not after `sudo su -`. It uses sudo for the system store and imports peer trust into that user's NSS database. If `certutil` is missing:
+Before untrusted-network deployment, disable/remove direct private-key and PKCS#12 download routes, rotate credentials that may have been exposed, distribute only public certificate/CA material, add authentication/authorization/origin/rate/size controls, isolate network access, audit the static mount, and run the process under a least-privilege account with the required audio permissions. Do not rely on a reverse proxy if clients can still connect directly to the native listener ports.
 
-```bash
-sudo apt-get install libnss3-tools
-/tmp/trust_server_cert.sh /tmp/cm5audio.crt
-```
-
-Compare the certificate fingerprint over a trusted channel before trusting it. Fully exit/restart Brave/Chromium, open the HTTPS terminal, allow microphone access, and click START AUDIO. Certificate trust behavior varies by OS/browser; importing a certificate is not a universal guarantee of WebSocket/browser acceptance.
-
-Verify HTTP certificate trust independently:
-
-```bash
-curl -fsS https://HOST:8182/ -o /dev/null \
-  -w 'HTTPS trust works: HTTP %{http_code}\n'
-```
-
-Port 8183 is a WebSocket service, not an ordinary webpage. Opening `https://HOST:8183/` in the address bar can produce HTTP/protocol errors and is not a valid UI test.
-
-### Development-only Chromium override
-
-For an isolated plain-text test, Chromium has:
-
-```text
-chrome://flags/#unsafely-treat-insecure-origin-as-secure
-```
-
-Add the exact dashboard/client origin, such as `http://192.168.168.172:8182`, relaunch the browser, and use WS rather than WSS. This weakens browser security and should not be a normal deployment strategy. Never use it as an alternative to protecting an exposed server.
-
-## Security and deployment boundaries
-
-**Current application authentication/authorization: none.** Anyone who can reach the listeners can potentially inspect/control routing, change settings, connect a media client, or claim an unused client identity. Both listeners default to all IPv4 interfaces (`0.0.0.0`); set `CM5AUDIO_BIND_ADDRESS=127.0.0.1` for local isolation when appropriate.
-
-**Critical existing credential exposure:** `GET /server.key` serves the configured TLS private key without authentication, and `GET /server.p12` serves a bundle which the setup script creates with that key. The browser terminal currently links to these downloads. HTTPS does not protect the key from a requester authorized only by network reachability; plain-text mode leaves the same routes available over HTTP. A known bundle password is not a meaningful access boundary.
-
-Before use beyond an isolated trusted development environment:
-
-- Remove/disable or explicitly block private-key/bundle routes, including at any directly reachable listener—not merely a proxy the client can bypass.
-- Rotate server credentials if they may have been downloaded by untrusted parties.
-- Distribute only the public certificate/CA information to clients; never the server private key.
-- Add appropriate authentication, authorization, origin/access policies, rate/size limits, and network isolation.
-- Audit the broad `/client` static mount and remove source, backup, or other unintended downloadable files.
-- Protect settings files, prevent accidental remote overwrites, and use a least-privileged service account with the required audio access.
-- Do not assume a reverse proxy for HTTP automatically handles the separate WebSocket port or solves direct-port access.
-
-The supplied files and helpers are development conveniences, not a production security configuration. Root is not an inherent application requirement, although your chosen audio server/device and deployment permissions must permit access. Backend selection under root may differ from the desktop user's audio session.
+The application does not inherently require root. Running as root may select a different audio server context/session than the desktop user; use the appropriate account and permissions for the selected backend.
 
 ## Source map
 
 ```text
 cm5audio/
 ├── include/
-│   ├── constants.h                  Block size, channel width, staging/processor limits
-│   ├── device_manager.h             Hardware/context ownership declarations
-│   ├── audio_processor.h            Native processor interface
-│   ├── processor_registry.h         Processor descriptors and registry API
-│   ├── plugins/                     Built-in processor interfaces
-│   ├── dsp_engine.h                 Routing engine state and processor publication
-│   ├── web_server.h                 Routes, sessions, meters/controls, server declarations
-│   ├── reliable_websocket_server.h  Single-owner IX accepted-worker shutdown wrapper
-│   ├── reliable_http_server.h  Accepted HTTP socket cancellation during shutdown
-│   ├── ring_buffer.h           miniaudio PCM ring-buffer wrapper
-│   ├── miniaudio.h             Vendored audio implementation/API
-│   └── httplib.h               Vendored HTTP implementation/API
+│   ├── constants.h                  Engine block, channel, staging and port limits
+│   ├── audio_processor.h            Audio/MIDI event types and processor interfaces
+│   ├── processor_registry.h         Processor parameter/port/channel descriptors
+│   ├── device_manager.h              Backend/device ownership declarations
+│   ├── dsp_engine.h                  Graph processing, route DSP, revision and meter state
+│   ├── web_server.h                  Routes, plugin instances, presets, settings and sessions
+│   ├── reliable_http_server.h        Accepted HTTP socket cancellation/shutdown wrapper
+│   ├── reliable_websocket_server.h   IXWebSocket accepted-worker shutdown wrapper
+│   ├── ring_buffer.h                 PCM ring-buffer wrapper
+│   ├── plugins/                      Built-in processor interfaces
+│   ├── miniaudio.h                   Vendored miniaudio API/implementation declarations
+│   └── httplib.h                     Vendored cpp-httplib
 ├── src/
-│   ├── main.cpp                Startup/link/restore order, signals, server ports
-│   ├── device_manager.cpp      Backend priority, enumeration, activation, callbacks
-│   ├── dsp_engine.cpp          Graph rebuilding, processing, DSP publication, meters
-│   ├── processor_registry.cpp  Discovery, validation and construction
-│   ├── plugins/                Built-in processor implementations and registration
-│   ├── web_server.cpp          API handlers, settings, registry bridge, WebSockets
-│   ├── miniaudio_impl.cpp      Single native miniaudio implementation + debug output
-│   ├── alsa_caps.cpp           Optional native ALSA capability probe
-│   └── alsa_bridge_test.cpp    Experimental standalone bridge
+│   ├── main.cpp                      Startup, arguments, signal handling, lifecycle
+│   ├── device_manager.cpp            Backend priority, devices, activation and callbacks
+│   ├── dsp_engine.cpp                Graph rebuilding, processing, routing and meters
+│   ├── processor_registry.cpp        Registry validation, normalization and discovery
+│   ├── web_server.cpp                HTTP/WS API, plugin instances, presets and settings
+│   ├── miniaudio_impl.cpp             Single native miniaudio implementation
+│   └── plugins/                      Built-in processor implementations and registration
 ├── web_client/
-│   ├── dashboard.html          Main visual patchbay and dynamic processor editor
-│   ├── index.html              Optional browser audio terminal
-│   ├── client_main.cpp         Emscripten/miniaudio PCM bridge
-│   ├── scan.html               Auxiliary device enumeration UI
-│   ├── build_wasm.sh           Browser bundle build
-│   ├── favicon.ico             UI icon
-│   └── dist/                   Generated JS/WASM (ignored)
-├── scripts/
-│   ├── setup.sh                Dependency checks, development TLS, builds
-│   ├── install_ixwebsocket.sh  TLS-enabled IXWebSocket installer
-│   └── trust_server_cert.sh    Desktop system/NSS certificate helper
-├── third_party/ixwebsocket/     Matching local TLS/socket ownership patches, provenance/license
-├── docs/PLUGINS.md              Processor registration/API reference
-├── tests/
-│   ├── dsp_plugins_test.cpp    Registry/DSP/API/persistence tests
-│   ├── dashboard_plugins_test.js  Dashboard DOM-logic tests
-│   ├── reliability_test.cpp    Ring/graph/sample/adoption/save/restore checks
-│   ├── device_lifecycle_test.cpp  Isolated null-backend lifecycle fixture
-│   └── shutdown_test.py        Isolated plain/TLS child-process shutdown/WS checks
-├── etc/                        Machine-specific ALSA/environment examples
-├── Makefile                    Native server, optional tools, test targets
-├── cm5audio_settings.json       Local runtime settings (ignored)
-├── certs/                      Local TLS credentials (ignored)
-├── build/                      Generated native objects/dependencies/tests (ignored)
-└── PLANNER.md                  Current P0 scope/status plus explicitly archived roadmap
+│   ├── dashboard.html                Main monolithic visual patchbay/plugin editor
+│   ├── index.html                    Optional browser audio terminal
+│   ├── client_main.cpp               Emscripten/miniaudio PCM bridge source
+│   ├── scan.html                     Auxiliary device scan page
+│   ├── build_wasm.sh                 Optional browser audio bundle build
+│   └── dist/                         Generated/ignored WASM JS and module
+├── docs/
+│   └── PLUGINS.md                    Processor, port, chain and MIDI development rules
+├── scripts/                          Setup, IXWebSocket install and certificate helpers
+├── third_party/ixwebsocket/          Local matching IX compatibility sources
+├── tests/                             Plugin, channel, reliability and shutdown checks
+├── Makefile                           Native executable and optional test/tool targets
+├── cm5audio_settings.json             Local runtime settings (normally ignored)
+├── certs/                              Local TLS credentials (normally ignored)
+└── build/                              Generated native objects and dependency files
 ```
 
-Other root-level probe/bridge utilities and backup files may exist during development; they are not part of the main server build unless listed in the Makefile. Keep generated binaries/credentials out of commits. Do not assume a `.bak` settings file is automatically read or maintained by the application.
+The Makefile's `APP_SRCS` list defines what is compiled into the main `cm5audio` binary. Optional helper/test binaries are built only when their explicit targets are invoked; they are not the normal server executable.
 
 ## Diagnostics and troubleshooting
 
-### No sound despite devices appearing
+### Dashboard shows no audio devices
 
-- Confirm the desired capture/playback directions are activated, not just enumerated.
-- Check `/api/graph` for correct endpoint strings, zero-based channel indices, enabled routes, and nonzero gain.
-- Check both route gain and any Gain processors/DSP master gain; they multiply.
-- Check processor active/bypass and any invalid saved-chain warning. A rejected DSP update leaves the previous configuration intact.
-- Ensure the signal is on an actual device channel. Tone currently produces only CH1.
-- Check PulseAudio/JACK/ALSA routing and device ownership outside cm5audio.
-- `/api/control` returns 501 because hardware-bank mute/gain is not wired into samples. Preserved legacy bank values do not control the signal path.
-- Check adoption fields as well as route JSON. An accepted 503 pending request may apply later; it was not rolled back. Avoid enabled cycles.
-- With no enabled routes, active client playback should receive silence; final process-level regression verification is still in progress.
+- Check the startup log for the selected miniaudio backend.
+- Verify that the audio server/backend is running in the same user/session context as `cm5audio`.
+- Compare `/api/devices` with what the selected backend exposes; `aplay -l`/`arecord -l` inspect ALSA and may not represent PulseAudio/JACK-visible devices.
+- Activate the device/direction in Hardware Manager; enumeration alone does not create an active stream.
 
-### JACK errors followed by PulseAudio success
+### No sound despite visible endpoints
 
-This is expected fallback when JACK cannot connect and PulseAudio initializes. Once PulseAudio succeeds, ALSA is not tried for that context. Missing JACK runtime service is not itself a failure of the whole application.
+- Inspect `/api/graph` for exact source/destination IDs, directions, widths, route channel indices, `enabled`, and gain.
+- Verify that the route exists in the intended direction and that channels are zero-based.
+- Check route gain, active route DSP master gain, processor parameters, and fixed global playback DSP. These gains can multiply.
+- Check plugin-node input/output routes and the plugin's active/bypass state.
+- Check whether the node has the intended channel width. A mono route extraction produces a mono chain; it does not automatically create a stereo chain.
+- Use `/api/meters` to distinguish signal absence at capture, plugin input/output, tone, and playback endpoints.
+- Remember that summed routes are not automatically normalized.
+- Avoid enabled graph cycles.
 
-### Why is a 64-frame request showing 128/192-frame buffers?
+### Plugin processor missing or saved chain is invalid
 
-The application requests 64 frames; the backend negotiates actual hardware/server buffering. Read the miniaudio conversion/period logs. Actual latency includes more than the application block. Separate physical devices can also drift because their clocks are not synchronized by the current routing engine.
+- Fetch `/api/dsp/available`; the running binary's registry is authoritative.
+- Verify processor `type`, parameter IDs, JSON types, and bounds against discovery.
+- A removed/renamed type or parameter has no automatic schema migration. Correct/remove the invalid chain entry and apply it again.
+- For composite chains, check `chain_channel_mode`; `mono_only` entries reject widths above one.
+- Rebuild and restart after changing C++ processor code; there is no runtime registry hot reload.
 
-### Unexpected multichannel order
+### Tone generator does not appear audible
 
-Inspect device capabilities and channel maps (enable the relevant development diagnostics if needed). miniaudio or the backend may perform speaker/channel routing. For discrete multichannel I/O, test each physical channel at low amplitude before relying on channel numbering. Avoid interpreting a successful open as verified channel identity.
+- `GET /api/tone` shows authoritative enabled/frequency/amplitude values.
+- Tone is a mono source at `tone/generator`, channel index 0. Create an explicit route to a playback endpoint.
+- Start with a low amplitude and route gain to avoid unexpected output level.
+- Inspect `.tone` in `/api/meters` to verify the generated source itself is active.
 
-### Dashboard works but browser audio does not
+### Optional PipeWire topology tab is empty
 
-- Build the WASM bundle and check its JS/WASM requests under `/client/dist/`.
-- Verify HTTPS trust, secure context, browser microphone permission, and matching WS/WSS scheme.
-- Check ports 8182 and 8183 independently and inspect browser console/network errors.
-- Confirm client identity acceptance; a displayed connection alone does not create route wiring.
-- Treat network media debugging separately from local hardware/plugin operation; transport hardening is still pending.
+- If started without `--enable-pipewire-patchbay`, `/api/pipewire/graph` should return `enabled:false` and empty `nodes`/`links`; this is expected.
+- Restart with `--enable-pipewire-patchbay` to enable the optional topology view.
+- This feature is separate from the application's `/api/graph` routing model.
 
-### New processor missing from dropdown
+### A POST returns 503 or 500
 
-- Register the factory/descriptor in C++, rebuild the actual binary you run, and restart it.
-- Check `[DSP] Registered processors: ...` and `GET /api/dsp/available`.
-- Refresh the page/discovery; opening the route inspector also reloads it.
-- A class declaration alone is not registration. Separate `.cpp` files must be compiled/linked.
-- Discovery errors intentionally disable adding/applying rather than use a fallback hardcoded menu.
+- A 503 `pending` response means accepted state may still be adopted. Refresh authoritative state before retrying; do not assume rollback.
+- A 500 with `adopted:true` indicates the live change was applied but saving failed. Check settings path permissions/filesystem, then retry SAVE.
+- A 400 indicates validation or request-shape failure; confirm whether the endpoint expects form/query parameters or a JSON body.
 
-### Settings do not restore or save
+### Web browser microphone permission fails
 
-Check process working directory, `CM5AUDIO_SETTINGS`, JSON validity, write permissions, and invalid-chain log warnings. Explicit `/api/settings/save` distinguishes 503 unconfirmed adoption/no write from 500 applied but save failed. Global DSP is serialized; browser-only/unapplied drafts are not. Same endpoint identities retain route bindings across reconnects; new identities consume finite slots, and backend-specific hardware IDs can still change. Temporary write/fsync/close/rename errors are not crash rollback; no automatic `.bak` restore exists.
+- Use HTTPS with a trusted certificate or localhost; a LAN HTTP origin is generally not a secure context for microphone capture.
+- Confirm browser microphone permission and use the browser audio terminal page.
+- The native dashboard patchbay itself does not require the WASM bundle.
 
-### Compile cannot find JSON/ALSA/IXWebSocket
+### Settings are missing or did not restore
 
-Install the development headers/libraries and verify include paths. Supply `NLOHMANN_JSON_INCLUDE` for the JSON tree in use. `pkg-config --modversion ixwebsocket` is useful for checking installation, but native compiler/link flags still come from the Makefile. Changing external build flags may require cleaning affected objects.
+- Confirm the process working directory and `CM5AUDIO_SETTINGS` path.
+- Confirm the file is valid JSON and the running account can read it.
+- Settings are loaded at startup; there is no runtime import/reload endpoint.
+- The application does not automatically recover a `.bak` file. Preserve manual backups before editing.
 
-## Known limitations and roadmap
+## Known limitations
 
-The current UI and registry are implemented; the following are remaining work, not advertised completed features:
+The following are implementation boundaries at this documentation baseline, not claims that they are impossible to add:
 
-1. **Network media protocol:** versioned frames, explicit format/sample-rate negotiation, sequence/timestamp tracking, jitter buffers, bounds/error reporting, and clock-drift compensation.
-2. **Real-time hardening and validation:** move graph construction off the processing path; remove remaining meter-map, snapshot and retirement locks/allocations where justified; measure scheduling/queue behavior. Graph endpoint ownership, deferred sender retirement and single-owner shutdown are now implemented, with isolated plain/TLS process checks passed; physical hardware lifecycle/latency checks remain outstanding.
-3. **Graph correctness/resource management:** reject/define cycle policy (enabled cycles remain unsupported), extend offline endpoint validation and improve resource reporting. Stable endpoint IDs and bounded registration fix reconnect identity loss, not unlimited/recycling capacity. Route DSP IDs remain limited to `1..1023`.
-4. **Backend portability:** more JACK/device testing and physical device/channel mapping qualification. Backend-aware ID serialization is implemented for the selected Linux backends. ALSA-only fallback/filtering is now guarded, but general hardware compatibility is a goal, not a guarantee.
-5. **DSP ecosystem:** add EQ/filters/limiters and other registered C++ processors. The dynamic discovery/editor foundation exists; the effects themselves must still be implemented.
-6. **UI/state completion:** global control hydration, implemented hardware sample gain/mute (currently 501 unsupported), complete metering peak/clip behavior, and wider diagnostics. Whole-route validation/adoption is implemented; a draft/applied comparison modal is deferred.
-7. **Persistence recovery:** directory-fsync/power-loss durability and crash rollback/previous-good recovery are deferred. Current unique-temp, checked-file-fsync/close/rename saving is not crash recovery.
-8. **Security:** remove private-key distribution and add enforceable network/application access boundaries before production exposure.
-9. **Deferred optimizations:** clear only necessary node buffers and revisit disabled debug probes when useful. These do not change the low-latency block-size policy; the engine remains at **64 frames**.
+- No built-in authentication/authorization for HTTP or WebSocket control.
+- Unauthenticated private-key/PKCS#12 download routes and a broad static mount require remediation before untrusted deployment.
+- No automatic input-channel-to-output-channel routing.
+- No supported enabled-cycle/feedback graph scheduler.
+- Route-attached DSP remains a per-route mono processing path; use composite plugin-chain nodes for multichannel serial processing.
+- Composite plugin-chain nodes support one serial audio bus (1..8 channels), not arbitrary multiple independent audio buses within one chain definition.
+- Processor channel semantics depend on registry declarations. `per_channel` duplicates processor state per channel; `multichannel` relies on the processor's own interleaved-bus implementation; `mono_only` restricts width to one.
+- RNNoise is explicitly mono-only in this revision.
+- Physical MIDI discovery/connection is still handled by MIDI processor-specific PipeWire services; a centralized, generic physical MIDI device graph is not yet present.
+- MIDI event queues are bounded and events can be dropped when full; this is not a general DAW timeline/clock implementation.
+- WebSocket PCM has no framed/versioned packet format, sequence recovery, network jitter buffer, rate negotiation, or clock-drift compensation.
+- Hardware channel gain/mute controls are not connected to the audio sample path.
+- Settings file save does not implement parent-directory `fsync`, automatic backup recovery, crash rollback, or multi-process coordination.
+- Hardware/backend/channel maps and physical latency still require validation on the target audio devices. Synthetic tests do not prove analog connector mapping or inter-device clock behavior.
 
-There is no implemented server-to-server mesh/discovery protocol, general native client SDK, unlimited-channel engine, or external plugin format hosting yet.
-
-[PLANNER.md](PLANNER.md) starts with a concise current P0 implementation/verification register, then retains the long historical roadmap **as an archive, not a current feature/status list**. Use this README, [docs/PLUGINS.md](docs/PLUGINS.md), and actual code/tests as the operational reference.
+For plugin-specific implementation requirements and API contracts, see [`docs/PLUGINS.md`](docs/PLUGINS.md).

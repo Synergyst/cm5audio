@@ -2383,6 +2383,193 @@ WebServer::WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControl
 
 WebServer::~WebServer() { stop(); }
 
+bool WebServer::load_audio_playlists() {
+    std::lock_guard<std::mutex> lock(m_audioPlaylistMutex);
+    m_audioPlaylists.clear();
+    const auto path = asset_root_path() / "playlists.json";
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return true;
+    try {
+        nlohmann::json document;
+        file >> document;
+        if (!document.is_object() || !document.contains("playlists") || !document["playlists"].is_array())
+            throw std::runtime_error("playlist file has an invalid structure");
+        uint32_t highestId = 0;
+        for (const auto& item : document["playlists"]) {
+            if (!item.is_object() || !item.contains("id") || !item["id"].is_number_integer() ||
+                !item.contains("name") || !item["name"].is_string() ||
+                !item.contains("player_ids") || !item["player_ids"].is_array())
+                continue;
+            const int64_t rawId = item["id"].get<int64_t>();
+            if (rawId <= 0 || rawId >= std::numeric_limits<uint32_t>::max() ||
+                item["player_ids"].empty() || item["player_ids"].size() > 128)
+                continue;
+            AudioPlaylistDefinition playlist;
+            playlist.id = static_cast<uint32_t>(rawId);
+            playlist.name = item["name"].get<std::string>();
+            if (playlist.name.empty() || playlist.name.size() > 80) continue;
+            playlist.repeat = item.value("repeat", false);
+            std::unordered_set<uint32_t> uniquePlayers;
+            bool valid = true;
+            for (const auto& playerValue : item["player_ids"]) {
+                if (!playerValue.is_number_integer()) { valid = false; break; }
+                const int64_t rawPlayer = playerValue.get<int64_t>();
+                if (rawPlayer <= 0 || rawPlayer > std::numeric_limits<uint32_t>::max()) { valid = false; break; }
+                const auto playerId = static_cast<uint32_t>(rawPlayer);
+                if (!uniquePlayers.insert(playerId).second) { valid = false; break; }
+                playlist.player_ids.push_back(playerId);
+            }
+            if (!valid || playlist.player_ids.empty()) continue;
+            highestId = std::max(highestId, playlist.id);
+            m_audioPlaylists.push_back(std::move(playlist));
+        }
+        m_nextAudioPlaylistId.store(highestId + 1, std::memory_order_relaxed);
+        return true;
+    } catch (const std::exception& error) {
+        std::cerr << "[Audio Playlist] Could not restore playlists: " << error.what() << std::endl;
+        return false;
+    }
+}
+
+bool WebServer::save_audio_playlists_locked(std::string& error) const {
+    try {
+        nlohmann::json document = {{"version", 1}, {"playlists", nlohmann::json::array()}};
+        for (const auto& playlist : m_audioPlaylists) {
+            document["playlists"].push_back({{"id", playlist.id}, {"name", playlist.name},
+                {"player_ids", playlist.player_ids}, {"repeat", playlist.repeat}});
+        }
+        std::filesystem::create_directories(asset_root_path());
+        write_json_atomic(asset_root_path() / "playlists.json", document);
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+bool WebServer::trigger_audio_playlist(uint32_t id, const std::string& action,
+                                       size_t index, std::string& error) {
+    std::lock_guard<std::mutex> lock(m_audioPlaylistMutex);
+    const auto playlistIt = std::find_if(m_audioPlaylists.begin(), m_audioPlaylists.end(),
+        [id](const AudioPlaylistDefinition& item) { return item.id == id; });
+    if (playlistIt == m_audioPlaylists.end()) { error = "Audio playlist not found"; return false; }
+
+    const auto nodes = m_clientMgr.get_plugin_nodes();
+    auto findPlayer = [&nodes](uint32_t playerId) -> std::shared_ptr<const PluginNodeInstance> {
+        const auto found = std::find_if(nodes.begin(), nodes.end(), [playerId](const auto& item) {
+            return item && item->id == playerId && item->type == "audio_file_player" && item->audio_player_state;
+        });
+        return found == nodes.end() ? nullptr : *found;
+    };
+    auto stopPlaylistPlayers = [&findPlayer](const AudioPlaylistDefinition& playlist) {
+        for (const uint32_t playerId : playlist.player_ids) {
+            const auto player = findPlayer(playerId);
+            if (!player) continue;
+            auto state = player->audio_player_state;
+            state->playing.store(false, std::memory_order_release);
+            state->position_frames.store(0, std::memory_order_release);
+            state->seek_request_frames.store(0, std::memory_order_release);
+        }
+    };
+    auto startAt = [&](size_t selected) -> bool {
+        if (selected >= playlistIt->player_ids.size()) { error = "Playlist track index is out of range"; return false; }
+        const auto player = findPlayer(playlistIt->player_ids[selected]);
+        if (!player) { error = "Playlist references a missing Audio File Player node: " + std::to_string(playlistIt->player_ids[selected]); return false; }
+        if (!player->active) { error = "Playlist track is bypassed; activate Audio File Player #" + std::to_string(player->id); return false; }
+        if (m_audioPlaylistActive && m_activeAudioPlaylistId != id) {
+            const auto previous = std::find_if(m_audioPlaylists.begin(), m_audioPlaylists.end(),
+                [this](const AudioPlaylistDefinition& item) { return item.id == m_activeAudioPlaylistId; });
+            if (previous != m_audioPlaylists.end()) stopPlaylistPlayers(*previous);
+        }
+        stopPlaylistPlayers(*playlistIt);
+        auto state = player->audio_player_state;
+        state->position_frames.store(0, std::memory_order_release);
+        state->seek_request_frames.store(0, std::memory_order_release);
+        state->playing.store(true, std::memory_order_release);
+        m_activeAudioPlaylistId = id;
+        m_activeAudioPlaylistIndex = selected;
+        m_audioPlaylistActive = true;
+        return true;
+    };
+
+    if (action == "stop") {
+        if (m_activeAudioPlaylistId == id) {
+            stopPlaylistPlayers(*playlistIt);
+            m_audioPlaylistActive = false;
+            m_activeAudioPlaylistId = 0;
+            m_activeAudioPlaylistIndex = 0;
+        } else {
+            stopPlaylistPlayers(*playlistIt);
+        }
+        return true;
+    }
+    if (action == "start") return startAt(0);
+    if (action == "select") return startAt(index);
+
+    if (action == "next" || action == "previous") {
+        if (!m_audioPlaylistActive || m_activeAudioPlaylistId != id) {
+            error = "This playlist is not active";
+            return false;
+        }
+        size_t next = m_activeAudioPlaylistIndex;
+        if (action == "next") {
+            if (next + 1 >= playlistIt->player_ids.size()) {
+                if (!playlistIt->repeat) {
+                    stopPlaylistPlayers(*playlistIt);
+                    m_audioPlaylistActive = false;
+                    m_activeAudioPlaylistId = 0;
+                    m_activeAudioPlaylistIndex = 0;
+                    return true;
+                }
+                next = 0;
+            } else ++next;
+        } else if (next == 0) {
+            if (playlistIt->repeat) next = playlistIt->player_ids.size() - 1;
+        } else --next;
+        return startAt(next);
+    }
+    error = "Playlist action must be start, stop, next, previous, or select";
+    return false;
+}
+
+void WebServer::audio_playlist_scheduler_loop() {
+    while (m_running.load(std::memory_order_acquire)) {
+        uint32_t completedPlaylist = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_audioPlaylistMutex);
+            if (m_audioPlaylistActive && m_activeAudioPlaylistId != 0) {
+                const auto playlist = std::find_if(m_audioPlaylists.begin(), m_audioPlaylists.end(),
+                    [this](const AudioPlaylistDefinition& item) { return item.id == m_activeAudioPlaylistId; });
+                if (playlist == m_audioPlaylists.end() || m_activeAudioPlaylistIndex >= playlist->player_ids.size()) {
+                    m_audioPlaylistActive = false;
+                    m_activeAudioPlaylistId = 0;
+                } else {
+                    const uint32_t playerId = playlist->player_ids[m_activeAudioPlaylistIndex];
+                    const auto nodes = m_clientMgr.get_plugin_nodes();
+                    const auto player = std::find_if(nodes.begin(), nodes.end(), [playerId](const auto& item) {
+                        return item && item->id == playerId && item->type == "audio_file_player" && item->audio_player_state;
+                    });
+                    if (player == nodes.end()) {
+                        m_audioPlaylistActive = false;
+                        m_activeAudioPlaylistId = 0;
+                    } else {
+                        const auto& state = *(*player)->audio_player_state;
+                        if (!state.loop.load(std::memory_order_relaxed) &&
+                            !state.playing.load(std::memory_order_acquire) &&
+                            state.position_frames.load(std::memory_order_acquire) >= state.frames)
+                            completedPlaylist = m_activeAudioPlaylistId;
+                    }
+                }
+            }
+        }
+        if (completedPlaylist) {
+            std::string ignored;
+            trigger_audio_playlist(completedPlaylist, "next", 0, ignored);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
 bool WebServer::start() {
     std::lock_guard<std::mutex> lifecycle(m_lifecycleLock);
     if (m_running.load()) return true;
@@ -2390,6 +2577,8 @@ bool WebServer::start() {
     const std::string keyPath = [] { const char* value = std::getenv("CM5AUDIO_TLS_KEY"); return value && *value ? std::string(value) : "./certs/server.key"; }();
     const std::string p12Path = [] { const char* value = std::getenv("CM5AUDIO_TLS_P12"); return value && *value ? std::string(value) : "./certs/server.p12"; }();
     const bool tlsEnabled = !m_plainText && std::ifstream(certPath).good() && std::ifstream(keyPath).good();
+    if (!load_audio_playlists())
+        std::cerr << "[Audio Playlist] Playlist definitions were not fully restored" << std::endl;
 
     try {
         if (tlsEnabled) {
@@ -2437,7 +2626,7 @@ bool WebServer::start() {
                         path.find("/api/plugin-chain-presets") == 0 ||
                         path == "/api/plugins/chains" ||
                         path == "/api/audio-players" ||
-                        path.find("/api/audio-players/") == 0 && path.find("/settings") != std::string::npos ||
+                        (path.find("/api/audio-players/") == 0 && path.find("/settings") != std::string::npos) ||
                         path == "/api/plugins/extract-chain" ||
                         (path.find("/api/plugins/") == 0 && path.find("/chain") != std::string::npos);
                     if (persistMutation) {
@@ -2995,6 +3184,21 @@ bool WebServer::start() {
                     state->playing.store(false, std::memory_order_release);
                     state->position_frames.store(0, std::memory_order_release);
                     state->seek_request_frames.store(0, std::memory_order_release);
+                    // A manual stop of the currently sequenced player also stops
+                    // its playlist; otherwise the scheduler would remain marked
+                    // active while this track sits at frame zero.
+                    std::lock_guard<std::mutex> playlistLock(m_audioPlaylistMutex);
+                    if (m_audioPlaylistActive && m_activeAudioPlaylistId != 0) {
+                        const auto activePlaylist = std::find_if(m_audioPlaylists.begin(), m_audioPlaylists.end(),
+                            [this](const AudioPlaylistDefinition& item) { return item.id == m_activeAudioPlaylistId; });
+                        if (activePlaylist != m_audioPlaylists.end() &&
+                            m_activeAudioPlaylistIndex < activePlaylist->player_ids.size() &&
+                            activePlaylist->player_ids[m_activeAudioPlaylistIndex] == id) {
+                            m_audioPlaylistActive = false;
+                            m_activeAudioPlaylistId = 0;
+                            m_activeAudioPlaylistIndex = 0;
+                        }
+                    }
                 } else if (action == "seek") {
                     if (!body.contains("position_seconds") || !body["position_seconds"].is_number())
                         throw std::invalid_argument("position_seconds is required for seek");
@@ -3026,6 +3230,189 @@ bool WebServer::start() {
             }
             response.set_header("Cache-Control", "no-store");
             response.set_content(nlohmann::json({{"players", players}}).dump(2), "application/json");
+        });
+
+        const auto audioPlaylistJson = [this]() {
+            nlohmann::json playlists = nlohmann::json::array();
+            const auto nodes = m_clientMgr.get_plugin_nodes();
+            std::lock_guard<std::mutex> lock(m_audioPlaylistMutex);
+            for (const auto& playlist : m_audioPlaylists) {
+                nlohmann::json tracks = nlohmann::json::array();
+                for (const uint32_t playerId : playlist.player_ids) {
+                    const auto found = std::find_if(nodes.begin(), nodes.end(), [playerId](const auto& item) {
+                        return item && item->id == playerId && item->type == "audio_file_player";
+                    });
+                    const bool available = found != nodes.end();
+                    const bool loops = available && (*found)->audio_player_state &&
+                        (*found)->audio_player_state->loop.load(std::memory_order_relaxed);
+                    tracks.push_back({{"player_id", playerId},
+                        {"name", available ? (*found)->name : std::string("Missing player #") + std::to_string(playerId)},
+                        {"available", available}, {"loop", loops}, {"active", available && (*found)->active}});
+                }
+                playlists.push_back({{"id", playlist.id}, {"name", playlist.name},
+                    {"player_ids", playlist.player_ids}, {"repeat", playlist.repeat}, {"tracks", tracks},
+                    {"active", m_audioPlaylistActive && m_activeAudioPlaylistId == playlist.id},
+                    {"current_index", (m_audioPlaylistActive && m_activeAudioPlaylistId == playlist.id) ? m_activeAudioPlaylistIndex : 0}});
+            }
+            return playlists;
+        };
+
+        m_httpServer->Get("/api/audio-playlists", [audioPlaylistJson](const httplib::Request&, httplib::Response& response) {
+            response.set_header("Cache-Control", "no-store");
+            response.set_content(nlohmann::json({{"playlists", audioPlaylistJson()}}).dump(2), "application/json");
+        });
+
+        m_httpServer->Post("/api/audio-playlists", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            try {
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object() || !body.contains("name") || !body["name"].is_string() ||
+                    !body.contains("player_ids") || !body["player_ids"].is_array())
+                    throw std::invalid_argument("name and player_ids are required");
+                AudioPlaylistDefinition playlist;
+                playlist.name = body["name"].get<std::string>();
+                if (playlist.name.empty() || playlist.name.size() > 80)
+                    throw std::invalid_argument("playlist name must contain 1 to 80 characters");
+                playlist.repeat = body.value("repeat", false);
+                if (body["player_ids"].empty() || body["player_ids"].size() > 128)
+                    throw std::invalid_argument("playlist must contain 1 to 128 player nodes");
+                const auto nodes = m_clientMgr.get_plugin_nodes();
+                std::unordered_set<uint32_t> unique;
+                for (const auto& value : body["player_ids"]) {
+                    if (!value.is_number_integer()) throw std::invalid_argument("player_ids must contain integer node IDs");
+                    const int64_t raw = value.get<int64_t>();
+                    if (raw <= 0 || raw > std::numeric_limits<uint32_t>::max()) throw std::invalid_argument("invalid player node ID");
+                    const auto playerId = static_cast<uint32_t>(raw);
+                    if (!unique.insert(playerId).second) throw std::invalid_argument("playlist cannot contain the same player node twice");
+                    const auto found = std::find_if(nodes.begin(), nodes.end(), [playerId](const auto& item) {
+                        return item && item->id == playerId && item->type == "audio_file_player" && item->audio_player_state;
+                    });
+                    if (found == nodes.end()) throw std::invalid_argument("player node does not exist: " + std::to_string(playerId));
+                    playlist.player_ids.push_back(playerId);
+                }
+                std::lock_guard<std::mutex> lock(m_audioPlaylistMutex);
+                playlist.id = m_nextAudioPlaylistId.fetch_add(1, std::memory_order_relaxed);
+                if (playlist.id == 0 || playlist.id == std::numeric_limits<uint32_t>::max())
+                    throw std::runtime_error("playlist ID space exhausted");
+                m_audioPlaylists.push_back(playlist);
+                std::string error;
+                if (!save_audio_playlists_locked(error)) { m_audioPlaylists.pop_back(); throw std::runtime_error(error); }
+                response.set_content(nlohmann::json({{"status", "ok"}, {"playlist", {
+                    {"id", playlist.id}, {"name", playlist.name}, {"player_ids", playlist.player_ids}, {"repeat", playlist.repeat}}}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        });
+
+        m_httpServer->Put(R"(/api/audio-playlists/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            try {
+                uint32_t id = 0;
+                if (!parse_plugin_instance_id(request, id)) throw std::invalid_argument("invalid playlist ID");
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object() || !body.contains("name") || !body["name"].is_string() ||
+                    !body.contains("player_ids") || !body["player_ids"].is_array())
+                    throw std::invalid_argument("name and player_ids are required");
+                AudioPlaylistDefinition updated;
+                updated.id = id;
+                updated.name = body["name"].get<std::string>();
+                if (updated.name.empty() || updated.name.size() > 80) throw std::invalid_argument("playlist name must contain 1 to 80 characters");
+                updated.repeat = body.value("repeat", false);
+                if (body["player_ids"].empty() || body["player_ids"].size() > 128) throw std::invalid_argument("playlist must contain 1 to 128 player nodes");
+                const auto nodes = m_clientMgr.get_plugin_nodes();
+                std::unordered_set<uint32_t> unique;
+                for (const auto& value : body["player_ids"]) {
+                    if (!value.is_number_integer()) throw std::invalid_argument("player_ids must contain integer node IDs");
+                    const int64_t raw = value.get<int64_t>();
+                    if (raw <= 0 || raw > std::numeric_limits<uint32_t>::max()) throw std::invalid_argument("invalid player node ID");
+                    const auto playerId = static_cast<uint32_t>(raw);
+                    if (!unique.insert(playerId).second) throw std::invalid_argument("playlist cannot contain the same player node twice");
+                    const auto found = std::find_if(nodes.begin(), nodes.end(), [playerId](const auto& item) {
+                        return item && item->id == playerId && item->type == "audio_file_player" && item->audio_player_state;
+                    });
+                    if (found == nodes.end()) throw std::invalid_argument("player node does not exist: " + std::to_string(playerId));
+                    updated.player_ids.push_back(playerId);
+                }
+                std::lock_guard<std::mutex> lock(m_audioPlaylistMutex);
+                const auto found = std::find_if(m_audioPlaylists.begin(), m_audioPlaylists.end(), [id](const auto& item) { return item.id == id; });
+                if (found == m_audioPlaylists.end()) throw std::invalid_argument("playlist not found");
+                const auto previous = *found;
+                if (m_activeAudioPlaylistId == id) {
+                    const auto currentNodes = m_clientMgr.get_plugin_nodes();
+                    for (const auto playerId : previous.player_ids) {
+                        const auto currentPlayer = std::find_if(currentNodes.begin(), currentNodes.end(), [playerId](const auto& item) {
+                            return item && item->id == playerId && item->type == "audio_file_player" && item->audio_player_state;
+                        });
+                        if (currentPlayer != currentNodes.end()) {
+                            (*currentPlayer)->audio_player_state->playing.store(false, std::memory_order_release);
+                            (*currentPlayer)->audio_player_state->position_frames.store(0, std::memory_order_release);
+                        }
+                    }
+                    m_audioPlaylistActive = false;
+                    m_activeAudioPlaylistId = 0;
+                    m_activeAudioPlaylistIndex = 0;
+                }
+                *found = updated;
+                std::string error;
+                if (!save_audio_playlists_locked(error)) { *found = previous; throw std::runtime_error(error); }
+                response.set_content(nlohmann::json({{"status", "ok"}, {"playlist", {
+                    {"id", updated.id}, {"name", updated.name}, {"player_ids", updated.player_ids}, {"repeat", updated.repeat}}}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        });
+
+        m_httpServer->Delete(R"(/api/audio-playlists/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            uint32_t id = 0;
+            if (!parse_plugin_instance_id(request, id)) { dsp_error(response, 400, "invalid playlist ID"); return; }
+            std::lock_guard<std::mutex> lock(m_audioPlaylistMutex);
+            const auto found = std::find_if(m_audioPlaylists.begin(), m_audioPlaylists.end(), [id](const auto& item) { return item.id == id; });
+            if (found == m_audioPlaylists.end()) { dsp_error(response, 404, "playlist not found"); return; }
+            if (m_activeAudioPlaylistId == id) {
+                const auto nodes = m_clientMgr.get_plugin_nodes();
+                for (const auto playerId : found->player_ids) {
+                    const auto player = std::find_if(nodes.begin(), nodes.end(), [playerId](const auto& item) {
+                        return item && item->id == playerId && item->type == "audio_file_player" && item->audio_player_state;
+                    });
+                    if (player != nodes.end()) {
+                        (*player)->audio_player_state->playing.store(false, std::memory_order_release);
+                        (*player)->audio_player_state->position_frames.store(0, std::memory_order_release);
+                    }
+                }
+                m_audioPlaylistActive = false;
+                m_activeAudioPlaylistId = 0;
+                m_activeAudioPlaylistIndex = 0;
+            }
+            const auto previous = *found;
+            m_audioPlaylists.erase(found);
+            std::string error;
+            if (!save_audio_playlists_locked(error)) { m_audioPlaylists.push_back(previous); dsp_error(response, 500, error); return; }
+            response.set_content(nlohmann::json({{"status", "ok"}, {"deleted", id}}).dump(), "application/json");
+        });
+
+        const auto playlistTriggerHandler = [this](const httplib::Request& request, httplib::Response& response) {
+            uint32_t id = 0;
+            if (!parse_plugin_instance_id(request, id)) { dsp_error(response, 400, "invalid playlist ID"); return; }
+            try {
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object() || !body.contains("action") || !body["action"].is_string())
+                    throw std::invalid_argument("action is required");
+                const std::string action = body["action"].get<std::string>();
+                size_t index = 0;
+                if (action == "select") {
+                    if (!body.contains("index") || !body["index"].is_number_integer()) throw std::invalid_argument("index is required for select");
+                    const int64_t raw = body["index"].get<int64_t>();
+                    if (raw < 0) throw std::invalid_argument("index must be non-negative");
+                    index = static_cast<size_t>(raw);
+                }
+                std::string error;
+                if (!trigger_audio_playlist(id, action, index, error)) throw std::invalid_argument(error);
+                response.set_content(nlohmann::json({{"status", "ok"}, {"playlist_id", id}, {"action", action}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        };
+        m_httpServer->Post(R"(/api/audio-playlists/(\d+)/trigger)", playlistTriggerHandler);
+        m_httpServer->Get("/api/audio-playlists/status", [this](const httplib::Request&, httplib::Response& response) {
+            std::lock_guard<std::mutex> lock(m_audioPlaylistMutex);
+            response.set_header("Cache-Control", "no-store");
+            response.set_content(nlohmann::json({{"active", m_audioPlaylistActive},
+                {"playlist_id", m_activeAudioPlaylistId}, {"index", m_activeAudioPlaylistIndex}}).dump(2), "application/json");
         });
 
         m_httpServer->Get("/api/plugins", [this](const httplib::Request&, httplib::Response& response) {
@@ -4009,6 +4396,7 @@ bool WebServer::start() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         });
+        m_audioPlaylistScheduler = std::thread([this] { audio_playlist_scheduler_loop(); });
         std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://" << host << ":" << m_httpPort << std::endl;
         return true;
     } catch (const std::exception& error) {
@@ -4022,6 +4410,7 @@ bool WebServer::start() {
         if (m_wsServer) m_wsServer->shutdown();
         if (m_httpThread.joinable()) m_httpThread.join();
         if (m_sessionReaper.joinable()) m_sessionReaper.join();
+        if (m_audioPlaylistScheduler.joinable()) m_audioPlaylistScheduler.join();
         m_clientMgr.stop_sessions();
         m_httpServer.reset();
         m_wsServer.reset();
@@ -4031,8 +4420,10 @@ bool WebServer::start() {
 
 void WebServer::stop() {
     std::lock_guard<std::mutex> lifecycle(m_lifecycleLock);
-    if (!m_httpServer && !m_wsServer && !m_httpThread.joinable() && !m_sessionReaper.joinable()) return;
+    if (!m_httpServer && !m_wsServer && !m_httpThread.joinable() &&
+        !m_sessionReaper.joinable() && !m_audioPlaylistScheduler.joinable()) return;
     m_running.store(false);
+    if (m_audioPlaylistScheduler.joinable()) m_audioPlaylistScheduler.join();
     // Join HTTP workers before ending DSP: accepted mutations either finish their
     // adoption barrier or fail, rather than being interrupted midway through save.
     if (m_httpServer) {

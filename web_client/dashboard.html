@@ -208,6 +208,15 @@
         .plugin-node-type { display: block; color: var(--text-dim); font-size: 10px; font-weight: normal; margin-top: 3px; }
         .plugin-node-actions { display: flex; gap: 4px; flex-shrink: 0; }
         .plugin-node-actions button { min-height: 25px; padding: 2px 7px; font-size: 10px; }
+        .audio-player-controls { display:flex; gap:5px; margin:7px 0 4px; flex-wrap:wrap; }
+        .audio-player-controls button { min-height:25px; padding:2px 10px; font-size:11px; }
+        .audio-playlist-card { border:1px solid var(--border-color); border-radius:7px; padding:10px; margin:8px 0; }
+        .audio-playlist-card.active { border-color:#88c0d0; }
+        .audio-playlist-card strong { display:block; overflow-wrap:anywhere; }
+        .audio-playlist-track-list { color:var(--text-dim); font-size:11px; margin:6px 0; white-space:pre-wrap; }
+        .audio-playlist-actions { display:flex; gap:5px; flex-wrap:wrap; }
+        .audio-playlist-player-choice { display:flex; gap:8px; align-items:center; padding:6px 4px; border-bottom:1px solid rgba(255,255,255,.06); }
+        .audio-playlist-player-choice input { width:auto; }
         .plugin-node-ports { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
         .plugin-node-port-title { color: var(--text-dim); font-size: 10px; font-weight: bold; letter-spacing: .8px; padding: 3px 6px; border-bottom: 1px solid var(--border-color); }
         .plugin-node-port .channel-row { margin: 3px 0; }
@@ -222,10 +231,12 @@
         .plugin-chain-step-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .plugin-chain-step-arrow { color: var(--accent-blue); text-align: center; font-size: 10px; line-height: 12px; }
         .plugin-chain-action { border-color: #8f78b7; color: #c6b3e8; }
-        #audio-assets-modal, #audio-player-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(680px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; display: none; z-index: 1003; background: var(--panel-bg); border: 1px solid #a3be8c; border-radius: 10px; padding: 20px; box-shadow: 0 15px 60px rgba(0,0,0,.75); }
+        #audio-assets-modal, #audio-player-modal, #audio-playlists-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(680px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; display: none; z-index: 1003; background: var(--panel-bg); border: 1px solid #a3be8c; border-radius: 10px; padding: 20px; box-shadow: 0 15px 60px rgba(0,0,0,.75); }
         #audio-player-modal { z-index: 1004; border-color: var(--accent-blue); }
-        #audio-assets-modal h2, #audio-player-modal h2 { margin: 0 0 12px; font-size: 16px; color: #a3be8c; }
+        #audio-playlists-modal { z-index:1005; border-color:#88c0d0; }
+        #audio-assets-modal h2, #audio-player-modal h2, #audio-playlists-modal h2 { margin: 0 0 12px; font-size: 16px; color: #a3be8c; }
         #audio-player-modal h2 { color: var(--accent-blue); }
+        #audio-playlists-modal h2 { color:#88c0d0; }
         .audio-assets-toolbar { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0; }
         .audio-asset-item { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px; border:1px solid var(--border-color); border-radius:7px; margin:7px 0; }
         .audio-asset-info { flex:1 1 220px; min-width:0; }
@@ -580,6 +591,7 @@
                 <button onclick="openPluginModal()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 5px;">ADD PLUGIN NODE</button>
                 <button onclick="openChainPresetsModal()" style="background: #8f78b7; color: #fff; font-weight: bold;">CHAIN PRESETS</button>
                 <button onclick="openAudioAssetsModal()" style="background: #a3be8c; color: #000; font-weight: bold;">AUDIO FILES</button>
+                <button onclick="openAudioPlaylistsModal()" style="background: #88c0d0; color: #000; font-weight: bold;">PLAYLISTS</button>
                 
                 <!-- Layout Backup & Grid Snap Controls -->
                 <button onclick="exportLayout()" style="background: #a3be8c; color: #000; font-weight: bold; margin-left: 15px;">EXPORT LAYOUT</button>
@@ -825,6 +837,28 @@
         </div>
     </div>
 
+    <div id="audio-playlists-modal" role="dialog" aria-modal="true" aria-labelledby="audio-playlists-title">
+        <h2 id="audio-playlists-title">Audio Playlists & Cues</h2>
+        <div class="dsp-help">Playlists sequence existing Audio File Player graph nodes. Each track keeps its own patchbay routes, gain, loop setting, and effects chain. Trigger endpoints are available for external control.</div>
+        <div class="audio-assets-toolbar">
+            <button type="button" class="primary" onclick="beginAudioPlaylistEdit()">NEW PLAYLIST</button>
+            <button type="button" onclick="loadAudioPlaylists()">REFRESH</button>
+        </div>
+        <div id="audio-playlists-status" role="status" class="dsp-help"></div>
+        <div id="audio-playlists-list"></div>
+        <div id="audio-playlist-editor" hidden>
+            <div class="control-row"><label for="audio-playlist-name">Playlist Name</label><input id="audio-playlist-name" type="text" maxlength="80"></div>
+            <label class="audio-player-checkbox"><input id="audio-playlist-repeat" type="checkbox"> Repeat playlist</label>
+            <div class="dsp-help">Select the player nodes and arrange their playback order with ↑ and ↓. Create and route each player node before adding it to a playlist.</div>
+            <div id="audio-playlist-player-choices"></div>
+            <div class="chain-modal-actions">
+                <button type="button" onclick="cancelAudioPlaylistEdit()">CANCEL</button>
+                <button type="button" class="primary" onclick="saveAudioPlaylist()">SAVE PLAYLIST</button>
+            </div>
+        </div>
+        <div class="chain-modal-actions"><button type="button" onclick="closeAudioPlaylistsModal()">CLOSE</button></div>
+    </div>
+
     <script>
         const $ = id => document.getElementById(id);
         let graph = { endpoints: [], routes: [], plugin_nodes: [], midi_routes: [] };
@@ -850,6 +884,8 @@
         let chainPresetDraft = null;
         let chainPresetEditorBusy = false;
         let audioAssets = [];
+        let audioPlaylists = [];
+        let audioPlaylistEditingId = null;
         let audioPlayerPresets = [];
         let audioPlayerEditingId = null;
         let audioPlayerAssetHash = null;
@@ -1859,6 +1895,18 @@ function autoOrganizeLayout() {
                 });
                 actions.append(bypass, settings, savePreset, remove);
             } else if (plugin.type === 'audio_file_player') {
+                // Transport controls live below the title, not in the compact
+                // header action strip. Keeping them separate prevents the Play
+                // button from being clipped by header flex sizing.
+                actions.append(bypass, settings, remove);
+            } else actions.append(bypass, settings, remove);
+            header.append(titleWrap, actions);
+            block.appendChild(header);
+            setupBlockDragging(block, positionKey);
+
+            if (plugin.type === 'audio_file_player') {
+                const controls = document.createElement('div');
+                controls.className = 'audio-player-controls';
                 const makeTransportButton = (label, action) => {
                     const button = document.createElement('button');
                     button.type = 'button';
@@ -1871,12 +1919,10 @@ function autoOrganizeLayout() {
                     });
                     return button;
                 };
-                actions.append(makeTransportButton('▶', 'play'), makeTransportButton('Ⅱ', 'pause'),
-                    makeTransportButton('■', 'stop'), bypass, settings, remove);
-            } else actions.append(bypass, settings, remove);
-            header.append(titleWrap, actions);
-            block.appendChild(header);
-            setupBlockDragging(block, positionKey);
+                controls.append(makeTransportButton('▶ PLAY', 'play'), makeTransportButton('Ⅱ PAUSE', 'pause'),
+                    makeTransportButton('■ STOP', 'stop'));
+                block.appendChild(controls);
+            }
 
             if (plugin.type === 'plugin_chain') {
                 const summary = document.createElement('div');
@@ -2546,6 +2592,7 @@ function autoOrganizeLayout() {
 
         function closeActiveModal() {
             if ($('audio-player-modal').style.display === 'block') closeAudioPlayerModal();
+            else if ($('audio-playlists-modal').style.display === 'block') closeAudioPlaylistsModal();
             else if ($('audio-assets-modal').style.display === 'block') closeAudioAssetsModal();
             else if ($('chain-preset-editor-modal').style.display === 'block') closeChainPresetEditor();
             else if ($('chain-node-modal').style.display === 'block') closeChainNodeModal();
@@ -4005,6 +4052,183 @@ function autoOrganizeLayout() {
             if ($('audio-player-modal').style.display !== 'block') $('overlay').style.display = 'none';
         }
 
+        async function openAudioPlaylistsModal() {
+            $('audio-playlists-modal').style.display = 'block';
+            $('overlay').style.display = 'block';
+            await loadAudioPlaylists();
+        }
+
+        function closeAudioPlaylistsModal() {
+            $('audio-playlists-modal').style.display = 'none';
+            $('audio-playlist-editor').hidden = true;
+            $('overlay').style.display = 'none';
+            audioPlaylistEditingId = null;
+        }
+
+        async function loadAudioPlaylists() {
+            const status = $('audio-playlists-status');
+            const list = $('audio-playlists-list');
+            if (!status || !list) return;
+            status.textContent = 'Loading playlists…';
+            try {
+                const result = await fetchAPI('/api/audio-playlists', { cache: 'no-store' });
+                audioPlaylists = Array.isArray(result.playlists) ? result.playlists : [];
+                renderAudioPlaylists();
+                status.textContent = `${audioPlaylists.length} playlist${audioPlaylists.length === 1 ? '' : 's'} · ${((graph.plugin_nodes || []).filter(item => item.type === 'audio_file_player')).length} player nodes available.`;
+            } catch (error) {
+                status.textContent = `Could not load playlists: ${error.message}`;
+                list.replaceChildren();
+            }
+        }
+
+        function renderAudioPlaylists() {
+            const list = $('audio-playlists-list');
+            list.replaceChildren();
+            if (!audioPlaylists.length) {
+                list.appendChild(dspText('p', 'No playlists have been created.', 'dsp-help'));
+                return;
+            }
+            for (const playlist of audioPlaylists) {
+                const card = document.createElement('div');
+                card.className = `audio-playlist-card${playlist.active ? ' active' : ''}`;
+                const title = dspText('strong', `${playlist.name}${playlist.active ? ' · PLAYING' : ''}`);
+                const trackList = document.createElement('div');
+                trackList.className = 'audio-playlist-track-list';
+                trackList.appendChild(dspText('div', `${(playlist.tracks || []).length} track(s)${playlist.repeat ? ' · repeat' : ''}`));
+                (playlist.tracks || []).forEach((track, index) => {
+                    const trackRow = document.createElement('div');
+                    trackRow.style.display = 'flex';
+                    trackRow.style.alignItems = 'center';
+                    trackRow.style.gap = '8px';
+                    trackRow.style.marginTop = '4px';
+                    const trackName = dspText('span', `${playlist.active && Number(playlist.current_index) === index ? '▶ ' : ''}${index + 1}. ${track.name}${track.available ? '' : ' [missing]'}${track.loop ? ' · loops indefinitely' : ''}`);
+                    trackName.style.flex = '1';
+                    const cue = dspButton('PLAY TRACK', () => triggerAudioPlaylist(playlist.id, 'select', index));
+                    cue.disabled = !track.available;
+                    trackRow.append(trackName, cue);
+                    trackList.appendChild(trackRow);
+                });
+                const actions = document.createElement('div');
+                actions.className = 'audio-playlist-actions';
+                actions.append(
+                    dspButton('PLAY', () => triggerAudioPlaylist(playlist.id, 'start')),
+                    dspButton('STOP', () => triggerAudioPlaylist(playlist.id, 'stop')),
+                    dspButton('PREVIOUS', () => triggerAudioPlaylist(playlist.id, 'previous')),
+                    dspButton('NEXT', () => triggerAudioPlaylist(playlist.id, 'next')),
+                    dspButton('EDIT', () => beginAudioPlaylistEdit(playlist.id)),
+                    dspButton('DELETE', () => deleteAudioPlaylist(playlist.id))
+                );
+                card.append(title, trackList, actions);
+                list.appendChild(card);
+            }
+        }
+
+        function beginAudioPlaylistEdit(id = null) {
+            audioPlaylistEditingId = id === null ? null : Number(id);
+            const playlist = audioPlaylistEditingId === null ? null : audioPlaylists.find(item => Number(item.id) === audioPlaylistEditingId);
+            $('audio-playlist-name').value = playlist?.name || '';
+            $('audio-playlist-repeat').checked = Boolean(playlist?.repeat);
+            const selected = new Set((playlist?.player_ids || []).map(Number));
+            const choices = $('audio-playlist-player-choices');
+            choices.replaceChildren();
+            const players = (graph.plugin_nodes || []).filter(item => item.type === 'audio_file_player').slice();
+            const savedOrder = playlist?.player_ids || [];
+            players.sort((a, b) => {
+                const ai = savedOrder.indexOf(Number(a.id));
+                const bi = savedOrder.indexOf(Number(b.id));
+                if (ai >= 0 && bi >= 0) return ai - bi;
+                if (ai >= 0) return -1;
+                if (bi >= 0) return 1;
+                return Number(a.id) - Number(b.id);
+            });
+            if (!players.length) choices.appendChild(dspText('p', 'Create at least one Audio File Player node before creating a playlist.', 'dsp-error'));
+            for (const player of players) {
+                const row = document.createElement('div');
+                row.className = 'audio-playlist-player-choice';
+                row.dataset.playerId = String(player.id);
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.value = String(player.id);
+                checkbox.checked = selected.has(Number(player.id));
+                const label = dspText('span', `#${player.id} · ${player.name || 'Audio File Player'}`);
+                label.style.flex = '1';
+                const up = dspButton('↑', () => moveAudioPlaylistChoice(row, -1));
+                const down = dspButton('↓', () => moveAudioPlaylistChoice(row, 1));
+                up.title = 'Move earlier in playlist';
+                down.title = 'Move later in playlist';
+                row.append(checkbox, label, up, down);
+                choices.appendChild(row);
+            }
+            $('audio-playlist-editor').hidden = false;
+            $('audio-playlists-status').textContent = playlist ? `Editing playlist #${playlist.id}. Use ↑ and ↓ to change the playback sequence.` : 'Select players, then use ↑ and ↓ to arrange the exact playback sequence.';
+        }
+
+        function moveAudioPlaylistChoice(row, direction) {
+            const container = $('audio-playlist-player-choices');
+            const siblings = Array.from(container.children);
+            const index = siblings.indexOf(row);
+            const target = index + direction;
+            if (index < 0 || target < 0 || target >= siblings.length) return;
+            if (direction < 0) container.insertBefore(row, siblings[target]);
+            else container.insertBefore(siblings[target], row);
+        }
+
+        function cancelAudioPlaylistEdit() {
+            audioPlaylistEditingId = null;
+            $('audio-playlist-editor').hidden = true;
+            $('audio-playlists-status').textContent = '';
+        }
+
+        async function saveAudioPlaylist() {
+            const name = $('audio-playlist-name').value.trim();
+            const playerIds = Array.from($('audio-playlist-player-choices').querySelectorAll('.audio-playlist-player-choice'))
+                .filter(row => row.querySelector('input[type="checkbox"]')?.checked)
+                .map(row => Number(row.dataset.playerId));
+            if (!name || name.length > 80) { $('audio-playlists-status').textContent = 'Enter a playlist name between 1 and 80 characters.'; return; }
+            if (!playerIds.length) { $('audio-playlists-status').textContent = 'Select at least one Audio File Player node.'; return; }
+            const payload = { name, player_ids: playerIds, repeat: $('audio-playlist-repeat').checked };
+            try {
+                const editingId = audioPlaylistEditingId;
+                await fetchAPI(editingId === null ? '/api/audio-playlists' : `/api/audio-playlists/${encodeURIComponent(editingId)}`, {
+                    method: editingId === null ? 'POST' : 'PUT',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                });
+                cancelAudioPlaylistEdit();
+                await loadAudioPlaylists();
+            } catch (error) { $('audio-playlists-status').textContent = `Could not save playlist: ${error.message}`; }
+        }
+
+        async function triggerAudioPlaylist(id, action, index = null) {
+            try {
+                const payload = { action };
+                if (action === 'select') payload.index = Number(index);
+                await fetchAPI(`/api/audio-playlists/${encodeURIComponent(id)}/trigger`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                });
+                await loadAudioPlaylists();
+            } catch (error) { $('audio-playlists-status').textContent = `Playlist trigger failed: ${error.message}`; }
+        }
+
+        async function updateAudioPlaylistStates() {
+            if ($('audio-playlists-modal')?.style.display !== 'block') return;
+            try {
+                const result = await fetchAPI('/api/audio-playlists', { cache: 'no-store' });
+                audioPlaylists = Array.isArray(result.playlists) ? result.playlists : [];
+                renderAudioPlaylists();
+            } catch (error) {
+                console.warn('Audio playlist status refresh failed:', error);
+            }
+        }
+
+        async function deleteAudioPlaylist(id) {
+            const playlist = audioPlaylists.find(item => Number(item.id) === Number(id));
+            if (!playlist || !confirm(`Delete playlist “${playlist.name}”?`)) return;
+            try {
+                await fetchAPI(`/api/audio-playlists/${encodeURIComponent(id)}`, { method: 'DELETE' });
+                await loadAudioPlaylists();
+            } catch (error) { $('audio-playlists-status').textContent = `Could not delete playlist: ${error.message}`; }
+        }
+
         async function loadAudioAssets() {
             const list = $('audio-assets-list');
             const status = $('audio-assets-status');
@@ -4575,6 +4799,7 @@ function autoOrganizeLayout() {
         window.onresize = drawCables;
         setInterval(updateMeters, 100);
         setInterval(updateAudioPlayerStates, 250);
+        setInterval(updateAudioPlaylistStates, 750);
         setInterval(() => loadPipewireGraph(), 1000);
 
         async function init() {

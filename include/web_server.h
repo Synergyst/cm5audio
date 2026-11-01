@@ -302,6 +302,13 @@ private:
     std::atomic<NodeId> m_next_node_id{1};
 };
 
+struct AudioPlaylistDefinition {
+    uint32_t id = 0;
+    std::string name;
+    std::vector<uint32_t> player_ids;
+    bool repeat = false;
+};
+
 class WebServer {
 public:
     WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
@@ -334,6 +341,22 @@ private:
     
     std::thread m_httpThread;
     std::thread m_sessionReaper;
+
+    // Playlist definitions reference existing graph-native Audio File Player
+    // nodes. Playback sequencing is controlled off the audio thread.
+    mutable std::mutex m_audioPlaylistMutex;
+    std::vector<AudioPlaylistDefinition> m_audioPlaylists;
+    std::atomic<uint32_t> m_nextAudioPlaylistId{1};
+    uint32_t m_activeAudioPlaylistId = 0;
+    size_t m_activeAudioPlaylistIndex = 0;
+    bool m_audioPlaylistActive = false;
+    std::thread m_audioPlaylistScheduler;
+
+    bool load_audio_playlists();
+    bool save_audio_playlists_locked(std::string& error) const;
+    bool trigger_audio_playlist(uint32_t id, const std::string& action,
+                                size_t index, std::string& error);
+    void audio_playlist_scheduler_loop();
 };
 
 #endif

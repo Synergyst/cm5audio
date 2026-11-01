@@ -111,6 +111,21 @@ struct PluginPortMeterBank {
     std::unique_ptr<ChannelMeter[]> meters;
 };
 
+// Immutable decoded audio data is shared by live player instances. Transport
+// controls are atomic so HTTP/UI threads can control playback without taking a
+// lock in the DSP callback. The audio worker is the only cursor consumer.
+struct AudioFilePlayerState {
+    std::shared_ptr<const std::vector<float>> interleaved;
+    unsigned channels = 0;
+    unsigned sample_rate = 48000;
+    uint64_t frames = 0;
+    std::atomic<bool> playing{false};
+    std::atomic<bool> loop{false};
+    std::atomic<float> gain{1.0f};
+    std::atomic<uint64_t> position_frames{0};
+    std::atomic<uint64_t> seek_request_frames{UINT64_MAX};
+};
+
 struct PluginPortInstance {
     std::string id;
     std::string name;
@@ -144,6 +159,11 @@ struct PluginNodeInstance {
     nlohmann::json chain = nlohmann::json::array();
     float chain_gain = 1.0f;
     unsigned chain_channels = 1;
+    // Audio file player nodes are graph sources. Their file data is shared
+    // and immutable; transport state is atomic and owned by the player state.
+    std::string asset_hash;
+    uint32_t chain_preset_id = 0;
+    std::shared_ptr<AudioFilePlayerState> audio_player_state;
 };
 
 struct PluginChainPreset {
@@ -216,6 +236,14 @@ public:
                             const nlohmann::json& chain, float chainGain, bool active, unsigned channels,
                             std::shared_ptr<const PluginNodeInstance>& updated,
                             std::string& error);
+    bool create_audio_file_player_node(const std::string& assetHash, const std::string& name,
+                            float gain, bool loop, const nlohmann::json& chain, float chainGain,
+                            uint32_t presetId, bool active, uint32_t requestedId,
+                            std::shared_ptr<const PluginNodeInstance>& created, std::string& error);
+    bool update_audio_file_player_node(uint32_t id, const std::string& name,
+                            float gain, bool loop, const nlohmann::json& chain, float chainGain,
+                            uint32_t presetId, bool active,
+                            std::shared_ptr<const PluginNodeInstance>& updated, std::string& error);
     std::vector<PluginChainPreset> get_plugin_chain_presets() const;
     bool get_plugin_chain_preset(uint32_t id, PluginChainPreset& preset) const;
     bool save_plugin_chain_preset(const std::string& name, const nlohmann::json& chain,

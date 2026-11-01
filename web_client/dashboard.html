@@ -222,6 +222,31 @@
         .plugin-chain-step-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .plugin-chain-step-arrow { color: var(--accent-blue); text-align: center; font-size: 10px; line-height: 12px; }
         .plugin-chain-action { border-color: #8f78b7; color: #c6b3e8; }
+        #audio-assets-modal, #audio-player-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(680px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; display: none; z-index: 1003; background: var(--panel-bg); border: 1px solid #a3be8c; border-radius: 10px; padding: 20px; box-shadow: 0 15px 60px rgba(0,0,0,.75); }
+        #audio-player-modal { z-index: 1004; border-color: var(--accent-blue); }
+        #audio-assets-modal h2, #audio-player-modal h2 { margin: 0 0 12px; font-size: 16px; color: #a3be8c; }
+        #audio-player-modal h2 { color: var(--accent-blue); }
+        .audio-assets-toolbar { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0; }
+        .audio-asset-item { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px; border:1px solid var(--border-color); border-radius:7px; margin:7px 0; }
+        .audio-asset-info { flex:1 1 220px; min-width:0; }
+        .audio-asset-info strong { display:block; overflow-wrap:anywhere; }
+        .audio-asset-info small { display:block; color:var(--text-dim); margin-top:3px; }
+        .audio-asset-actions { display:flex; gap:5px; flex-wrap:wrap; }
+        .audio-asset-actions button { min-height:27px; padding:3px 8px; font-size:10px; }
+        .audio-player-checkbox { display:flex; gap:9px; align-items:center; margin:10px 0; }
+        .audio-player-checkbox input { width:auto; }
+        .audio-player-transport { display:flex; align-items:center; gap:5px; margin:8px 0 10px; }
+        .audio-player-transport button { min-height:24px; padding:2px 7px; font-size:10px; }
+        .audio-player-progress { flex:1; height:6px; border-radius:6px; background:rgba(255,255,255,.12); overflow:hidden; cursor:pointer; }
+        .audio-player-progress-fill { width:0%; height:100%; background:#a3be8c; }
+        .audio-player-time { min-width:75px; text-align:right; color:var(--text-dim); font:10px monospace; }
+        .audio-player-step-card { border:1px solid var(--border-color); border-radius:7px; padding:9px; margin:8px 0; background:rgba(52,152,219,.06); }
+        .audio-player-step-card .chain-step-header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:7px; }
+        .audio-player-step-card .chain-step-header span { display:flex; gap:4px; }
+        .audio-player-step-card .chain-step-header button { min-height:24px; padding:2px 7px; font-size:10px; }
+        .audio-player-param-row { gap:10px; margin:5px 0; }
+        .audio-player-param-row input, .audio-player-param-row select { max-width:58%; }
+        .audio-asset-gain { display:flex; align-items:center; gap:5px; color:var(--text-dim); font-size:11px; }
         #chain-presets-modal, #chain-node-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(620px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; display: none; z-index: 1002; background: var(--panel-bg); border: 1px solid #8f78b7; border-radius: 10px; padding: 20px; box-shadow: 0 15px 60px rgba(0,0,0,.75); }
         #chain-presets-modal h2, #chain-node-modal h2 { margin: 0 0 14px; font-size: 16px; color: #c6b3e8; }
         .chain-preset-item { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 9px; border: 1px solid var(--border-color); border-radius: 6px; margin: 7px 0; }
@@ -554,6 +579,7 @@
                 <button onclick="autoOrganizeLayout()" style="padding: 4px 10px; min-height: 28px; background: #5e81ac; font-weight: bold; margin-left: 5px;">ORGANIZE LAYOUT</button>
                 <button onclick="openPluginModal()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 5px;">ADD PLUGIN NODE</button>
                 <button onclick="openChainPresetsModal()" style="background: #8f78b7; color: #fff; font-weight: bold;">CHAIN PRESETS</button>
+                <button onclick="openAudioAssetsModal()" style="background: #a3be8c; color: #000; font-weight: bold;">AUDIO FILES</button>
                 
                 <!-- Layout Backup & Grid Snap Controls -->
                 <button onclick="exportLayout()" style="background: #a3be8c; color: #000; font-weight: bold; margin-left: 15px;">EXPORT LAYOUT</button>
@@ -754,6 +780,51 @@
         </div>
     </div>
 
+    <div id="audio-assets-modal" role="dialog" aria-modal="true" aria-labelledby="audio-assets-title">
+        <h2 id="audio-assets-title">Audio Assets</h2>
+        <div class="dsp-help">Uploads are SHA-256 addressed. The original file is retained, while the browser creates a 48 kHz interleaved F32 playback cache for the native audio engine.</div>
+        <div class="audio-assets-toolbar">
+            <input type="file" id="audio-asset-file-input" accept="audio/*,.wav,.wave,.flac,.mp3,.ogg,.m4a,.aac" hidden onchange="uploadAudioAsset(event)">
+            <button type="button" class="primary" onclick="$('audio-asset-file-input').click()">UPLOAD AUDIO FILE</button>
+            <button type="button" onclick="loadAudioAssets()">REFRESH</button>
+        </div>
+        <div id="audio-assets-status" role="status" class="dsp-help"></div>
+        <div id="audio-assets-list" aria-live="polite"></div>
+        <div class="chain-modal-actions"><button type="button" onclick="closeAudioAssetsModal()">CLOSE</button></div>
+    </div>
+
+    <div id="audio-player-modal" role="dialog" aria-modal="true" aria-labelledby="audio-player-title">
+        <h2 id="audio-player-title">Audio File Player</h2>
+        <div class="dsp-help" id="audio-player-asset-info"></div>
+        <div class="control-row"><label for="audio-player-name">Node Name</label><input id="audio-player-name" type="text" maxlength="80"></div>
+        <div class="control-row"><label for="audio-player-gain">Playback Gain (0–8)</label><input id="audio-player-gain" type="number" min="0" max="8" step="any"></div>
+        <label class="audio-player-checkbox"><input id="audio-player-loop" type="checkbox"> Loop playback</label>
+        <div class="control-row"><label for="audio-player-effects-mode">Effects Chain</label>
+            <select id="audio-player-effects-mode" onchange="updateAudioPlayerEffectsMode()">
+                <option value="none">No effects</option>
+                <option value="preset">Use saved chain preset</option>
+                <option value="custom">Private chain for this player</option>
+            </select>
+        </div>
+        <div id="audio-player-preset-row" class="control-row" hidden>
+            <label for="audio-player-preset">Saved Preset</label><select id="audio-player-preset"></select>
+        </div>
+        <div id="audio-player-custom-chain" hidden>
+            <div class="control-row"><label for="audio-player-chain-gain">Effects Chain Gain</label><input id="audio-player-chain-gain" type="number" min="0" max="8" step="any" value="1"></div>
+            <div class="chain-preset-add-row">
+                <select id="audio-player-add-type" aria-label="Processor to add"></select>
+                <button type="button" onclick="addAudioPlayerProcessor()">ADD PROCESSOR</button>
+            </div>
+            <div class="dsp-help">This effects chain is stored with this audio asset and will not create or modify a global chain preset.</div>
+            <div id="audio-player-chain-steps" class="chain-modal-steps"></div>
+        </div>
+        <div id="audio-player-status" role="status" class="dsp-help"></div>
+        <div class="chain-modal-actions">
+            <button type="button" onclick="closeAudioPlayerModal()">CANCEL</button>
+            <button type="button" class="primary" id="audio-player-save" onclick="saveAudioPlayer()">CREATE PLAYER NODE</button>
+        </div>
+    </div>
+
     <script>
         const $ = id => document.getElementById(id);
         let graph = { endpoints: [], routes: [], plugin_nodes: [], midi_routes: [] };
@@ -778,6 +849,14 @@
         let editingChainPresetId = null;
         let chainPresetDraft = null;
         let chainPresetEditorBusy = false;
+        let audioAssets = [];
+        let audioPlayerPresets = [];
+        let audioPlayerEditingId = null;
+        let audioPlayerAssetHash = null;
+        let audioPlayerAssetChannels = 1;
+        let audioPlayerDraftChain = [];
+        let audioPlayerReturnToAssets = false;
+        let audioPlayerModalBusy = false;
 
         let dspDiscovery = { status: 'idle', processors: [], maxChainLength: null, maxChainChannels: 8, error: '' };
         let dspDiscoveryRequest = 0;
@@ -1680,7 +1759,7 @@ function autoOrganizeLayout() {
                 }
             });
             nodes.forEach(plugin => {
-                const signature = `${plugin.type}:${JSON.stringify(plugin.ports || [])}:${JSON.stringify(plugin.chain || [])}:${Number(plugin.chain_gain ?? 1)}`;
+                const signature = `${plugin.type}:${plugin.asset_hash || ''}:${JSON.stringify(plugin.ports || [])}:${JSON.stringify(plugin.chain || [])}:${Number(plugin.chain_gain ?? 1)}`;
                 let block = pluginNodeBlocks.get(plugin.id);
                 if (block && block.dataset.signature !== signature) {
                     block.remove();
@@ -1712,7 +1791,7 @@ function autoOrganizeLayout() {
             block.classList.toggle('plugin-chain-block', plugin.type === 'plugin_chain');
             block.id = `plugin-block-${plugin.id}`;
             block.dataset.epId = `plugin/${plugin.id}`;
-            block.dataset.signature = `${plugin.type}:${JSON.stringify(plugin.ports || [])}:${JSON.stringify(plugin.chain || [])}:${Number(plugin.chain_gain ?? 1)}`;
+            block.dataset.signature = `${plugin.type}:${plugin.asset_hash || ''}:${JSON.stringify(plugin.ports || [])}:${JSON.stringify(plugin.chain || [])}:${Number(plugin.chain_gain ?? 1)}`;
             block.classList.toggle('plugin-bypassed', !plugin.active);
             const positionKey = `plugin/${plugin.id}`;
             const position = nodePositions[positionKey] || { x: 680, y: Number(plugin.id) * 190 };
@@ -1728,7 +1807,9 @@ function autoOrganizeLayout() {
             typeLabel.className = 'plugin-node-type';
             typeLabel.textContent = plugin.type === 'plugin_chain'
                 ? `PLUGIN CHAIN · ${(plugin.chain || []).length} PROCESSOR${(plugin.chain || []).length === 1 ? '' : 'S'}`
-                : plugin.type;
+                : plugin.type === 'audio_file_player'
+                    ? `AUDIO FILE PLAYER · ${Number(plugin.output_channels || 1)} CH`
+                    : plugin.type;
             titleWrap.appendChild(typeLabel);
             const actions = document.createElement('span');
             actions.className = 'plugin-node-actions';
@@ -1753,6 +1834,7 @@ function autoOrganizeLayout() {
             settings.addEventListener('click', event => {
                 event.stopPropagation();
                 if (plugin.type === 'plugin_chain') openChainNodeModal(plugin.id);
+                else if (plugin.type === 'audio_file_player') openAudioPlayerModal(plugin.id);
                 else openPluginModal(plugin.id);
             });
             const remove = document.createElement('button');
@@ -1776,6 +1858,21 @@ function autoOrganizeLayout() {
                     savePluginNodeChainAsPreset(plugin.id);
                 });
                 actions.append(bypass, settings, savePreset, remove);
+            } else if (plugin.type === 'audio_file_player') {
+                const makeTransportButton = (label, action) => {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.textContent = label;
+                    button.title = `${action} audio`;
+                    button.addEventListener('pointerdown', event => event.stopPropagation());
+                    button.addEventListener('click', event => {
+                        event.stopPropagation();
+                        setAudioPlayerTransport(plugin.id, action);
+                    });
+                    return button;
+                };
+                actions.append(makeTransportButton('▶', 'play'), makeTransportButton('Ⅱ', 'pause'),
+                    makeTransportButton('■', 'stop'), bypass, settings, remove);
             } else actions.append(bypass, settings, remove);
             header.append(titleWrap, actions);
             block.appendChild(header);
@@ -1810,6 +1907,37 @@ function autoOrganizeLayout() {
                 count.textContent = `${steps.length} processor${steps.length === 1 ? '' : 's'} · Gain ${Number(plugin.chain_gain ?? 1).toFixed(2)}`;
                 summary.appendChild(count);
                 block.appendChild(summary);
+            }
+
+            if (plugin.type === 'audio_file_player') {
+                const transport = document.createElement('div');
+                transport.className = 'audio-player-transport';
+                const progress = document.createElement('div');
+                progress.className = 'audio-player-progress';
+                progress.title = 'Seek within audio file';
+                progress.dataset.playerId = String(plugin.id);
+                const fill = document.createElement('div');
+                fill.className = 'audio-player-progress-fill';
+                fill.id = `audio-player-progress-${plugin.id}`;
+                progress.appendChild(fill);
+                progress.addEventListener('pointerdown', event => event.stopPropagation());
+                progress.addEventListener('click', event => {
+                    event.stopPropagation();
+                    const rect = progress.getBoundingClientRect();
+                    const fraction = rect.width > 0 ? Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) : 0;
+                    const duration = Number(plugin.player?.duration_seconds || 0);
+                    setAudioPlayerTransport(plugin.id, 'seek', fraction * duration);
+                });
+                const time = document.createElement('span');
+                time.className = 'audio-player-time';
+                time.id = `audio-player-time-${plugin.id}`;
+                time.textContent = '0:00 / 0:00';
+                transport.append(progress, time);
+                block.appendChild(transport);
+                const details = document.createElement('div');
+                details.className = 'dsp-help';
+                details.textContent = `${Number(plugin.player?.channels || plugin.output_channels || 1)} channel${Number(plugin.player?.channels || plugin.output_channels || 1) === 1 ? '' : 's'} · ${Number(plugin.chain?.length || 0)} private effect${Number(plugin.chain?.length || 0) === 1 ? '' : 's'}`;
+                block.appendChild(details);
             }
 
             const ports = document.createElement('div');
@@ -2417,7 +2545,9 @@ function autoOrganizeLayout() {
         }
 
         function closeActiveModal() {
-            if ($('chain-preset-editor-modal').style.display === 'block') closeChainPresetEditor();
+            if ($('audio-player-modal').style.display === 'block') closeAudioPlayerModal();
+            else if ($('audio-assets-modal').style.display === 'block') closeAudioAssetsModal();
+            else if ($('chain-preset-editor-modal').style.display === 'block') closeChainPresetEditor();
             else if ($('chain-node-modal').style.display === 'block') closeChainNodeModal();
             else if ($('chain-presets-modal').style.display === 'block') closeChainPresetsModal();
             else if ($('plugin-modal').style.display === 'block') closePluginModal();
@@ -2429,18 +2559,22 @@ function autoOrganizeLayout() {
             if (!plugin) return;
             try {
                 const isChain = plugin.type === 'plugin_chain';
+                const isAudioPlayer = plugin.type === 'audio_file_player';
                 const payload = isChain
                     ? { active, name: plugin.name, chain: plugin.chain, chain_gain: plugin.chain_gain ?? 1 }
-                    : { active, name: plugin.name,
-                        port_channels: Object.fromEntries((plugin.ports || []).filter(port => port.type === 'audio').map(port => [port.id, port.channels])),
-                        input_channels: plugin.input_channels, output_channels: plugin.output_channels, params: plugin.params };
+                    : isAudioPlayer
+                        ? { active, name: plugin.name, gain: plugin.player?.gain ?? 1, loop: plugin.player?.loop ?? false,
+                            chain: plugin.chain || [], chain_gain: plugin.chain_gain ?? 1, chain_preset_id: plugin.chain_preset_id ?? 0 }
+                        : { active, name: plugin.name,
+                            port_channels: Object.fromEntries((plugin.ports || []).filter(port => port.type === 'audio').map(port => [port.id, port.channels])),
+                            input_channels: plugin.input_channels, output_channels: plugin.output_channels, params: plugin.params };
                 const result = await fetchAPI(isChain
                     ? `/api/plugins/${encodeURIComponent(id)}/chain`
-                    : `/api/plugins/${encodeURIComponent(id)}`, {
+                    : isAudioPlayer ? `/api/audio-players/${encodeURIComponent(id)}/settings` : `/api/plugins/${encodeURIComponent(id)}`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                if (result.status !== 'ok' || result.adopted !== true || (isChain && result.persisted !== true))
+                if (result.status !== 'ok' || result.adopted !== true || ((isChain || isAudioPlayer) && result.persisted !== true))
                     throw new Error(result.message || 'Plugin state adoption/persistence was not confirmed');
                 await loadGraph();
             } catch (error) { showError('Plugin state change failed: ' + error.message); }
@@ -3834,6 +3968,570 @@ function autoOrganizeLayout() {
             } catch (e) { console.error("Meter update error:", e); }
         }
 
+        function audioAssetDisplayName(asset) {
+            const display = String(asset?.display_name || '').trim();
+            return display || String(asset?.original_filename || 'Unnamed audio asset');
+        }
+
+        function formatAudioTime(seconds) {
+            const safe = Math.max(0, Number(seconds) || 0);
+            const whole = Math.floor(safe);
+            const hours = Math.floor(whole / 3600);
+            const minutes = Math.floor((whole % 3600) / 60);
+            const secs = whole % 60;
+            return hours > 0
+                ? `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+                : `${minutes}:${String(secs).padStart(2, '0')}`;
+        }
+
+        async function audioRequest(url, options = {}) {
+            const response = await fetch(url, options);
+            let body = {};
+            try { body = await response.json(); }
+            catch (_) { throw new Error(`Server returned HTTP ${response.status} without a JSON response`); }
+            if (!response.ok || (body.status && body.status !== 'ok'))
+                throw new Error(body.message || body.error || `HTTP ${response.status}`);
+            return body;
+        }
+
+        async function openAudioAssetsModal() {
+            $('audio-assets-modal').style.display = 'block';
+            $('overlay').style.display = 'block';
+            await loadAudioAssets();
+        }
+
+        function closeAudioAssetsModal() {
+            $('audio-assets-modal').style.display = 'none';
+            if ($('audio-player-modal').style.display !== 'block') $('overlay').style.display = 'none';
+        }
+
+        async function loadAudioAssets() {
+            const list = $('audio-assets-list');
+            const status = $('audio-assets-status');
+            if (!list || !status) return;
+            status.textContent = 'Loading audio assets…';
+            try {
+                const data = await fetchAPI('/api/assets', { cache: 'no-store' });
+                audioAssets = Array.isArray(data.assets) ? data.assets : [];
+                renderAudioAssets();
+                status.textContent = `${audioAssets.length} audio asset${audioAssets.length === 1 ? '' : 's'} stored.`;
+            } catch (error) {
+                status.textContent = `Could not load audio assets: ${error.message}`;
+                list.replaceChildren();
+            }
+        }
+
+        function renderAudioAssets() {
+            const list = $('audio-assets-list');
+            list.replaceChildren();
+            if (!audioAssets.length) {
+                list.appendChild(dspText('p', 'No audio assets yet. Upload a WAV or another browser-decodable audio file to get started.', 'dsp-help'));
+                return;
+            }
+            audioAssets.forEach(asset => {
+                const row = document.createElement('div');
+                row.className = 'audio-asset-item';
+                const info = document.createElement('div');
+                info.className = 'audio-asset-info';
+                info.appendChild(dspText('strong', audioAssetDisplayName(asset)));
+                const technical = `${asset.original_filename || 'Unknown filename'} · ${Number(asset.channels || 0)} ch · ${formatAudioTime(asset.duration_seconds)} · ${Math.round(Number(asset.original_size_bytes || 0) / 1024)} KiB`;
+                info.appendChild(dspText('small', technical));
+                info.appendChild(dspText('small', String(asset.sha256 || '').slice(0, 16) + '…'));
+
+                const gainWrap = document.createElement('label');
+                gainWrap.className = 'audio-asset-gain';
+                gainWrap.textContent = 'Default gain ';
+                const gain = document.createElement('input');
+                gain.type = 'number'; gain.min = '0'; gain.max = '8'; gain.step = '0.01';
+                gain.value = String(asset.playback?.gain ?? 1);
+                gain.style.width = '76px';
+                gain.dataset.assetGain = asset.sha256;
+                gainWrap.appendChild(gain);
+
+                const actions = document.createElement('div');
+                actions.className = 'audio-asset-actions';
+                const create = dspButton('CREATE PLAYER', () => openAudioPlayerModal(null, asset.sha256, true));
+                create.classList.add('primary');
+                const rename = dspButton('RENAME', () => renameAudioAsset(asset.sha256));
+                const saveGain = dspButton('SAVE GAIN', () => saveAudioAssetGain(asset.sha256));
+                const remove = dspButton('DELETE', () => deleteAudioAsset(asset.sha256));
+                actions.append(create, rename, saveGain, remove);
+                row.append(info, gainWrap, actions);
+                list.appendChild(row);
+            });
+        }
+
+        async function renameAudioAsset(hash) {
+            const asset = audioAssets.find(item => item.sha256 === hash);
+            if (!asset) return;
+            const next = prompt('Display name (leave empty to restore the original filename):', asset.display_name || '');
+            if (next === null) return;
+            if (next.length > 80) { alert('Display names may contain at most 80 characters.'); return; }
+            try {
+                await fetchAPI(`/api/assets/${encodeURIComponent(hash)}/metadata`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ display_name: next.trim() })
+                });
+                await loadAudioAssets();
+                await loadGraph();
+            } catch (error) { alert('Could not rename audio asset: ' + error.message); }
+        }
+
+        async function saveAudioAssetGain(hash) {
+            const control = document.querySelector(`[data-asset-gain="${CSS.escape(hash)}"]`);
+            const gain = control ? Number(control.value) : NaN;
+            if (!Number.isFinite(gain) || gain < 0 || gain > 8) {
+                alert('Default gain must be between 0 and 8.');
+                return;
+            }
+            try {
+                await fetchAPI(`/api/assets/${encodeURIComponent(hash)}/metadata`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ gain })
+                });
+                await loadAudioAssets();
+                await loadGraph();
+            } catch (error) { alert('Could not update asset gain: ' + error.message); }
+        }
+
+        async function deleteAudioAsset(hash) {
+            const asset = audioAssets.find(item => item.sha256 === hash);
+            if (!asset || !confirm(`Permanently delete “${audioAssetDisplayName(asset)}” and its original/converted audio files?`)) return;
+            try {
+                await fetchAPI(`/api/assets/${encodeURIComponent(hash)}`, { method: 'DELETE' });
+                await loadAudioAssets();
+            } catch (error) { alert('Could not delete audio asset: ' + error.message); }
+        }
+
+        async function uploadAudioAsset(event) {
+            const input = event?.target || $('audio-asset-file-input');
+            const file = input?.files?.[0];
+            if (!file) return;
+            const status = $('audio-assets-status');
+            const uploadButton = document.querySelector('.audio-assets-toolbar button.primary');
+            if (file.size <= 0 || file.size > 512 * 1024 * 1024) {
+                status.textContent = 'The selected file is empty or exceeds the 512 MiB upload limit.';
+                input.value = '';
+                return;
+            }
+            if (uploadButton) uploadButton.disabled = true;
+            input.disabled = true;
+            let decodingContext = null;
+            try {
+                status.textContent = 'Reading audio format and decoding in the browser…';
+                const format = await fetchAPI('/api/audio/format', { cache: 'no-store' });
+                const targetRate = Number(format.sample_rate || 48000);
+                const maxChannels = Number(format.max_channels || 8);
+                const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContextCtor) throw new Error('This browser does not provide the Web Audio API required to decode audio uploads.');
+                try { decodingContext = new AudioContextCtor({ sampleRate: targetRate }); }
+                catch (_) { decodingContext = new AudioContextCtor(); }
+                const sourceBytes = await file.arrayBuffer();
+                let decoded = await decodingContext.decodeAudioData(sourceBytes);
+                if (decoded.numberOfChannels < 1 || decoded.numberOfChannels > maxChannels)
+                    throw new Error(`This file has ${decoded.numberOfChannels} channels. The player supports 1–${maxChannels} channels.`);
+
+                if (decoded.sampleRate !== targetRate) {
+                    const OfflineContextCtor = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+                    if (!OfflineContextCtor) throw new Error(`Browser decoded audio at ${decoded.sampleRate} Hz and cannot resample it to ${targetRate} Hz.`);
+                    status.textContent = `Resampling ${decoded.sampleRate} Hz audio to ${targetRate} Hz…`;
+                    const targetFrames = Math.max(1, Math.ceil(decoded.duration * targetRate));
+                    const offline = new OfflineContextCtor(decoded.numberOfChannels, targetFrames, targetRate);
+                    const source = offline.createBufferSource();
+                    source.buffer = decoded;
+                    source.connect(offline.destination);
+                    source.start(0);
+                    decoded = await offline.startRendering();
+                }
+                if (decoded.sampleRate !== targetRate)
+                    throw new Error(`Browser produced ${decoded.sampleRate} Hz audio; the backend requires ${targetRate} Hz.`);
+
+                const channels = decoded.numberOfChannels;
+                const frames = decoded.length;
+                const sampleCount = frames * channels;
+                const convertedBytes = sampleCount * Float32Array.BYTES_PER_ELEMENT;
+                const maxUploadBytes = Number(format.max_upload_bytes || 512 * 1024 * 1024);
+                if (!Number.isSafeInteger(sampleCount) || convertedBytes > maxUploadBytes)
+                    throw new Error('Converted F32 audio exceeds the backend upload limit. Use a shorter or lower-channel-count file.');
+
+                status.textContent = 'Interleaving decoded channels into F32 playback audio…';
+                const interleaved = new Float32Array(sampleCount);
+                const channelData = Array.from({ length: channels }, (_, channel) => decoded.getChannelData(channel));
+                for (let frame = 0; frame < frames; frame++) {
+                    const offset = frame * channels;
+                    for (let channel = 0; channel < channels; channel++)
+                        interleaved[offset + channel] = channelData[channel][frame];
+                }
+
+                status.textContent = 'Uploading original file and calculating its SHA-256 asset ID…';
+                const query = new URLSearchParams({
+                    filename: file.name,
+                    mime_type: file.type || 'application/octet-stream'
+                });
+                const original = await audioRequest(`/api/assets/upload/original?${query.toString()}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file
+                });
+                const hash = original.sha256 || original.asset?.sha256;
+                if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash))
+                    throw new Error('Backend did not return a valid SHA-256 asset ID.');
+
+                if (original.already_exists !== true) {
+                    status.textContent = 'Uploading browser-converted F32 playback data…';
+                    await audioRequest('/api/assets/upload/converted', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/octet-stream',
+                            'X-CM5-Asset-SHA256': hash,
+                            'X-CM5-Sample-Rate': String(targetRate),
+                            'X-CM5-Channels': String(channels),
+                            'X-CM5-Frames': String(frames)
+                        },
+                        body: interleaved.buffer
+                    });
+                }
+                status.textContent = original.already_exists
+                    ? 'This exact file is already in the asset library; the existing asset was reused.'
+                    : 'Upload and conversion completed successfully.';
+                await loadAudioAssets();
+            } catch (error) {
+                status.textContent = `Upload failed: ${error.message}`;
+            } finally {
+                if (decodingContext && typeof decodingContext.close === 'function') {
+                    try { await decodingContext.close(); } catch (_) {}
+                }
+                input.disabled = false;
+                if (uploadButton) uploadButton.disabled = false;
+                input.value = '';
+            }
+        }
+
+        async function loadAudioPlayerPresets() {
+            const data = await fetchAPI('/api/plugin-chain-presets', { cache: 'no-store' });
+            audioPlayerPresets = Array.isArray(data.presets) ? data.presets : [];
+        }
+
+        async function openAudioPlayerModal(pluginId = null, assetHash = null, returnToAssets = false) {
+            if (audioPlayerModalBusy) return;
+            if (dspDiscovery.status !== 'ready') await loadDspAvailable();
+            if (dspDiscovery.status !== 'ready') {
+                showError('Audio player effects are unavailable because processor discovery failed: ' + dspDiscovery.error);
+                return;
+            }
+            try { await loadAudioPlayerPresets(); }
+            catch (error) { showError('Could not load chain presets: ' + error.message); return; }
+
+            const editing = pluginId !== null;
+            const plugin = editing ? (graph.plugin_nodes || []).find(item => Number(item.id) === Number(pluginId) && item.type === 'audio_file_player') : null;
+            if (editing && !plugin) return;
+            audioPlayerEditingId = editing ? Number(pluginId) : null;
+            audioPlayerAssetHash = editing ? plugin.asset_hash : assetHash;
+            audioPlayerReturnToAssets = !!returnToAssets;
+            if (!audioPlayerAssetHash) return;
+
+            let asset;
+            try { asset = await fetchAPI(`/api/assets/${encodeURIComponent(audioPlayerAssetHash)}`, { cache: 'no-store' }); }
+            catch (error) { alert('Audio asset is unavailable: ' + error.message); return; }
+
+            audioPlayerAssetChannels = Number(asset.channels || 1);
+            let savedEffects = asset.effects || {};
+            if (plugin) savedEffects = { preset_id: plugin.chain_preset_id || 0, chain: plugin.chain || [], chain_gain: plugin.chain_gain ?? 1 };
+            const selectedPresetId = Number(savedEffects.preset_id || 0);
+            audioPlayerDraftChain = cloneJson(savedEffects.chain || []);
+            $('audio-player-title').textContent = editing ? `Audio File Player #${plugin.id}` : 'Create Audio File Player';
+            $('audio-player-asset-info').textContent = `${audioAssetDisplayName(asset)} · ${asset.original_filename || ''} · ${asset.channels} channel(s) · ${formatAudioTime(asset.duration_seconds)}`;
+            $('audio-player-name').value = plugin?.name || audioAssetDisplayName(asset);
+            $('audio-player-gain').value = String(plugin?.player?.gain ?? asset.playback?.gain ?? 1);
+            $('audio-player-loop').checked = Boolean(plugin?.player?.loop ?? asset.playback?.loop ?? false);
+            $('audio-player-chain-gain').value = String(savedEffects.chain_gain ?? 1);
+
+            const presetSelect = $('audio-player-preset');
+            presetSelect.replaceChildren();
+            const noPreset = dspText('option', 'Select a saved preset…');
+            noPreset.value = '';
+            presetSelect.appendChild(noPreset);
+            for (const preset of audioPlayerPresets) {
+                const issues = getChainChannelIssues(preset.chain || [], Number(asset.channels || 1));
+                const option = dspText('option', `${preset.name} · ${Number(preset.channels || 1)} ch · ${Number(preset.processor_count ?? preset.chain?.length ?? 0)} processors`);
+                option.value = String(preset.id);
+                option.disabled = issues.length > 0;
+                if (option.disabled) option.title = issues.join(' ');
+                presetSelect.appendChild(option);
+            }
+            if (selectedPresetId && audioPlayerPresets.some(preset => Number(preset.id) === selectedPresetId)) {
+                presetSelect.value = String(selectedPresetId);
+                $('audio-player-effects-mode').value = 'preset';
+            } else if (audioPlayerDraftChain.length) {
+                $('audio-player-effects-mode').value = 'custom';
+            } else {
+                $('audio-player-effects-mode').value = 'none';
+            }
+
+            const addType = $('audio-player-add-type');
+            addType.replaceChildren();
+            dspDiscovery.processors.filter(descriptor => {
+                const inputs = descriptor.audio?.inputs || [];
+                const outputs = descriptor.audio?.outputs || [];
+                return inputs.length > 0 && outputs.length > 0 && !descriptor.type.startsWith('midi_') &&
+                    !(descriptor.ports || []).some(port => port.type === 'midi');
+            }).forEach(descriptor => {
+                const option = dspText('option', descriptor.name || descriptor.type);
+                option.value = descriptor.type;
+                addType.appendChild(option);
+            });
+            renderAudioPlayerChain();
+            updateAudioPlayerEffectsMode();
+            $('audio-player-status').textContent = '';
+            $('audio-player-save').textContent = editing ? 'APPLY PLAYER SETTINGS' : 'CREATE PLAYER NODE';
+            $('audio-player-save').disabled = false;
+            if (returnToAssets) $('audio-assets-modal').style.display = 'none';
+            $('overlay').style.display = 'block';
+            $('audio-player-modal').style.display = 'block';
+        }
+
+        function closeAudioPlayerModal() {
+            if (audioPlayerModalBusy) return;
+            $('audio-player-modal').style.display = 'none';
+            audioPlayerEditingId = null;
+            audioPlayerAssetHash = null;
+            audioPlayerDraftChain = [];
+            audioPlayerAssetChannels = 1;
+            if (audioPlayerReturnToAssets) {
+                $('audio-assets-modal').style.display = 'block';
+                $('overlay').style.display = 'block';
+                audioPlayerReturnToAssets = false;
+            } else if ($('audio-assets-modal').style.display !== 'block') {
+                $('overlay').style.display = 'none';
+            }
+        }
+
+        function updateAudioPlayerEffectsMode() {
+            const mode = $('audio-player-effects-mode').value;
+            $('audio-player-preset-row').hidden = mode !== 'preset';
+            $('audio-player-custom-chain').hidden = mode !== 'custom';
+        }
+
+        function playerDefaultParams(descriptor) {
+            const params = {};
+            for (const parameter of descriptor.parameters || []) {
+                const value = parameter.default ?? descriptor.defaults?.[parameter.id];
+                if (value !== undefined) params[parameter.id] = cloneJson(value);
+            }
+            return params;
+        }
+
+        function renderAudioPlayerChain() {
+            const container = $('audio-player-chain-steps');
+            container.replaceChildren();
+            const width = audioPlayerAssetChannels || 1;
+            if (!audioPlayerDraftChain.length) {
+                container.appendChild(dspText('p', 'No private effects. Add processors above or select a saved preset.', 'dsp-help'));
+                return;
+            }
+            audioPlayerDraftChain.forEach((step, index) => {
+                const descriptor = getProcessorDescriptor(step.type);
+                const card = document.createElement('div');
+                card.className = 'audio-player-step-card';
+                const header = document.createElement('div');
+                header.className = 'chain-step-header';
+                header.appendChild(dspText('strong', `${index + 1}. ${descriptor?.name || step.type}`));
+                const actions = document.createElement('span');
+                actions.append(
+                    dspButton('↑', () => moveAudioPlayerProcessor(index, -1)),
+                    dspButton('↓', () => moveAudioPlayerProcessor(index, 1)),
+                    dspButton('REMOVE', () => removeAudioPlayerProcessor(index), 'dsp-small-btn danger')
+                );
+                header.appendChild(actions);
+                card.appendChild(header);
+                if (!descriptor) {
+                    card.appendChild(dspText('div', `Processor ${step.type} is unavailable in the current backend.`, 'dsp-error'));
+                } else {
+                    card.appendChild(dspText('div', getChainChannelModeText(descriptor), 'dsp-help'));
+                    (descriptor.parameters || []).forEach(parameter => {
+                        const row = document.createElement('div');
+                        row.className = 'control-row audio-player-param-row';
+                        const label = dspText('label', `${parameter.name || parameter.id}${parameter.unit ? ` (${parameter.unit})` : ''}`);
+                        const value = hasOwn(step.params || {}, parameter.id)
+                            ? step.params[parameter.id]
+                            : (parameter.default ?? descriptor.defaults?.[parameter.id]);
+                        let control;
+                        if (parameter.type === 'boolean') {
+                            control = document.createElement('input');
+                            control.type = 'checkbox';
+                            control.checked = Boolean(value);
+                            control.style.width = 'auto';
+                        } else if (parameter.type === 'enum') {
+                            control = document.createElement('select');
+                            for (const choice of parameter.choices || []) {
+                                const option = dspText('option', choice.label ?? displayJson(choice.value));
+                                option.value = displayJson(choice.value);
+                                control.appendChild(option);
+                            }
+                            control.value = displayJson(value);
+                        } else {
+                            control = document.createElement('input');
+                            control.type = parameter.type === 'string' ? 'text' : 'number';
+                            if (parameter.min != null) control.min = String(parameter.min);
+                            if (parameter.max != null) control.max = String(parameter.max);
+                            if (parameter.step != null) control.step = String(parameter.step);
+                            control.value = value == null ? '' : String(value);
+                        }
+                        control.dataset.playerStep = String(index);
+                        control.dataset.playerParameter = parameter.id;
+                        control.addEventListener('change', () => {
+                            if (!step.params || typeof step.params !== 'object') step.params = {};
+                            let parsed;
+                            if (parameter.type === 'boolean') parsed = control.checked;
+                            else if (parameter.type === 'enum') {
+                                const choice = (parameter.choices || []).find(item => displayJson(item.value) === control.value);
+                                if (!choice) return;
+                                parsed = cloneJson(choice.value);
+                            } else if (parameter.type === 'number' || parameter.type === 'integer') {
+                                parsed = control.value.trim() === '' ? NaN : Number(control.value);
+                                if (!Number.isFinite(parsed) || (parameter.type === 'integer' && !Number.isInteger(parsed)) ||
+                                    (parameter.min != null && parsed < parameter.min) || (parameter.max != null && parsed > parameter.max)) {
+                                    control.setCustomValidity('Enter a valid value within the declared range.');
+                                    control.reportValidity();
+                                    return;
+                                }
+                                control.setCustomValidity('');
+                            } else parsed = control.value;
+                            step.params[parameter.id] = parsed;
+                        });
+                        label.htmlFor = '';
+                        row.append(label, control);
+                        card.appendChild(row);
+                    });
+                }
+                container.appendChild(card);
+            });
+            const issues = getChainChannelIssues(audioPlayerDraftChain, width);
+            if (issues.length) container.appendChild(dspText('div', issues.join('\n'), 'dsp-error'));
+        }
+
+        function addAudioPlayerProcessor() {
+            const type = $('audio-player-add-type').value;
+            const descriptor = getProcessorDescriptor(type);
+            if (!descriptor) return;
+            const candidate = { type, params: playerDefaultParams(descriptor) };
+            const width = audioPlayerAssetChannels || 1;
+            const issues = getChainChannelIssues([...audioPlayerDraftChain, candidate], width);
+            if (issues.length) {
+                $('audio-player-status').textContent = issues.join(' ');
+                return;
+            }
+            if (audioPlayerDraftChain.length >= Number(dspDiscovery.maxChainLength || 16)) {
+                $('audio-player-status').textContent = 'The maximum processor count for a chain has been reached.';
+                return;
+            }
+            audioPlayerDraftChain.push(candidate);
+            $('audio-player-status').textContent = '';
+            renderAudioPlayerChain();
+        }
+
+        function moveAudioPlayerProcessor(index, delta) {
+            const target = index + delta;
+            if (target < 0 || target >= audioPlayerDraftChain.length) return;
+            [audioPlayerDraftChain[index], audioPlayerDraftChain[target]] = [audioPlayerDraftChain[target], audioPlayerDraftChain[index]];
+            renderAudioPlayerChain();
+        }
+
+        function removeAudioPlayerProcessor(index) {
+            if (!Number.isInteger(index) || index < 0 || index >= audioPlayerDraftChain.length) return;
+            audioPlayerDraftChain.splice(index, 1);
+            renderAudioPlayerChain();
+        }
+
+        async function saveAudioPlayer() {
+            if (audioPlayerModalBusy) return;
+            const gainText = $('audio-player-gain').value.trim();
+            const gain = gainText === '' ? NaN : Number(gainText);
+            const chainGainText = $('audio-player-chain-gain').value.trim();
+            const chainGain = chainGainText === '' ? NaN : Number(chainGainText);
+            if (!Number.isFinite(gain) || gain < 0 || gain > 8) { $('audio-player-status').textContent = 'Playback gain must be between 0 and 8.'; return; }
+            if (!Number.isFinite(chainGain) || chainGain < 0 || chainGain > 8) { $('audio-player-status').textContent = 'Effects chain gain must be between 0 and 8.'; return; }
+            const mode = $('audio-player-effects-mode').value;
+            let chain = [];
+            let presetId = 0;
+            let effectiveChainGain = chainGain;
+            if (mode === 'preset') {
+                presetId = Number($('audio-player-preset').value);
+                const preset = audioPlayerPresets.find(item => Number(item.id) === presetId);
+                if (!preset) { $('audio-player-status').textContent = 'Select a valid saved preset.'; return; }
+                const issues = getChainChannelIssues(preset.chain || [], audioPlayerAssetChannels || 1);
+                if (issues.length) { $('audio-player-status').textContent = issues.join(' '); return; }
+                chain = cloneJson(preset.chain || []);
+                effectiveChainGain = Number(preset.chain_gain ?? 1);
+            } else if (mode === 'custom') {
+                chain = cloneJson(audioPlayerDraftChain);
+                const channels = audioPlayerAssetChannels || 1;
+                const issues = getChainChannelIssues(chain, channels);
+                if (issues.length) { $('audio-player-status').textContent = issues.join('\n'); return; }
+            }
+            const payload = {
+                name: $('audio-player-name').value.trim() || 'Audio File Player',
+                gain,
+                loop: $('audio-player-loop').checked,
+                active: audioPlayerEditingId === null ? true : Boolean((graph.plugin_nodes || []).find(item => item.id === audioPlayerEditingId)?.active ?? true),
+                chain,
+                chain_gain: effectiveChainGain,
+                chain_preset_id: presetId
+            };
+            audioPlayerModalBusy = true;
+            $('audio-player-save').disabled = true;
+            $('audio-player-status').textContent = 'Applying player configuration…';
+            try {
+                const url = audioPlayerEditingId === null ? '/api/audio-players' : `/api/audio-players/${encodeURIComponent(audioPlayerEditingId)}/settings`;
+                const body = audioPlayerEditingId === null ? { ...payload, asset_hash: audioPlayerAssetHash } : payload;
+                const result = await fetchAPI(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                if (result.status !== 'ok' || result.adopted !== true || result.persisted !== true)
+                    throw new Error(result.message || 'Player creation/settings were not fully adopted and persisted');
+                audioPlayerModalBusy = false;
+                closeAudioPlayerModal();
+                await loadGraph();
+                if ($('audio-assets-modal').style.display === 'block') await loadAudioAssets();
+            } catch (error) {
+                $('audio-player-status').textContent = error.message;
+            } finally {
+                audioPlayerModalBusy = false;
+                $('audio-player-save').disabled = false;
+            }
+        }
+
+        async function setAudioPlayerTransport(id, action, positionSeconds = null) {
+            try {
+                const body = { action };
+                if (action === 'seek') body.position_seconds = Number(positionSeconds) || 0;
+                await fetchAPI(`/api/audio-players/${encodeURIComponent(id)}/transport`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+                });
+                await updateAudioPlayerStates();
+            } catch (error) {
+                showError(`Audio player transport failed: ${error.message}`);
+            }
+        }
+
+        let audioPlayerStatusLoading = false;
+        async function updateAudioPlayerStates() {
+            if (audioPlayerStatusLoading || !document.querySelector('.audio-player-progress')) return;
+            audioPlayerStatusLoading = true;
+            try {
+                const data = await fetchAPI('/api/audio-players/status', { cache: 'no-store' });
+                for (const player of (data.players || [])) {
+                    const fill = $(`audio-player-progress-${player.id}`);
+                    const time = $(`audio-player-time-${player.id}`);
+                    if (!fill || !time) continue;
+                    const duration = Math.max(0, Number(player.duration_seconds) || 0);
+                    const position = Math.max(0, Number(player.position_frames) / Math.max(1, Number(player.sample_rate) || 48000));
+                    fill.style.width = `${duration > 0 ? Math.max(0, Math.min(100, position * 100 / duration)) : 0}%`;
+                    time.textContent = `${formatAudioTime(position)} / ${formatAudioTime(duration)}`;
+                }
+            } catch (error) {
+                console.warn('Audio player status polling failed:', error);
+            } finally {
+                audioPlayerStatusLoading = false;
+            }
+        }
+
         async function loadToneSettings() {
             try {
                 const tone = await fetchAPI('/api/tone', { cache: 'no-store' });
@@ -3876,6 +4574,7 @@ function autoOrganizeLayout() {
 
         window.onresize = drawCables;
         setInterval(updateMeters, 100);
+        setInterval(updateAudioPlayerStates, 250);
         setInterval(() => loadPipewireGraph(), 1000);
 
         async function init() {

@@ -31,6 +31,10 @@
 #include <unordered_set>
 #include <queue>
 #include <cstring>
+#include <filesystem>
+#include <iomanip>
+#include <cctype>
+#include <openssl/evp.h>
 
 namespace {
 
@@ -66,6 +70,21 @@ nlohmann::json plugin_node_json(const PluginNodeInstance& plugin) {
         result["chain_gain"] = plugin.chain_gain;
         result["channels"] = plugin.chain_channels;
         result["processor_count"] = plugin.chain.size();
+    } else if (plugin.type == "audio_file_player" && plugin.audio_player_state) {
+        const auto& player = *plugin.audio_player_state;
+        result["asset_hash"] = plugin.asset_hash;
+        result["chain"] = plugin.chain;
+        result["chain_gain"] = plugin.chain_gain;
+        result["chain_preset_id"] = plugin.chain_preset_id;
+        result["player"] = {
+            {"channels", player.channels}, {"sample_rate", player.sample_rate},
+            {"frames", player.frames},
+            {"duration_seconds", player.sample_rate ? static_cast<double>(player.frames) / player.sample_rate : 0.0},
+            {"playing", player.playing.load(std::memory_order_relaxed)},
+            {"loop", player.loop.load(std::memory_order_relaxed)},
+            {"gain", player.gain.load(std::memory_order_relaxed)},
+            {"position_frames", player.position_frames.load(std::memory_order_relaxed)}
+        };
     }
     return result;
 }
@@ -225,6 +244,213 @@ private:
     unsigned m_channels = 1;
     std::vector<float> m_channelScratch;
 };
+
+class AudioFilePlayerProcessor final : public AudioProcessor {
+public:
+    AudioFilePlayerProcessor(std::shared_ptr<AudioFilePlayerState> state,
+                             std::unique_ptr<AudioProcessor> effects)
+        : m_state(std::move(state)), m_effects(std::move(effects)) {}
+
+    void process(AudioProcessContext& context) override {
+        if (!m_state || !context.audio_outputs || context.audio_output_count == 0 ||
+            !context.audio_outputs[0].output) return;
+
+        auto& output = context.audio_outputs[0];
+        const unsigned channels = output.channels;
+        const size_t sampleCount = context.frames * static_cast<size_t>(channels);
+        std::fill_n(output.output, sampleCount, 0.0f);
+
+        const auto* samples = m_state->interleaved.get();
+        const uint64_t totalFrames = m_state->frames;
+        if (samples && totalFrames && channels == m_state->channels) {
+            uint64_t cursor = m_state->position_frames.load(std::memory_order_relaxed);
+            const uint64_t requestedSeek = m_state->seek_request_frames.exchange(
+                UINT64_MAX, std::memory_order_acq_rel);
+            if (requestedSeek != UINT64_MAX)
+                cursor = std::min<uint64_t>(requestedSeek, totalFrames);
+
+            if (m_state->playing.load(std::memory_order_relaxed)) {
+                const bool looping = m_state->loop.load(std::memory_order_relaxed);
+                const float gain = m_state->gain.load(std::memory_order_relaxed);
+                for (size_t frame = 0; frame < context.frames; ++frame) {
+                    if (cursor >= totalFrames) {
+                        if (looping) cursor = 0;
+                        else {
+                            m_state->playing.store(false, std::memory_order_release);
+                            cursor = totalFrames;
+                            break;
+                        }
+                    }
+                    const size_t sourceOffset = static_cast<size_t>(cursor) * channels;
+                    const size_t outputOffset = frame * channels;
+                    for (unsigned channel = 0; channel < channels; ++channel)
+                        output.output[outputOffset + channel] = (*samples)[sourceOffset + channel] * gain;
+                    ++cursor;
+                }
+            }
+            m_state->position_frames.store(cursor, std::memory_order_release);
+        } else if (m_state) {
+            m_state->playing.store(false, std::memory_order_release);
+        }
+
+        // Process silence after stop/end too, allowing time-based effects to
+        // release their tails without keeping the file transport running.
+        if (m_effects && output.channels)
+            m_effects->process(output.output, context.frames, output.channels);
+    }
+
+private:
+    std::shared_ptr<AudioFilePlayerState> m_state;
+    std::unique_ptr<AudioProcessor> m_effects;
+};
+
+constexpr size_t CM5_MAX_AUDIO_UPLOAD_BYTES = 512u * 1024u * 1024u;
+constexpr unsigned CM5_AUDIO_PLAYBACK_SAMPLE_RATE = 48000;
+constexpr unsigned CM5_AUDIO_MAX_CHANNELS = 8;
+
+std::filesystem::path asset_root_path() {
+    const char* configured = std::getenv("CM5AUDIO_ASSET_DIR");
+    return configured && *configured ? std::filesystem::path(configured)
+                                      : std::filesystem::path("./assets");
+}
+
+bool valid_asset_hash(const std::string& hash) {
+    if (hash.size() != 64) return false;
+    return std::all_of(hash.begin(), hash.end(), [](unsigned char ch) {
+        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+    });
+}
+
+std::filesystem::path asset_directory(const std::string& hash) {
+    if (!valid_asset_hash(hash)) throw std::invalid_argument("asset hash must be a 64-character lowercase SHA-256 hex string");
+    return asset_root_path() / hash;
+}
+
+std::filesystem::path staging_asset_directory(const std::string& hash) {
+    if (!valid_asset_hash(hash)) throw std::invalid_argument("invalid asset hash");
+    return asset_root_path() / (".staging-" + hash);
+}
+
+std::string sha256_hex(const std::string& bytes) {
+    unsigned char digest[EVP_MAX_MD_SIZE]{};
+    unsigned int digestLength = 0;
+    if (EVP_Digest(bytes.data(), bytes.size(), digest, &digestLength, EVP_sha256(), nullptr) != 1 || digestLength != 32)
+        throw std::runtime_error("SHA-256 calculation failed");
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (unsigned i = 0; i < digestLength; ++i) out << std::setw(2) << static_cast<unsigned>(digest[i]);
+    return out.str();
+}
+
+std::string safe_original_filename(std::string filename) {
+    if (filename.empty()) filename = "audio-upload";
+    const size_t slash = filename.find_last_of("/\\");
+    if (slash != std::string::npos) filename.erase(0, slash + 1);
+    std::string clean;
+    clean.reserve(std::min<size_t>(filename.size(), 255));
+    for (unsigned char ch : filename) {
+        if (clean.size() >= 255) break;
+        if (ch < 32 || ch == 127 || ch == ':' || ch == '\\') continue;
+        clean.push_back(static_cast<char>(ch));
+    }
+    if (clean.empty() || clean == "." || clean == "..") clean = "audio-upload";
+    return clean;
+}
+
+std::string safe_extension(const std::string& filename) {
+    const size_t dot = filename.find_last_of('.');
+    if (dot == std::string::npos || dot == 0 || filename.size() - dot > 12) return ".bin";
+    std::string extension = filename.substr(dot);
+    for (char& ch : extension) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        if (!(std::isalnum(c) || ch == '.')) return ".bin";
+        ch = static_cast<char>(std::tolower(c));
+    }
+    return extension;
+}
+
+nlohmann::json read_asset_metadata(const std::string& hash) {
+    const auto path = asset_directory(hash) / "metadata.json";
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::invalid_argument("Audio asset not found");
+    nlohmann::json metadata;
+    file >> metadata;
+    if (!metadata.is_object() || metadata.value("sha256", std::string()) != hash)
+        throw std::runtime_error("Audio asset metadata is invalid");
+    return metadata;
+}
+
+void write_json_atomic(const std::filesystem::path& path, const nlohmann::json& value) {
+    const auto temporary = path.string() + ".tmp";
+    {
+        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+        if (!file) throw std::runtime_error("Unable to create metadata file");
+        file << value.dump(2) << "\n";
+        file.flush();
+        if (!file) throw std::runtime_error("Unable to write metadata file");
+    }
+    std::error_code ec;
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::filesystem::remove(temporary);
+        throw std::runtime_error("Unable to atomically replace metadata: " + ec.message());
+    }
+}
+
+std::shared_ptr<const std::vector<float>> load_asset_audio_data(
+    const std::string& hash, const nlohmann::json& metadata) {
+    static std::mutex cacheLock;
+    static std::unordered_map<std::string, std::weak_ptr<const std::vector<float>>> cache;
+    std::lock_guard<std::mutex> lock(cacheLock);
+    if (const auto found = cache.find(hash); found != cache.end()) {
+        if (auto existing = found->second.lock()) return existing;
+    }
+
+    const unsigned channels = metadata.value("channels", 0u);
+    const uint64_t frames = metadata.value("frames", uint64_t{0});
+    const unsigned sampleRate = metadata.value("sample_rate", 0u);
+    if (channels == 0 || channels > CM5_AUDIO_MAX_CHANNELS || sampleRate != CM5_AUDIO_PLAYBACK_SAMPLE_RATE || frames == 0)
+        throw std::runtime_error("Audio asset playback metadata is unsupported or incomplete");
+    if (frames > (CM5_MAX_AUDIO_UPLOAD_BYTES / (sizeof(float) * channels)))
+        throw std::runtime_error("Audio asset exceeds the in-memory player limit");
+
+    const auto path = asset_directory(hash) / "audio.f32";
+    const uint64_t expectedBytes = frames * static_cast<uint64_t>(channels) * sizeof(float);
+    std::error_code ec;
+    const auto actualBytes = std::filesystem::file_size(path, ec);
+    if (ec || actualBytes != expectedBytes)
+        throw std::runtime_error("Audio asset F32 data is missing or has an invalid size");
+
+    auto samples = std::make_shared<std::vector<float>>(static_cast<size_t>(frames) * channels);
+    std::ifstream file(path, std::ios::binary);
+    if (!file || !file.read(reinterpret_cast<char*>(samples->data()), static_cast<std::streamsize>(expectedBytes)))
+        throw std::runtime_error("Unable to read audio asset F32 data");
+    for (float sample : *samples) {
+        if (!std::isfinite(sample) || std::abs(sample) > 32.0f)
+            throw std::runtime_error("Audio asset contains invalid F32 samples");
+    }
+    std::shared_ptr<const std::vector<float>> immutable = samples;
+    cache[hash] = immutable;
+    return immutable;
+}
+
+std::shared_ptr<AudioFilePlayerState> make_audio_player_state(
+    const std::string& hash, float gain, bool loop) {
+    const auto metadata = read_asset_metadata(hash);
+    auto state = std::make_shared<AudioFilePlayerState>();
+    state->interleaved = load_asset_audio_data(hash, metadata);
+    state->channels = metadata.at("channels").get<unsigned>();
+    state->sample_rate = metadata.at("sample_rate").get<unsigned>();
+    state->frames = metadata.at("frames").get<uint64_t>();
+    state->gain.store(gain, std::memory_order_relaxed);
+    state->loop.store(loop, std::memory_order_relaxed);
+    return state;
+}
+
+void validate_player_gain(float gain) {
+    if (!std::isfinite(gain) || gain < 0.0f || gain > 8.0f)
+        throw std::invalid_argument("Player gain must be finite and between 0 and 8");
+}
 
 void validate_plugin_chain_channel_compatibility(
     const nlohmann::json& rawChain, unsigned channels) {
@@ -774,7 +1000,16 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                     const nlohmann::json params = value.value("params", nlohmann::json::object());
                     const nlohmann::json portChannels = value.value("port_channels", nlohmann::json::object());
                     bool restoredOk = false;
-                    if (type == "plugin_chain") {
+                    if (type == "audio_file_player") {
+                        const nlohmann::json chain = value.value("chain", nlohmann::json::array());
+                        restoredOk = create_audio_file_player_node(
+                            value.value("asset_hash", std::string()), name,
+                            value.value("gain", params.value("gain", 1.0f)),
+                            value.value("loop", params.value("loop", false)),
+                            chain, value.value("chain_gain", 1.0f),
+                            value.value("chain_preset_id", 0u), value.value("active", true),
+                            static_cast<uint32_t>(rawId), restored, error);
+                    } else if (type == "plugin_chain") {
                         const nlohmann::json chain = value.value("chain", nlohmann::json::array());
                         const unsigned chainChannels = value.value("channels", inputChannels);
                         restoredOk = create_plugin_chain_node(name, chain,
@@ -789,7 +1024,7 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                     }
                     if (!restoredOk)
                         std::cerr << "[Plugin] Restore skipped for instance " << rawId << ": " << error << std::endl;
-                    else if (type != "plugin_chain" && value.contains("active") && value["active"].is_boolean() && !value["active"].get<bool>()) {
+                    else if (type != "plugin_chain" && type != "audio_file_player" && value.contains("active") && value["active"].is_boolean() && !value["active"].get<bool>()) {
                         std::shared_ptr<const PluginNodeInstance> updated;
                         const bool updateOk = value.contains("port_channels")
                             ? update_plugin_node_with_ports(static_cast<uint32_t>(rawId), name, portChannels, params, false, updated, error)
@@ -931,6 +1166,15 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
             item["chain"] = plugin->chain;
             item["chain_gain"] = plugin->chain_gain;
             item["channels"] = plugin->chain_channels;
+        } else if (plugin->type == "audio_file_player" && plugin->audio_player_state) {
+            item["asset_hash"] = plugin->asset_hash;
+            item["gain"] = plugin->audio_player_state->gain.load(std::memory_order_relaxed);
+            item["loop"] = plugin->audio_player_state->loop.load(std::memory_order_relaxed);
+            item["chain"] = plugin->chain;
+            item["chain_gain"] = plugin->chain_gain;
+            item["chain_preset_id"] = plugin->chain_preset_id;
+            // Transport is deliberately restored stopped; a reboot should not
+            // unexpectedly start emitting audio from a file player.
         }
         settings["plugin_nodes"].push_back(std::move(item));
     }
@@ -1197,6 +1441,167 @@ bool ClientManager::update_plugin_chain_node(
         node->active = active;
         node->processor = std::make_shared<PluginChainProcessor>(
             std::move(prepared.stages), chainGain, channels);
+
+        auto next = std::make_shared<std::vector<std::shared_ptr<const PluginNodeInstance>>>(*current);
+        (*next)[static_cast<size_t>(std::distance(current->begin(), found))] = node;
+        {
+            std::lock_guard<std::mutex> lock(m_plugin_lock);
+            std::atomic_store(&m_pluginNodes,
+                std::static_pointer_cast<const std::vector<std::shared_ptr<const PluginNodeInstance>>>(next));
+        }
+        if (m_dspEngine) m_dspEngine->mark_graph_dirty();
+        updated = node;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+bool ClientManager::create_audio_file_player_node(
+    const std::string& assetHash, const std::string& name, float gain, bool loop,
+    const nlohmann::json& chain, float chainGain, uint32_t presetId, bool active,
+    uint32_t requestedId, std::shared_ptr<const PluginNodeInstance>& created,
+    std::string& error) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    std::vector<std::string> allocatedEndpoints;
+    try {
+        validate_player_gain(gain);
+        if (!chain.is_array()) throw std::invalid_argument("effects chain must be an array");
+        if (!std::isfinite(chainGain) || chainGain < 0.0f || chainGain > 8.0f)
+            throw std::invalid_argument("effects chain gain must be between 0 and 8");
+
+        const auto metadata = read_asset_metadata(assetHash);
+        auto state = make_audio_player_state(assetHash, gain, loop);
+        const unsigned channels = state->channels;
+        nlohmann::json normalizedChain = nlohmann::json::array();
+        std::unique_ptr<AudioProcessor> effects;
+        if (!chain.empty()) {
+            auto prepared = prepare_plugin_chain(chain, chainGain, channels);
+            normalizedChain = std::move(prepared.chain);
+            effects = std::make_unique<PluginChainProcessor>(
+                std::move(prepared.stages), chainGain, channels);
+        }
+
+        const auto existing = plugin_node_snapshot();
+        uint32_t id = requestedId;
+        if (id == 0) {
+            id = m_next_plugin_id.fetch_add(1, std::memory_order_relaxed);
+            if (id == 0 || id == std::numeric_limits<uint32_t>::max())
+                throw std::runtime_error("Plugin instance ID space exhausted");
+        } else if (std::any_of(existing->begin(), existing->end(),
+                       [id](const auto& item) { return item && item->id == id; })) {
+            throw std::invalid_argument("Plugin instance ID already exists");
+        }
+
+        auto node = std::make_shared<PluginNodeInstance>();
+        node->id = id;
+        const std::string assetName = metadata.value("display_name", std::string());
+        const std::string originalName = metadata.value("original_filename", std::string("Audio Asset"));
+        node->name = name.empty() ? (assetName.empty() ? originalName : assetName) : name;
+        node->type = "audio_file_player";
+        node->asset_hash = assetHash;
+        node->chain = std::move(normalizedChain);
+        node->chain_gain = chainGain;
+        node->chain_channels = channels;
+        node->chain_preset_id = presetId;
+        node->input_channels = 0;
+        node->output_channels = channels;
+        node->input_endpoint.clear();
+        node->input_node = NODE_INVALID;
+        node->active = active;
+        node->params = { {"gain", gain}, {"loop", loop} };
+        node->audio_player_state = std::move(state);
+        node->processor = std::make_shared<AudioFilePlayerProcessor>(node->audio_player_state,
+                                                                      std::move(effects));
+
+        const std::string base = "plugin/" + std::to_string(id) + "/";
+        node->process_node = register_node(base + "process");
+        if (node->process_node == NODE_INVALID)
+            throw std::runtime_error("Patchbay node capacity exhausted while allocating audio player");
+        allocatedEndpoints.push_back(base + "process");
+
+        PluginPortInstance output;
+        output.id = "audio_out";
+        output.name = "Audio Output";
+        output.type = "audio";
+        output.direction = "output";
+        output.endpoint = base + "output";
+        output.channels = channels;
+        output.meter_bank = std::make_shared<PluginPortMeterBank>(channels);
+        output.node = register_node(output.endpoint);
+        if (output.node == NODE_INVALID)
+            throw std::runtime_error("Patchbay node capacity exhausted while allocating audio player output");
+        allocatedEndpoints.push_back(output.endpoint);
+        node->output_endpoint = output.endpoint;
+        node->output_node = output.node;
+        node->ports.push_back(std::move(output));
+
+        auto next = std::make_shared<std::vector<std::shared_ptr<const PluginNodeInstance>>>(
+            existing ? *existing : std::vector<std::shared_ptr<const PluginNodeInstance>>{});
+        next->push_back(node);
+        {
+            std::lock_guard<std::mutex> lock(m_plugin_lock);
+            std::atomic_store(&m_pluginNodes,
+                std::static_pointer_cast<const std::vector<std::shared_ptr<const PluginNodeInstance>>>(next));
+        }
+        if (id >= m_next_plugin_id.load(std::memory_order_relaxed) && id < std::numeric_limits<uint32_t>::max())
+            m_next_plugin_id.store(id + 1, std::memory_order_relaxed);
+        if (m_dspEngine) m_dspEngine->mark_graph_dirty();
+        created = node;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        std::lock_guard<std::mutex> nodeLock(m_node_lock);
+        for (const auto& endpoint : allocatedEndpoints) {
+            const auto found = m_endpoint_to_id.find(endpoint);
+            if (found == m_endpoint_to_id.end()) continue;
+            m_id_to_endpoint.erase(found->second);
+            m_endpoint_to_id.erase(found);
+        }
+        return false;
+    }
+}
+
+bool ClientManager::update_audio_file_player_node(
+    uint32_t id, const std::string& name, float gain, bool loop,
+    const nlohmann::json& chain, float chainGain, uint32_t presetId, bool active,
+    std::shared_ptr<const PluginNodeInstance>& updated, std::string& error) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    try {
+        validate_player_gain(gain);
+        if (!chain.is_array()) throw std::invalid_argument("effects chain must be an array");
+        if (!std::isfinite(chainGain) || chainGain < 0.0f || chainGain > 8.0f)
+            throw std::invalid_argument("effects chain gain must be between 0 and 8");
+
+        const auto current = plugin_node_snapshot();
+        const auto found = std::find_if(current->begin(), current->end(),
+            [id](const auto& item) { return item && item->id == id; });
+        if (found == current->end() || (*found)->type != "audio_file_player" || !(*found)->audio_player_state)
+            throw std::invalid_argument("Audio File Player instance not found");
+
+        const unsigned channels = (*found)->audio_player_state->channels;
+        nlohmann::json normalizedChain = nlohmann::json::array();
+        std::unique_ptr<AudioProcessor> effects;
+        if (!chain.empty()) {
+            auto prepared = prepare_plugin_chain(chain, chainGain, channels);
+            normalizedChain = std::move(prepared.chain);
+            effects = std::make_unique<PluginChainProcessor>(
+                std::move(prepared.stages), chainGain, channels);
+        }
+
+        auto node = std::make_shared<PluginNodeInstance>(**found);
+        if (!name.empty()) node->name = name;
+        node->chain = std::move(normalizedChain);
+        node->chain_gain = chainGain;
+        node->chain_channels = channels;
+        node->chain_preset_id = presetId;
+        node->active = active;
+        node->audio_player_state->gain.store(gain, std::memory_order_relaxed);
+        node->audio_player_state->loop.store(loop, std::memory_order_relaxed);
+        node->params = {{"gain", gain}, {"loop", loop}};
+        node->processor = std::make_shared<AudioFilePlayerProcessor>(node->audio_player_state,
+                                                                      std::move(effects));
 
         auto next = std::make_shared<std::vector<std::shared_ptr<const PluginNodeInstance>>>(*current);
         (*next)[static_cast<size_t>(std::distance(current->begin(), found))] = node;
@@ -2004,7 +2409,7 @@ bool WebServer::start() {
         m_httpServer->set_read_timeout(1);
         m_httpServer->set_write_timeout(1);
         m_httpServer->set_keep_alive_timeout(1);
-        m_httpServer->set_payload_max_length(1024 * 1024);
+        m_httpServer->set_payload_max_length(CM5_MAX_AUDIO_UPLOAD_BYTES);
         // Serialize accepted mutations through adoption and (where requested) save.
         // GETs use their own snapshot/container locks and remain concurrent.
         const auto post = [this](const std::string& path, httplib::Server::Handler handler) {
@@ -2031,6 +2436,8 @@ bool WebServer::start() {
                         path == "/api/devices/deactivate" ||
                         path.find("/api/plugin-chain-presets") == 0 ||
                         path == "/api/plugins/chains" ||
+                        path == "/api/audio-players" ||
+                        path.find("/api/audio-players/") == 0 && path.find("/settings") != std::string::npos ||
                         path == "/api/plugins/extract-chain" ||
                         (path.find("/api/plugins/") == 0 && path.find("/chain") != std::string::npos);
                     if (persistMutation) {
@@ -2269,6 +2676,356 @@ bool WebServer::start() {
         m_httpServer->Get("/api/dsp/available", [](const httplib::Request&, httplib::Response& response) {
             response.set_header("Cache-Control", "no-store");
             response.set_content(ProcessorRegistry::instance().discovery().dump(2), "application/json");
+        });
+
+        // Audio assets are content-addressed by SHA-256 of the original upload.
+        // The browser submits the original bytes first, then the converted F32
+        // interleaved playback cache as a second request. Disk I/O and hashing
+        // stay on HTTP worker threads, never on the real-time audio thread.
+        m_httpServer->Get("/api/audio/format", [](const httplib::Request&, httplib::Response& response) {
+            response.set_header("Cache-Control", "no-store");
+            response.set_content(nlohmann::json({
+                {"sample_rate", CM5_AUDIO_PLAYBACK_SAMPLE_RATE},
+                {"max_channels", CM5_AUDIO_MAX_CHANNELS},
+                {"format", "f32_interleaved"},
+                {"max_upload_bytes", CM5_MAX_AUDIO_UPLOAD_BYTES}
+            }).dump(2), "application/json");
+        });
+
+        m_httpServer->Get("/api/assets", [](const httplib::Request&, httplib::Response& response) {
+            try {
+                nlohmann::json assets = nlohmann::json::array();
+                const auto root = asset_root_path();
+                if (std::filesystem::exists(root)) {
+                    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                        if (!entry.is_directory()) continue;
+                        const std::string hash = entry.path().filename().string();
+                        if (!valid_asset_hash(hash)) continue;
+                        try {
+                            auto metadata = read_asset_metadata(hash);
+                            metadata["sha256"] = hash;
+                            assets.push_back(std::move(metadata));
+                        } catch (...) { /* Incomplete/corrupt uploads are not listed as usable assets. */ }
+                    }
+                }
+                response.set_header("Cache-Control", "no-store");
+                response.set_content(nlohmann::json({{"assets", assets}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 500, error.what()); }
+        });
+
+        m_httpServer->Get(R"(/api/assets/([a-f0-9]{64}))", [](const httplib::Request& request, httplib::Response& response) {
+            try {
+                const std::string hash = request.matches[1];
+                auto metadata = read_asset_metadata(hash);
+                metadata["sha256"] = hash;
+                response.set_header("Cache-Control", "no-store");
+                response.set_content(metadata.dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 404, error.what()); }
+        });
+
+        m_httpServer->Post("/api/assets/upload/original", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            try {
+                if (request.body.empty() || request.body.size() > CM5_MAX_AUDIO_UPLOAD_BYTES)
+                    throw std::invalid_argument("Original audio upload is empty or exceeds the configured upload limit");
+                // Calculate the content address on the backend. This deliberately
+                // avoids requiring WebCrypto, which is unavailable on many plain-HTTP
+                // LAN origins where this dashboard is commonly hosted.
+                const std::string calculatedHash = sha256_hex(request.body);
+                const std::string requestedHash = request.has_param("sha256")
+                    ? request.get_param_value("sha256") : std::string();
+                if (!requestedHash.empty()) {
+                    if (!valid_asset_hash(requestedHash) || requestedHash != calculatedHash)
+                        throw std::invalid_argument("Uploaded original file does not match its SHA-256 identifier");
+                }
+                const std::string hash = calculatedHash;
+
+                const auto root = asset_root_path();
+                std::filesystem::create_directories(root);
+                const auto finalDir = asset_directory(hash);
+                if (std::filesystem::exists(finalDir / "metadata.json")) {
+                    auto metadata = read_asset_metadata(hash);
+                    metadata["sha256"] = hash;
+                    response.set_content(nlohmann::json({{"status", "ok"}, {"already_exists", true}, {"asset", metadata}}).dump(2), "application/json");
+                    return;
+                }
+
+                const std::string filename = safe_original_filename(request.get_param_value("filename"));
+                const std::string mime = (request.has_param("mime_type") ? request.get_param_value("mime_type") : std::string("application/octet-stream"));
+                const auto stage = staging_asset_directory(hash);
+                std::error_code ignored;
+                std::filesystem::remove_all(stage, ignored);
+                std::filesystem::create_directories(stage);
+                const std::string originalFile = "original" + safe_extension(filename);
+                {
+                    std::ofstream file(stage / originalFile, std::ios::binary | std::ios::trunc);
+                    if (!file || !file.write(request.body.data(), static_cast<std::streamsize>(request.body.size())))
+                        throw std::runtime_error("Unable to store original uploaded audio file");
+                }
+                write_json_atomic(stage / "upload.json", {
+                    {"original_filename", filename}, {"original_file", originalFile},
+                    {"original_mime_type", mime}, {"original_size_bytes", request.body.size()},
+                    {"sha256", hash}
+                });
+                response.set_content(nlohmann::json({{"status", "ok"}, {"already_exists", false}, {"sha256", hash}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        });
+
+        m_httpServer->Post("/api/assets/upload/converted", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            try {
+                const std::string hash = request.get_header_value("X-CM5-Asset-SHA256");
+                if (!valid_asset_hash(hash)) throw std::invalid_argument("X-CM5-Asset-SHA256 is missing or invalid");
+                if (std::filesystem::exists(asset_directory(hash) / "metadata.json")) {
+                    auto metadata = read_asset_metadata(hash);
+                    response.set_content(nlohmann::json({{"status", "ok"}, {"already_exists", true}, {"asset", metadata}}).dump(2), "application/json");
+                    return;
+                }
+                const auto stage = staging_asset_directory(hash);
+                if (!std::filesystem::exists(stage / "upload.json"))
+                    throw std::invalid_argument("Original file must be uploaded before converted F32 data");
+
+                const unsigned sampleRate = static_cast<unsigned>(request.get_header_value_u64("X-CM5-Sample-Rate"));
+                const unsigned channels = static_cast<unsigned>(request.get_header_value_u64("X-CM5-Channels"));
+                const uint64_t frames = static_cast<uint64_t>(request.get_header_value_u64("X-CM5-Frames"));
+                if (sampleRate != CM5_AUDIO_PLAYBACK_SAMPLE_RATE)
+                    throw std::invalid_argument("Browser conversion must use the backend playback sample rate of 48000 Hz");
+                if (channels == 0 || channels > CM5_AUDIO_MAX_CHANNELS || frames == 0)
+                    throw std::invalid_argument("Converted audio must contain 1 to 8 channels and at least one frame");
+                if (frames > std::numeric_limits<uint64_t>::max() / channels / sizeof(float))
+                    throw std::invalid_argument("Converted audio dimensions overflow");
+                const uint64_t expectedBytes = frames * static_cast<uint64_t>(channels) * sizeof(float);
+                if (expectedBytes != request.body.size() || expectedBytes > CM5_MAX_AUDIO_UPLOAD_BYTES)
+                    throw std::invalid_argument("Converted F32 byte count does not match its frame/channel metadata or upload limit");
+
+                for (size_t offset = 0; offset < request.body.size(); offset += sizeof(float)) {
+                    float sample = 0.0f;
+                    std::memcpy(&sample, request.body.data() + offset, sizeof(float));
+                    if (!std::isfinite(sample) || std::abs(sample) > 32.0f)
+                        throw std::invalid_argument("Converted audio contains non-finite or unreasonable F32 samples");
+                }
+
+                const auto uploadInfoPath = stage / "upload.json";
+                std::ifstream uploadInfoFile(uploadInfoPath, std::ios::binary);
+                nlohmann::json uploadInfo;
+                uploadInfoFile >> uploadInfo;
+                const auto convertedTemp = stage / "audio.f32.tmp";
+                {
+                    std::ofstream file(convertedTemp, std::ios::binary | std::ios::trunc);
+                    if (!file || !file.write(request.body.data(), static_cast<std::streamsize>(request.body.size())))
+                        throw std::runtime_error("Unable to store converted F32 audio data");
+                }
+                std::filesystem::rename(convertedTemp, stage / "audio.f32");
+
+                const double duration = static_cast<double>(frames) / sampleRate;
+                nlohmann::json metadata = {
+                    {"sha256", hash},
+                    {"original_filename", uploadInfo.value("original_filename", std::string("audio-upload"))},
+                    {"display_name", ""},
+                    {"original_file", uploadInfo.value("original_file", std::string("original.bin"))},
+                    {"original_mime_type", uploadInfo.value("original_mime_type", std::string("application/octet-stream"))},
+                    {"original_size_bytes", uploadInfo.value("original_size_bytes", uint64_t{0})},
+                    {"sample_rate", sampleRate}, {"channels", channels}, {"frames", frames},
+                    {"duration_seconds", duration}, {"format", "f32_interleaved"},
+                    {"playback", {{"gain", 1.0}, {"loop", false}}},
+                    {"effects", {{"preset_id", 0}, {"chain", nlohmann::json::array()}, {"chain_gain", 1.0}}}
+                };
+                write_json_atomic(stage / "metadata.json", metadata);
+                const auto finalDir = asset_directory(hash);
+                std::error_code ec;
+                if (std::filesystem::exists(finalDir)) {
+                    std::filesystem::remove_all(stage, ec);
+                    auto existing = read_asset_metadata(hash);
+                    existing["sha256"] = hash;
+                    response.set_content(nlohmann::json({{"status", "ok"}, {"already_exists", true}, {"asset", existing}}).dump(2), "application/json");
+                    return;
+                }
+                std::filesystem::rename(stage, finalDir);
+                metadata["sha256"] = hash;
+                response.set_content(nlohmann::json({{"status", "ok"}, {"already_exists", false}, {"asset", metadata}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        });
+
+        m_httpServer->Post(R"(/api/assets/([a-f0-9]{64})/metadata)", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            try {
+                const std::string hash = request.matches[1];
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object()) throw std::invalid_argument("Asset metadata update must be an object");
+                auto metadata = read_asset_metadata(hash);
+                if (body.contains("display_name")) {
+                    if (!body["display_name"].is_string()) throw std::invalid_argument("display_name must be a string");
+                    std::string displayName = body["display_name"].get<std::string>();
+                    if (displayName.size() > 80) throw std::invalid_argument("display_name cannot exceed 80 characters");
+                    metadata["display_name"] = displayName;
+                }
+                if (body.contains("gain")) {
+                    if (!body["gain"].is_number()) throw std::invalid_argument("gain must be numeric");
+                    const float gain = body["gain"].get<float>();
+                    validate_player_gain(gain);
+                    // This endpoint edits the asset's default gain for future
+                    // player instances. Existing player nodes retain their own
+                    // independent gain values until edited in their node settings.
+                    metadata["playback"]["gain"] = gain;
+                }
+                write_json_atomic(asset_directory(hash) / "metadata.json", metadata);
+                metadata["sha256"] = hash;
+                response.set_content(nlohmann::json({{"status", "ok"}, {"asset", metadata}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        });
+
+        m_httpServer->Delete(R"(/api/assets/([a-f0-9]{64}))", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            const std::string hash = request.matches[1];
+            for (const auto& plugin : m_clientMgr.get_plugin_nodes()) {
+                if (plugin && plugin->type == "audio_file_player" && plugin->asset_hash == hash) {
+                    dsp_error(response, 409, "Cannot delete an asset referenced by a live Audio File Player node");
+                    return;
+                }
+            }
+            try {
+                const auto directory = asset_directory(hash);
+                if (!std::filesystem::exists(directory)) { dsp_error(response, 404, "Audio asset not found"); return; }
+                std::filesystem::remove_all(directory);
+                response.set_content(nlohmann::json({{"status", "ok"}, {"deleted", hash}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 500, error.what()); }
+        });
+
+        post("/api/audio-players", [this](const httplib::Request& request, httplib::Response& response) {
+            try {
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object() || !body.contains("asset_hash") || !body["asset_hash"].is_string())
+                    throw std::invalid_argument("asset_hash is required");
+                const std::string hash = body["asset_hash"].get<std::string>();
+                auto metadata = read_asset_metadata(hash);
+                const auto playback = metadata.value("playback", nlohmann::json::object());
+                const auto effectsConfig = metadata.value("effects", nlohmann::json::object());
+                float gain = body.value("gain", playback.value("gain", 1.0f));
+                bool loop = body.value("loop", playback.value("loop", false));
+                nlohmann::json chain = body.value("chain", effectsConfig.value("chain", nlohmann::json::array()));
+                float chainGain = body.value("chain_gain", effectsConfig.value("chain_gain", 1.0f));
+                uint32_t presetId = body.value("chain_preset_id", effectsConfig.value("preset_id", 0u));
+                if (presetId) {
+                    PluginChainPreset preset;
+                    if (!m_clientMgr.get_plugin_chain_preset(presetId, preset))
+                        throw std::invalid_argument("Selected plugin chain preset no longer exists");
+                    chain = preset.chain;
+                    chainGain = preset.chain_gain;
+                }
+                std::shared_ptr<const PluginNodeInstance> created;
+                std::string error;
+                if (!m_clientMgr.create_audio_file_player_node(hash, body.value("name", std::string()),
+                    gain, loop, chain, chainGain, presetId, body.value("active", true), 0, created, error))
+                    throw std::invalid_argument(error);
+
+                // The asset metadata is the default playback profile for future
+                // instances of this same file. Each live node still keeps its own
+                // independent gain/transport state and copied effects chain.
+                metadata["playback"]["gain"] = gain;
+                metadata["playback"]["loop"] = loop;
+                metadata["effects"] = {{"preset_id", presetId}, {"chain", created->chain}, {"chain_gain", chainGain}};
+                write_json_atomic(asset_directory(hash) / "metadata.json", metadata);
+
+                response.set_content(nlohmann::json({{"status", "ok"}, {"plugin", plugin_node_json(*created)}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        });
+
+        post(R"(/api/audio-players/(\d+)/settings)", [this](const httplib::Request& request, httplib::Response& response) {
+            uint32_t id = 0;
+            if (!parse_plugin_instance_id(request, id)) { dsp_error(response, 400, "invalid audio player ID"); return; }
+            try {
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object()) throw std::invalid_argument("Audio player settings must be an object");
+                const auto current = m_clientMgr.get_plugin_nodes();
+                const auto found = std::find_if(current.begin(), current.end(), [id](const auto& item) {
+                    return item && item->id == id && item->type == "audio_file_player";
+                });
+                if (found == current.end()) throw std::invalid_argument("Audio File Player node not found");
+                const auto old = *found;
+                float gain = body.value("gain", old->audio_player_state->gain.load(std::memory_order_relaxed));
+                bool loop = body.value("loop", old->audio_player_state->loop.load(std::memory_order_relaxed));
+                nlohmann::json chain = body.value("chain", old->chain);
+                float chainGain = body.value("chain_gain", old->chain_gain);
+                uint32_t presetId = body.value("chain_preset_id", old->chain_preset_id);
+                if (presetId) {
+                    PluginChainPreset preset;
+                    if (!m_clientMgr.get_plugin_chain_preset(presetId, preset))
+                        throw std::invalid_argument("Selected plugin chain preset no longer exists");
+                    chain = preset.chain;
+                    chainGain = preset.chain_gain;
+                }
+                std::shared_ptr<const PluginNodeInstance> updated;
+                std::string error;
+                if (!m_clientMgr.update_audio_file_player_node(id, body.value("name", old->name),
+                    gain, loop, chain, chainGain, presetId, body.value("active", old->active), updated, error))
+                    throw std::invalid_argument(error);
+
+                auto metadata = read_asset_metadata(old->asset_hash);
+                metadata["playback"]["gain"] = gain;
+                metadata["playback"]["loop"] = loop;
+                metadata["effects"] = {{"preset_id", presetId}, {"chain", updated->chain}, {"chain_gain", chainGain}};
+                write_json_atomic(asset_directory(old->asset_hash) / "metadata.json", metadata);
+                response.set_content(nlohmann::json({{"status", "ok"}, {"plugin", plugin_node_json(*updated)}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        });
+
+        m_httpServer->Post(R"(/api/audio-players/(\d+)/transport)", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            uint32_t id = 0;
+            if (!parse_plugin_instance_id(request, id)) { dsp_error(response, 400, "invalid audio player ID"); return; }
+            try {
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object() || !body.contains("action") || !body["action"].is_string())
+                    throw std::invalid_argument("transport action is required");
+                const auto nodes = m_clientMgr.get_plugin_nodes();
+                const auto found = std::find_if(nodes.begin(), nodes.end(), [id](const auto& item) {
+                    return item && item->id == id && item->type == "audio_file_player";
+                });
+                if (found == nodes.end() || !(*found)->audio_player_state)
+                    throw std::invalid_argument("Audio File Player node not found");
+                auto state = (*found)->audio_player_state;
+                const std::string action = body["action"].get<std::string>();
+                if (action == "play") {
+                    if (state->position_frames.load(std::memory_order_relaxed) >= state->frames)
+                        state->seek_request_frames.store(0, std::memory_order_release);
+                    state->playing.store(true, std::memory_order_release);
+                } else if (action == "pause") {
+                    state->playing.store(false, std::memory_order_release);
+                } else if (action == "stop") {
+                    state->playing.store(false, std::memory_order_release);
+                    state->position_frames.store(0, std::memory_order_release);
+                    state->seek_request_frames.store(0, std::memory_order_release);
+                } else if (action == "seek") {
+                    if (!body.contains("position_seconds") || !body["position_seconds"].is_number())
+                        throw std::invalid_argument("position_seconds is required for seek");
+                    const double seconds = body["position_seconds"].get<double>();
+                    if (!std::isfinite(seconds) || seconds < 0.0)
+                        throw std::invalid_argument("seek position must be a finite non-negative number");
+                    const uint64_t frame = std::min<uint64_t>(static_cast<uint64_t>(seconds * state->sample_rate), state->frames);
+                    state->position_frames.store(frame, std::memory_order_release);
+                    state->seek_request_frames.store(frame, std::memory_order_release);
+                } else {
+                    throw std::invalid_argument("action must be play, pause, stop, or seek");
+                }
+                const uint64_t position = state->position_frames.load(std::memory_order_relaxed);
+                response.set_content(nlohmann::json({{"status", "ok"}, {"playing", state->playing.load()},
+                    {"position_frames", position}, {"duration_seconds", static_cast<double>(state->frames) / state->sample_rate}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
+        });
+
+        m_httpServer->Get("/api/audio-players/status", [this](const httplib::Request&, httplib::Response& response) {
+            nlohmann::json players = nlohmann::json::array();
+            for (const auto& plugin : m_clientMgr.get_plugin_nodes()) {
+                if (!plugin || plugin->type != "audio_file_player" || !plugin->audio_player_state) continue;
+                const auto& state = *plugin->audio_player_state;
+                players.push_back({{"id", plugin->id}, {"playing", state.playing.load(std::memory_order_relaxed)},
+                    {"loop", state.loop.load(std::memory_order_relaxed)},
+                    {"position_frames", state.position_frames.load(std::memory_order_relaxed)},
+                    {"duration_seconds", state.sample_rate ? static_cast<double>(state.frames) / state.sample_rate : 0.0},
+                    {"sample_rate", state.sample_rate}});
+            }
+            response.set_header("Cache-Control", "no-store");
+            response.set_content(nlohmann::json({{"players", players}}).dump(2), "application/json");
         });
 
         m_httpServer->Get("/api/plugins", [this](const httplib::Request&, httplib::Response& response) {

@@ -15,7 +15,7 @@ struct ProcessorChoice {
     nlohmann::json value;
 };
 
-// Supported UI types: number, integer, boolean, string, enum. Units are display-only.
+// Supported UI types: number, integer, boolean, string, enum. Unit and description fields are display metadata.
 struct ProcessorParameter {
     std::string id;
     std::string name;
@@ -26,6 +26,7 @@ struct ProcessorParameter {
     std::optional<double> step;
     std::string unit;
     std::vector<ProcessorChoice> choices;
+    std::string description;
 };
 
 struct ProcessorChannelLayout {

@@ -1,31 +1,17 @@
 {
   "mappings": [
     {
-      "cc": 118,
-      "channel": 1,
-      "curve": "linear",
-      "id": 1,
-      "invert": false,
-      "mode": "absolute",
-      "parameter_id": "playing",
-      "plugin_id": 14,
-      "plugin_type": "audio_file_player",
-      "relative_encoding": "inc-dec",
-      "relative_multiplier": 0.007874015748031496,
-      "target_kind": "plugin"
-    },
-    {
       "cc": 74,
       "channel": 1,
-      "curve": "audio",
-      "id": 2,
+      "curve": "log",
+      "id": 4,
       "invert": false,
       "mode": "relative",
-      "parameter_id": "gain",
-      "plugin_id": 14,
-      "plugin_type": "audio_file_player",
+      "parameter_id": "sample_rate",
+      "plugin_id": 20,
+      "plugin_type": "bitcrusher",
       "relative_encoding": "inc-dec",
-      "relative_multiplier": 0.01,
+      "relative_multiplier": 1.0,
       "target_kind": "plugin"
     }
   ],

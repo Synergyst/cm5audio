@@ -4,7 +4,7 @@ CXXFLAGS = -std=c++17 -O3 -Iinclude -I/usr/local/include -I$(NLOHMANN_JSON_INCLU
 LDFLAGS = -L/usr/local/lib -lasound -lpipewire-0.3 -lixwebsocket -lssl -lcrypto -lz -lrnnoise -lpthread
 
 # Separate fast-changing app sources from rarely-changed miniaudio
-APP_SRCS = src/main.cpp src/web_server.cpp src/device_manager.cpp src/dsp_engine.cpp \
+APP_SRCS = src/main.cpp src/web_server.cpp src/midi_cc_controller.cpp src/device_manager.cpp src/dsp_engine.cpp \
 	src/processor_registry.cpp src/plugins/register_builtin_processors.cpp \
 	src/plugins/passthrough.cpp src/plugins/gain.cpp src/plugins/compressor.cpp \
 	src/plugins/echo_processor.cpp src/plugins/chorus_processor.cpp src/plugins/reverb_processor.cpp \

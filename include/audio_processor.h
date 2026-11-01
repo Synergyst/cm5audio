@@ -205,6 +205,26 @@ public:
         process(primaryOutput.output, context.frames, primaryOutput.channels);
     }
 
+    // Realtime parameter control is delivered by the MIDI control worker, not
+    // the audio callback. Implementations must update only state that the audio
+    // processor already reads safely (normally atomic parameters). Static or
+    // structurally significant settings should remain unsupported.
+    virtual const char* parameter_control_type() const noexcept { return nullptr; }
+    virtual bool supports_parameter_control(const std::string& parameterId) const noexcept {
+        (void)parameterId;
+        return false;
+    }
+    virtual bool get_parameter_control(const std::string& parameterId, float& value) const noexcept {
+        (void)parameterId;
+        (void)value;
+        return false;
+    }
+    virtual bool set_parameter_control(const std::string& parameterId, float value) noexcept {
+        (void)parameterId;
+        (void)value;
+        return false;
+    }
+
     // Called on the control thread when a graph-native MIDI input port is
     // attached. Most processors do not need to override it.
     virtual void attach_midi_input(const std::string& portId,

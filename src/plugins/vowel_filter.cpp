@@ -9,14 +9,14 @@
 #endif
 
 void VowelFilterProcessor::Biquad::setBandPass(float freq, float Q, float sampleRate) {
-    float omega = 2.0f * (float)M_PI * freq / sampleRate;
+    float omega = 2.0f * static_cast<float>(M_PI) * freq / sampleRate;
     float sn = std::sin(omega);
     float cs = std::cos(omega);
     float alpha = sn / (2.0f * Q);
 
     float a0 = 1.0f + alpha;
     b0 = alpha / a0;
-    b1 = 0;
+    b1 = 0.0f;
     b2 = -alpha / a0;
     a1 = (-2.0f * cs) / a0;
     a2 = (1.0f - alpha) / a0;
@@ -33,11 +33,12 @@ VowelFilterProcessor::VowelFilterProcessor(int vowel_idx, float resonance, float
     : m_vowel_idx(vowel_idx), m_resonance(resonance), m_mix(mix) {}
 
 void VowelFilterProcessor::updateCoefficients() {
-    int current = m_vowel_idx.load(std::memory_order_relaxed);
-    if (current == m_last_vowel_idx) return;
+    const int current = m_vowel_idx.load(std::memory_order_relaxed);
+    const float resonance = m_resonance.load(std::memory_order_relaxed);
+    if (current == m_last_vowel_idx && resonance == m_last_resonance) return;
 
-    float f1 = 0, f2 = 0;
-    switch(current) {
+    float f1 = 0.0f, f2 = 0.0f;
+    switch (current) {
         case 0: f1 = 700.0f; f2 = 1220.0f; break; // a
         case 1: f1 = 500.0f; f2 = 1780.0f; break; // e
         case 2: f1 = 300.0f; f2 = 2250.0f; break; // i
@@ -46,10 +47,10 @@ void VowelFilterProcessor::updateCoefficients() {
         default: f1 = 500.0f; f2 = 1500.0f; break;
     }
 
-    float Q = m_resonance.load(std::memory_order_relaxed);
-    m_f1.setBandPass(f1, Q, 48000.0f);
-    m_f2.setBandPass(f2, Q, 48000.0f);
+    m_f1.setBandPass(f1, resonance, 48000.0f);
+    m_f2.setBandPass(f2, resonance, 48000.0f);
     m_last_vowel_idx = current;
+    m_last_resonance = resonance;
 }
 
 void VowelFilterProcessor::process(float* buffer, size_t frames, unsigned channels) {
@@ -58,8 +59,8 @@ void VowelFilterProcessor::process(float* buffer, size_t frames, unsigned channe
 
     for (size_t i = 0; i < frames; ++i) {
         for (unsigned c = 0; c < channels; ++c) {
-            float in = buffer[i * channels + c];
-            float filtered = m_f1.process(in) + m_f2.process(in);
+            const float in = buffer[i * channels + c];
+            const float filtered = m_f1.process(in) + m_f2.process(in);
             buffer[i * channels + c] = (in * (1.0f - mix)) + (filtered * mix);
         }
     }
@@ -74,19 +75,15 @@ void register_vowel_filter_processor(ProcessorRegistry& registry) {
             {"mix", "Mix", "number", 0.8, 0.0, 1.0, 0.01, "linear", {}}
         },
         [](const nlohmann::json& params) {
-            std::string v = params.at("vowel").get<std::string>();
+            const std::string vowel = params.at("vowel").get<std::string>();
             int idx = 5;
-            if (v == "a") idx = 0;
-            else if (v == "e") idx = 1;
-            else if (v == "i") idx = 2;
-            else if (v == "o") idx = 3;
-            else if (v == "u") idx = 4;
-            
+            if (vowel == "a") idx = 0;
+            else if (vowel == "e") idx = 1;
+            else if (vowel == "i") idx = 2;
+            else if (vowel == "o") idx = 3;
+            else if (vowel == "u") idx = 4;
             return std::make_unique<VowelFilterProcessor>(
-                idx,
-                params.at("resonance").get<float>(),
-                params.at("mix").get<float>()
-            );
+                idx, params.at("resonance").get<float>(), params.at("mix").get<float>());
         }
     });
 }

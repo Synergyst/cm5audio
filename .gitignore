@@ -13,3 +13,4 @@ apply.sh
 /*.py
 pipewire_channel_test
 /assets/
+/cm5audio_midi_cc.json

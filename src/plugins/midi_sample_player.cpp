@@ -574,6 +574,8 @@ public:
         unsigned maxVoices,
         float gain,
         bool loop,
+        bool fullLengthSustain,
+        bool fadeOnRelease,
         float attackMs,
         float releaseMs)
         : sample_(std::move(sample)),
@@ -583,6 +585,8 @@ public:
           maxVoices_(maxVoices),
           gain_(gain),
           loop_(loop),
+          fullLengthSustain_(fullLengthSustain),
+          fadeOnRelease_(fadeOnRelease),
           attackMs_(attackMs),
           releaseMs_(releaseMs)
     {
@@ -646,8 +650,12 @@ public:
                 Voice& voice = voices_[voiceIndex];
                 if (!voice.active) continue;
 
+                // A full-length voice ignores key release for its amplitude, but
+                // it becomes a one-shot: even if looping was enabled, it will
+                // finish the current pass rather than loop forever after key-up.
+                const bool voiceLoops = loop_ && !voice.stopAtSampleEnd;
                 if (voice.position >= static_cast<double>(sample_->frames)) {
-                    if (loop_) {
+                    if (voiceLoops) {
                         voice.position = std::fmod(
                             voice.position, static_cast<double>(sample_->frames));
                     } else {
@@ -659,7 +667,7 @@ public:
                 const uint64_t firstFrame = static_cast<uint64_t>(voice.position);
                 uint64_t secondFrame = firstFrame + 1;
                 if (secondFrame >= sample_->frames)
-                    secondFrame = loop_ ? 0 : firstFrame;
+                    secondFrame = voiceLoops ? 0 : firstFrame;
                 const float fraction = static_cast<float>(
                     voice.position - static_cast<double>(firstFrame));
 
@@ -671,12 +679,19 @@ public:
 
                 if (voice.releasing) {
                     if (voice.releaseRemaining == 0) {
-                        voice.active = false;
-                        continue;
+                        if (voice.releaseStopsVoice) {
+                            voice.active = false;
+                            continue;
+                        }
+                        voice.releasing = false;
+                        voice.fadeComplete = true;
+                    } else {
+                        envelope *= static_cast<float>(voice.releaseRemaining) /
+                                    static_cast<float>(voice.releaseTotal);
                     }
-                    envelope *= static_cast<float>(voice.releaseRemaining) /
-                                static_cast<float>(voice.releaseTotal);
                 }
+                if (voice.fadeComplete)
+                    envelope = 0.0f;
 
                 const float voiceGain = gain_ * voice.velocity * envelope;
                 if (voiceGain != 0.0f) {
@@ -692,9 +707,17 @@ public:
                 voice.position += voice.pitchRatio * rateRatio;
                 if (voice.releasing) {
                     --voice.releaseRemaining;
-                    if (voice.releaseRemaining == 0)
-                        voice.active = false;
-                } else if (!loop_ && voice.position >= static_cast<double>(sample_->frames)) {
+                    if (voice.releaseRemaining == 0) {
+                        if (voice.releaseStopsVoice) {
+                            voice.active = false;
+                        } else {
+                            voice.releasing = false;
+                            voice.fadeComplete = true;
+                        }
+                    }
+                }
+                if (voice.active && !voiceLoops &&
+                    voice.position >= static_cast<double>(sample_->frames)) {
                     voice.active = false;
                 }
             }
@@ -706,6 +729,9 @@ private:
         bool active = false;
         bool keyDown = false;
         bool releasing = false;
+        bool stopAtSampleEnd = false;
+        bool releaseStopsVoice = true;
+        bool fadeComplete = false;
         unsigned channel = 0;
         unsigned note = 0;
         double position = 0.0;
@@ -726,6 +752,8 @@ private:
     unsigned maxVoices_ = 16;
     float gain_ = 1.0f;
     bool loop_ = false;
+    bool fullLengthSustain_ = false;
+    bool fadeOnRelease_ = true;
     float attackMs_ = 2.0f;
     float releaseMs_ = 80.0f;
     std::array<double, MIDI_NOTES> pitchRatio_{};
@@ -741,14 +769,32 @@ private:
 
     void beginRelease(Voice& voice, double sampleRate) noexcept
     {
-        if (!voice.active || voice.releasing) return;
+        if (!voice.active || voice.releasing || voice.fadeComplete) return;
+
+        // In full-length mode, key release ends looping but never truncates the
+        // sample. The optional release envelope can fade it to silence while
+        // the read position continues to the actual end of the asset.
+        const bool keepPlayingToEnd = fullLengthSustain_;
+        if (keepPlayingToEnd)
+            voice.stopAtSampleEnd = true;
+
+        if (keepPlayingToEnd && !fadeOnRelease_)
+            return;
+
         voice.releasing = true;
+        voice.releaseStopsVoice = !keepPlayingToEnd;
         const double requested = std::max(0.0, static_cast<double>(releaseMs_)) *
                                  0.001 * sampleRate;
         voice.releaseTotal = static_cast<uint64_t>(std::llround(requested));
         voice.releaseRemaining = voice.releaseTotal;
-        if (voice.releaseRemaining == 0)
-            voice.active = false;
+        if (voice.releaseRemaining == 0) {
+            if (voice.releaseStopsVoice)
+                voice.active = false;
+            else {
+                voice.releasing = false;
+                voice.fadeComplete = true;
+            }
+        }
     }
 
     void noteOn(unsigned channel, unsigned note, float velocity,
@@ -977,7 +1023,8 @@ void register_midi_sample_player_processor(ProcessorRegistry& registry)
         "MIDI Sample Player",
         "Polyphonic MIDI sample instrument. Plays an uploaded Audio Asset at "
         "different semitones according to MIDI note numbers, with velocity, "
-        "looping, sustain pedal, and note release support.",
+        "looping, sustain pedal, and optional full-length one-shot playback "
+        "after key release with an optional release fade.",
         {
             {"sample_asset", "Sample Asset (filename, display name, or SHA-256)",
              "string", "", {}, {}, {},
@@ -990,6 +1037,11 @@ void register_midi_sample_player_processor(ProcessorRegistry& registry)
              static_cast<double>(MAX_SAMPLE_VOICES), 1.0, "voices", {}},
             {"gain", "Output Gain", "number", 1.0, 0.0, 8.0, 0.01, "", {}},
             {"loop", "Loop Sample", "boolean", false, {}, {}, {}, "", {}},
+            {"full_length_sustain", "Play Full Sample After Key Release",
+             "boolean", false, {}, {}, {},
+             "When enabled, note-off no longer cuts the sample short. Playback continues to the sample end; if looping is enabled, the current pass finishes without starting another loop.", {}},
+            {"fade_on_release", "Fade After Key Release", "boolean", false, {}, {}, {},
+             "In full-length mode, fade toward silence after note-off while playback continues to the sample end. The Release setting controls the fade duration. When disabled, playback keeps its current level until the sample ends.", {}},
             {"attack_ms", "Attack", "number", 2.0, 0.0, 500.0, 1.0, "ms", {}},
             {"release_ms", "Release", "number", 80.0, 0.0, 5000.0, 1.0, "ms", {}},
             {"auto_connect", "Auto Connect MIDI", "enum", "disabled", {}, {}, {}, "",
@@ -1006,6 +1058,8 @@ void register_midi_sample_player_processor(ProcessorRegistry& registry)
             const unsigned maxVoices = params.at("max_voices").get<unsigned>();
             const float gain = params.at("gain").get<float>();
             const bool loop = params.at("loop").get<bool>();
+            const bool fullLengthSustain = params.at("full_length_sustain").get<bool>();
+            const bool fadeOnRelease = params.at("fade_on_release").get<bool>();
             const float attackMs = params.at("attack_ms").get<float>();
             const float releaseMs = params.at("release_ms").get<float>();
             const bool autoConnect = params.at("auto_connect").get<std::string>() == "enabled";
@@ -1014,7 +1068,7 @@ void register_midi_sample_player_processor(ProcessorRegistry& registry)
             auto midi = MidiEventInputService::acquire(autoConnect, midiOutput);
             return std::make_unique<MidiSamplePlayerProcessor>(
                 sample, std::move(midi), midiChannel, rootNote, maxVoices,
-                gain, loop, attackMs, releaseMs);
+                gain, loop, fullLengthSustain, fadeOnRelease, attackMs, releaseMs);
         }
     };
 

@@ -3,6 +3,7 @@
 
 #include "audio_processor.h"
 #include <atomic>
+#include <string>
 #include <vector>
 #include <cmath>
 
@@ -16,6 +17,25 @@ public:
 
     void process(float* buffer, size_t frames, unsigned channels) override;
 
+    bool supports_parameter_control(const std::string& id) const noexcept override {
+        return id == "decay" || id == "diffusion" || id == "mix";
+    }
+    bool set_parameter_control(const std::string& id, float value) noexcept override {
+        if (id == "decay") m_decay.store(value, std::memory_order_relaxed);
+        else if (id == "diffusion") m_diffusion.store(value, std::memory_order_relaxed);
+        else if (id == "mix") m_mix.store(value, std::memory_order_relaxed);
+        else return false;
+        return true;
+    }
+
+    const char* parameter_control_type() const noexcept override { return "lush_reverb"; }
+    bool get_parameter_control(const std::string& id, float& value) const noexcept override {
+        if (id == "decay") { value = m_decay.load(std::memory_order_relaxed); return true; }
+        if (id == "diffusion") { value = m_diffusion.load(std::memory_order_relaxed); return true; }
+        if (id == "mix") { value = m_mix.load(std::memory_order_relaxed); return true; }
+        return false;
+    }
+
 private:
     struct ModulatedComb {
         std::vector<float> buffer;
@@ -27,28 +47,20 @@ private:
         float process(float input, float modulation) {
             float mod = std::sin(lfoPhase) * modulation;
             float readPos = static_cast<float>(pos) - mod;
-            
             float sizeF = static_cast<float>(buffer.size());
             while (readPos < 0.0f) readPos += sizeF;
             while (readPos >= sizeF) readPos -= sizeF;
-
             size_t i0 = static_cast<size_t>(readPos);
             size_t i1 = (i0 + 1) % buffer.size();
-            i0 = i0 % buffer.size(); // Bulletproof index safety
-            
+            i0 = i0 % buffer.size();
             float frac = readPos - static_cast<float>(i0);
             float output = buffer[i0] * (1.0f - frac) + buffer[i1] * frac;
-
             float fbVal = input + (output * feedback);
-            if (std::isnan(fbVal) || std::isinf(fbVal)) {
-                fbVal = 0.0f;
-            }
+            if (std::isnan(fbVal) || std::isinf(fbVal)) fbVal = 0.0f;
             buffer[pos] = fbVal;
             pos = (pos + 1) % buffer.size();
-
             lfoPhase += lfoInc;
             if (lfoPhase > 2.0f * 3.14159265f) lfoPhase -= 2.0f * 3.14159265f;
-
             return output;
         }
     };
@@ -63,9 +75,7 @@ private:
             float bufOut = buffer[p];
             float output = -gain * input + bufOut;
             float newVal = input + (gain * bufOut);
-            if (std::isnan(newVal) || std::isinf(newVal)) {
-                newVal = 0.0f;
-            }
+            if (std::isnan(newVal) || std::isinf(newVal)) newVal = 0.0f;
             buffer[p] = newVal;
             pos = (pos + 1) % buffer.size();
             return output;

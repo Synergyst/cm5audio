@@ -1,6 +1,7 @@
 #include "web_server.h"
 #include "device_manager.h"
 #include "dsp_engine.h"
+#include "midi_cc_controller.h"
 #include <csignal>
 #include <cerrno>
 #include <cstdlib>
@@ -75,8 +76,9 @@ void print_usage(const char* programName) {
               << "  --no-audio      Bypass audio device manager and context initialization\n"
               << "  --enable-pipewire-patchbay  Enable the PipeWire patchbay viewport\n\n"
               << "Environment Variables:\n"
-              << "  CM5AUDIO_HTTP_PORT  HTTP server port (default: 8182)\n"
-              << "  CM5AUDIO_WS_PORT    WebSocket server port (default: 8183)\n";
+              << "  CM5AUDIO_HTTP_PORT       HTTP server port (default: 8182)\n"
+              << "  CM5AUDIO_WS_PORT         WebSocket server port (default: 8183)\n"
+              << "  CM5AUDIO_MIDI_CC_PORT    MIDI CC controller port (default: 8184)\n";
 }
 }
 
@@ -99,6 +101,8 @@ int main(int argc, char** argv) {
         ShutdownNotification shutdown;
         const int httpPort = port_from_env("CM5AUDIO_HTTP_PORT", 8182);
         const int wsPort = port_from_env("CM5AUDIO_WS_PORT", 8183);
+        const unsigned midiCcPort = static_cast<unsigned>(
+            port_from_env("CM5AUDIO_MIDI_CC_PORT", 8184));
         std::cout << "Starting cm5audio..." << std::endl;
         DeviceManager devices(!noAudio, enablePwPatchbay);
         if (shutdownRequested) return 0;
@@ -119,8 +123,17 @@ int main(int argc, char** argv) {
             return 0;
         }
         engine->start();
+
+        // MIDI CC control is deliberately outside the DSP graph. Its input
+        // callback only queues MIDI; a separate worker applies atomic controls.
+        MidiCcController midiCc(clients, *engine, midiCcPort);
+        if (!midiCc.start())
+            std::cerr << "[MIDI CC] Controller UI could not start; audio continues without it."
+                      << std::endl;
+
         WebServer server(metrics, controls, tone, clients, devices, *engine, httpPort, wsPort, plainText, enablePwPatchbay);
         if (!server.start()) {
+            midiCc.stop();
             clients.set_dsp_engine(nullptr);
             devices.set_dsp_engine(nullptr);
             return 1;
@@ -128,6 +141,7 @@ int main(int argc, char** argv) {
         while (!shutdownRequested && server.is_running()) shutdown.wait();
         std::cout << "[Shutdown] Quiescing control, DSP, network and sessions" << std::endl;
         server.stop();
+        midiCc.stop();
         clients.set_dsp_engine(nullptr);
         devices.set_dsp_engine(nullptr);
         engine.reset(); // Release graph owners before hardware/context teardown.

@@ -23,6 +23,7 @@ void register_midi_pitch_shifter_processor(ProcessorRegistry& registry);
 void register_midi_harmonizer_processor(ProcessorRegistry& registry);
 void register_midi_sample_player_processor(ProcessorRegistry& registry);
 void register_rnnoise_processor(ProcessorRegistry& registry);
+void register_deinvert_processor(ProcessorRegistry& registry);
 
 void register_builtin_processors(ProcessorRegistry& registry) {
     register_passthrough_processor(registry);
@@ -48,4 +49,5 @@ void register_builtin_processors(ProcessorRegistry& registry) {
     register_midi_harmonizer_processor(registry);
     register_midi_sample_player_processor(registry);
     register_rnnoise_processor(registry);
+    register_deinvert_processor(registry);
 }

@@ -5,8 +5,8 @@ Before=alsa-softvol-init.service pipewire-root.service
 
 [Service]
 Type=oneshot
-ExecStart=/root/Sources/cm5audio/usb-gadgets.sh start
-ExecStop=/root/Sources/cm5audio/usb-gadgets.sh stop
+ExecStart=/root/Sources/cm5audio/scripts/usb-gadgets.sh start
+ExecStop=/root/Sources/cm5audio/scripts/usb-gadgets.sh stop
 RemainAfterExit=true
 
 [Install]

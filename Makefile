@@ -4,7 +4,7 @@ CXXFLAGS = -std=c++17 -O3 -Iinclude -I/usr/local/include -I$(NLOHMANN_JSON_INCLU
 LDFLAGS = -L/usr/local/lib -lasound -lpipewire-0.3 -lixwebsocket -lssl -lcrypto -lz -lrnnoise -lpthread
 
 # Separate fast-changing app sources from rarely-changed miniaudio
-APP_SRCS = src/main.cpp src/web_server.cpp src/midi_cc_controller.cpp src/device_manager.cpp src/dsp_engine.cpp \
+APP_SRCS = src/main.cpp src/web_server.cpp src/mesh_network.cpp src/midi_cc_controller.cpp src/device_manager.cpp src/dsp_engine.cpp \
 	src/processor_registry.cpp src/plugins/register_builtin_processors.cpp \
 	src/plugins/passthrough.cpp src/plugins/gain.cpp src/plugins/compressor.cpp \
 	src/plugins/echo_processor.cpp src/plugins/chorus_processor.cpp src/plugins/reverb_processor.cpp \
@@ -39,6 +39,9 @@ PLUGIN_TEST_DEPS = $(filter-out build/main.o,$(APP_OBJS)) $(MINIAUDIO_OBJ) $(IX_
 
 CHANNEL_TEST_OBJ = build/channel_width_test.o
 CHANNEL_TEST_TARGET = channel_width_test
+
+MESH_TEST_OBJ = build/mesh_network_test.o
+MESH_TEST_TARGET = build/mesh_network_test
 
 # --- Native PipeWire Channel Test Tool ---
 PIPEWIRE_CHANNEL_TEST_OBJ = build/pipewire_channel_test.o
@@ -104,6 +107,16 @@ $(CHANNEL_TEST_TARGET): $(CHANNEL_TEST_OBJ) $(PLUGIN_TEST_DEPS)
 test-channels: $(CHANNEL_TEST_TARGET)
 	timeout 30 ./$(CHANNEL_TEST_TARGET)
 
+$(MESH_TEST_OBJ): tests/mesh_network_test.cpp | build
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+$(MESH_TEST_TARGET): $(MESH_TEST_OBJ) $(PLUGIN_TEST_DEPS)
+	$(CXX) $^ -o $@ $(LDFLAGS)
+
+# Uses only a loopback HTTP peer manager and an intentionally unreachable WS peer.
+test-mesh: $(MESH_TEST_TARGET)
+	CM5AUDIO_BIND_ADDRESS=127.0.0.1 timeout 30 ./$(MESH_TEST_TARGET)
+
 build/reliability_test.o: tests/reliability_test.cpp | build
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
@@ -130,7 +143,7 @@ test-plugins: $(PLUGIN_TEST_TARGET)
 	node tests/dashboard_plugins_test.js
 
 clean:
-	rm -f $(APP_OBJS) $(APP_OBJS:.o=.d) $(TARGET) $(PLUGIN_TEST_OBJ) $(PLUGIN_TEST_OBJ:.o=.d) $(PLUGIN_TEST_TARGET) $(CHANNEL_TEST_OBJ) $(CHANNEL_TEST_OBJ:.o=.d) $(CHANNEL_TEST_TARGET) build/reliability_test.o build/reliability_test.d build/reliability_test build/device_lifecycle_test.o build/device_lifecycle_test.d build/device_lifecycle_test $(IX_COMPAT_OBJS) build/ix_tls_shutdown.d build/ix_socket_server_shutdown.d build/ix_websocket_server_shutdown.d
+	rm -f $(APP_OBJS) $(APP_OBJS:.o=.d) $(TARGET) $(PLUGIN_TEST_OBJ) $(PLUGIN_TEST_OBJ:.o=.d) $(PLUGIN_TEST_TARGET) $(CHANNEL_TEST_OBJ) $(CHANNEL_TEST_OBJ:.o=.d) $(CHANNEL_TEST_TARGET) build/reliability_test.o build/reliability_test.d build/reliability_test build/device_lifecycle_test.o build/device_lifecycle_test.d build/device_lifecycle_test $(MESH_TEST_OBJ) $(MESH_TEST_OBJ:.o=.d) $(MESH_TEST_TARGET) $(IX_COMPAT_OBJS) build/ix_tls_shutdown.d build/ix_socket_server_shutdown.d build/ix_websocket_server_shutdown.d
 
 clean-miniaudio:
 	rm -f $(MINIAUDIO_OBJ) $(MINIAUDIO_OBJ:.o=.d)
@@ -140,4 +153,4 @@ clean-alsatools:
 
 -include $(APP_OBJS:.o=.d) $(wildcard build/*.d)
 
-.PHONY: all clean clean-miniaudio clean-alsatools clean-pipewiretools alsatools pipewiretools test-plugins test-reliability test-channels
+.PHONY: all clean clean-miniaudio clean-alsatools clean-pipewiretools alsatools pipewiretools test-plugins test-reliability test-channels test-mesh

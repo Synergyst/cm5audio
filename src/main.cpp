@@ -2,6 +2,7 @@
 #include "device_manager.h"
 #include "dsp_engine.h"
 #include "midi_cc_controller.h"
+#include "mesh_network.h"
 #include <csignal>
 #include <cerrno>
 #include <cstdlib>
@@ -78,7 +79,8 @@ void print_usage(const char* programName) {
               << "Environment Variables:\n"
               << "  CM5AUDIO_HTTP_PORT       HTTP server port (default: 8182)\n"
               << "  CM5AUDIO_WS_PORT         WebSocket server port (default: 8183)\n"
-              << "  CM5AUDIO_MIDI_CC_PORT    MIDI CC controller port (default: 8184)\n";
+              << "  CM5AUDIO_MIDI_CC_PORT    MIDI CC controller port (default: 8184)\n"
+              << "  CM5AUDIO_MESH_PORT       Mesh peer manager port (default: 8185)\n";
 }
 }
 
@@ -101,6 +103,7 @@ int main(int argc, char** argv) {
         ShutdownNotification shutdown;
         const int httpPort = port_from_env("CM5AUDIO_HTTP_PORT", 8182);
         const int wsPort = port_from_env("CM5AUDIO_WS_PORT", 8183);
+        const int meshPort = port_from_env("CM5AUDIO_MESH_PORT", 8185);
         const unsigned midiCcPort = static_cast<unsigned>(
             port_from_env("CM5AUDIO_MIDI_CC_PORT", 8184));
         std::cout << "Starting cm5audio..." << std::endl;
@@ -131,17 +134,29 @@ int main(int argc, char** argv) {
             std::cerr << "[MIDI CC] Controller UI could not start; audio continues without it."
                       << std::endl;
 
-        WebServer server(metrics, controls, tone, clients, devices, *engine, httpPort, wsPort, plainText, enablePwPatchbay);
+        WebServer server(metrics, controls, tone, clients, devices, *engine,
+                         httpPort, wsPort, plainText, enablePwPatchbay);
         if (!server.start()) {
             midiCc.stop();
             clients.set_dsp_engine(nullptr);
             devices.set_dsp_engine(nullptr);
             return 1;
         }
+
+        // CM5Audio-to-CM5Audio peer networking reuses the normal WebSocket audio
+        // protocol and ClientManager sessions, with a separate management port.
+        MeshNetworkManager mesh(clients, *engine, meshPort);
+        if (!mesh.start())
+            std::cerr << "[Mesh] Peer networking is unavailable; local audio continues normally."
+                      << std::endl;
+
         while (!shutdownRequested && server.is_running()) shutdown.wait();
         std::cout << "[Shutdown] Quiescing control, DSP, network and sessions" << std::endl;
+        // Stop outbound peers while the WebServer session reaper is still alive.
+        mesh.stop();
         server.stop();
         midiCc.stop();
+        clients.set_device_manager(nullptr);
         clients.set_dsp_engine(nullptr);
         devices.set_dsp_engine(nullptr);
         engine.reset(); // Release graph owners before hardware/context teardown.

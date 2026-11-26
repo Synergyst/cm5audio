@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CM5Audio Mesh Peers</title>
+<style>
+:root{color-scheme:dark;--bg:#11151b;--panel:#1b222c;--line:#303b49;--text:#e8edf3;--muted:#9ca9b8;--blue:#88c0d0;--green:#a3be8c;--red:#bf616a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif}
+main{max-width:1050px;margin:32px auto;padding:0 18px}h1{font-size:23px;margin:0 0 5px}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;margin:18px 0}
+form{display:grid;grid-template-columns:2fr 2fr 100px 120px 120px;gap:11px;align-items:end}
+label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}input,select,button{font:inherit;border-radius:6px;border:1px solid var(--line);padding:9px;background:#111820;color:var(--text);min-width:0;width:100%}
+input:focus,select:focus{outline:1px solid var(--blue);border-color:var(--blue)}button{background:var(--blue);color:#101820;border:0;font-weight:650;cursor:pointer}button.secondary{background:#354252;color:var(--text)}button.danger{background:#633c43;color:#fff}button:disabled{opacity:.5;cursor:wait}
+.form-actions{grid-column:1/-1;display:flex;justify-content:flex-end}.form-actions button{width:auto;min-width:150px}
+#patchbay-panel{max-width:none}#dashboard-frame{width:100%;height:78vh;min-height:560px;border:1px solid var(--line);border-radius:8px;background:#0d1117}
+#patchbay-panel[hidden]{display:none}
+.peer{border:1px solid var(--line);border-radius:8px;padding:14px;margin:10px 0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center}
+.peer-name{font-size:15px;font-weight:650;display:flex;align-items:center;gap:9px}.dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--red);box-shadow:0 0 6px var(--red),0 0 13px #bf616a77;flex:none}.dot.up{background:var(--green);box-shadow:0 0 6px var(--green),0 0 13px #a3be8c88}
+.peer-meta{color:var(--muted);font-size:12px;margin-top:4px}.peer-error{color:#e7a0a5;font-size:12px;margin-top:5px;overflow-wrap:anywhere}.peer-actions{display:flex;gap:8px}.peer-actions button{width:auto;min-width:90px}.endpoints{font:12px ui-monospace,monospace;color:#c5d4e3;margin-top:7px;overflow-wrap:anywhere}
+#message{min-height:20px;color:var(--muted);margin-top:10px}.ok{color:var(--green)!important}.bad{color:#e7a0a5!important}
+@media(max-width:800px){form{grid-template-columns:repeat(2,minmax(0,1fr))}.form-actions{grid-column:1/-1}.peer{grid-template-columns:1fr}.peer-actions{justify-content:flex-end}}
+</style>
+</head>
+<body>
+<main>
+  <h1>CM5Audio Mesh Peers</h1>
+  <div class="muted">Connect this CM5Audio instance to another CM5Audio WebSocket server over your trusted LAN (plain WS/HTTP, no TLS).</div>
+  <div id="patchbay-link-note" class="muted" hidden style="margin-top:8px">For the mesh-aware patchbay with live green/red node indicators, open <a id="patchbay-link">the CM5Audio dashboard</a>.</div>
+
+  <section class="panel">
+    <h2>Add remote CM5Audio</h2>
+    <form id="add-form">
+      <div><label for="name">Peer name</label><input id="name" maxlength="80" placeholder="Studio CM5Audio" required></div>
+      <div><label for="host">IP address or hostname</label><input id="host" maxlength="255" placeholder="192.168.1.50" required></div>
+      <div><label for="port">WebSocket port</label><input id="port" type="number" min="1" max="65535" value="8183" required></div>
+      <div><label for="send-channels">Send channels</label><select id="send-channels"></select></div>
+      <div><label for="receive-channels">Receive channels</label><select id="receive-channels"></select></div>
+      <div class="form-actions"><button id="add-button" type="submit">ADD PEER</button></div>
+    </form>
+    <div id="message" role="status"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Configured peers</h2>
+    <div class="muted">A peer exposes two local patchbay endpoints: its remote capture is a source, and its remote playback is a sink. Both directions share one connection.</div>
+    <div id="peers"><div class="muted">Loading peers…</div></div>
+  </section>
+  <section class="panel" id="patchbay-panel" hidden>
+    <h2>Patchbay</h2>
+    <div class="muted" style="margin-bottom:10px">The normal CM5Audio dashboard is embedded below. Mesh peer status dots are refreshed here without rearranging nodes or cables.</div>
+    <iframe id="dashboard-frame" title="CM5Audio dashboard" src="/"></iframe>
+  </section>
+
+  <section class="panel">
+    <h2>How to route audio</h2>
+    <p class="muted">After adding a peer, open the mesh-aware patchbay at <code>/client/mesh.html</code> on the main CM5Audio dashboard port (default 8182). It embeds the normal patchbay and adds live green/red connection indicators to both outgoing and incoming remote peer nodes. Route the remote source into local processing or devices, and route local audio into the remote sink.</p>
+    <p class="muted">Configure a connection on only one side for each pair of CM5Audio instances. One connection is bidirectional; configuring the same pair on both machines creates duplicate streams.</p>
+    <p class="muted">Disconnected peers retain their patchbay endpoint identities and saved cables. Removing a peer here stops reconnect attempts but intentionally leaves its disconnected endpoints in the graph so existing routing is not silently deleted.</p>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const onMeshControlPort = location.pathname !== '/client/mesh.html';
+const configuredMeshPort = new URLSearchParams(location.search).get('api_port') || '8185';
+const peerApiBase = onMeshControlPort ? '' : `${location.protocol}//${location.hostname}:${configuredMeshPort}`;
+const dashboardFrame = $('dashboard-frame');
+if (!onMeshControlPort) $('patchbay-panel').hidden = false;
+else {
+  const link = $('patchbay-link');
+  if (link) link.href = `${location.protocol}//${location.hostname}:8182/client/mesh.html?api_port=${encodeURIComponent(location.port || '8185')}`;
+  const note = $('patchbay-link-note');
+  if (note) note.hidden = false;
+}
+let lastPeers = [];
+let meshHeaders = new Map();
+let frameEndpointSignature = null;
+for (const id of ['send-channels','receive-channels']) {
+  for (let value=1; value<=8; value++) {
+    const option=document.createElement('option'); option.value=String(value); option.textContent=String(value);
+    if (value===2) option.selected=true;
+    $(id).appendChild(option);
+  }
+}
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+async function api(path, options={}) {
+  const response=await fetch(`${peerApiBase}${path}`,{cache:'no-store',...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
+  const data=await response.json().catch(()=>({message:'Invalid server response'}));
+  if(!response.ok) throw new Error(data.message || `HTTP ${response.status}`);
+  return data;
+}
+function ensureEndpointChannels(frameWindow, block, endpointId, direction, channelCount, name) {
+  if (!block) return false;
+  const wanted = Math.max(1, Math.min(8, Number(channelCount) || 2));
+  let current = block.querySelectorAll('.channel-row').length;
+  if (current >= wanted) return false;
+  const endpoint = { id: endpointId, direction, channels: wanted, name };
+  for (let channel = current; channel < wanted; channel++) {
+    const row = block.ownerDocument.createElement('div');
+    row.className = 'channel-row';
+    row.id = `slot-${endpointId}-${channel}`;
+    row.dataset.endpointId = endpointId;
+    row.dataset.endpointDirection = direction;
+    row.dataset.channel = String(channel);
+    if (direction === 'source') {
+      row.innerHTML = `<div class="vu-container"><div class="vu-fill" id="vu-${endpointId}-${channel}"></div><div class="vu-peak" id="peak-${endpointId}-${channel}"></div></div><span class="ch-label" style="text-align:right">CH${channel+1}</span>`;
+      row.addEventListener('pointerdown', event => {
+        if (typeof frameWindow.beginWiringDrag === 'function')
+          frameWindow.beginWiringDrag(endpoint, channel, row, event);
+      });
+    } else {
+      row.innerHTML = `<span class="ch-label">CH${channel+1}</span><div class="vu-container"><div class="vu-fill" id="vu-${endpointId}-${channel}"></div><div class="vu-peak" id="peak-${endpointId}-${channel}"></div></div>`;
+    }
+    row.onclick = () => {
+      if (typeof frameWindow.handleSlotClick === 'function')
+        frameWindow.handleSlotClick(endpoint, channel);
+    };
+    block.appendChild(row);
+  }
+  block.dataset.channels = String(wanted);
+  if (typeof frameWindow.rebuildMeterCache === 'function') frameWindow.rebuildMeterCache();
+  if (typeof frameWindow.drawCables === 'function') frameWindow.drawCables();
+  return true;
+}
+function updatePatchbayDots(peers) {
+  if (onMeshControlPort || !dashboardFrame) return;
+  let doc;
+  let frameWindow;
+  try { doc = dashboardFrame.contentDocument; frameWindow = dashboardFrame.contentWindow; } catch (_) { return; }
+  if (!doc || !frameWindow || !doc.getElementById('patchbay-viewport')) return;
+  if (!doc.getElementById('cm5-mesh-status-style')) {
+    const style = doc.createElement('style');
+    style.id = 'cm5-mesh-status-style';
+    style.textContent = `.cm5-mesh-status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:middle;flex:none}.cm5-mesh-status-dot.up{background:#a3be8c;box-shadow:0 0 6px #a3be8c,0 0 14px #a3be8c99}.cm5-mesh-status-dot.down{background:#bf616a;box-shadow:0 0 6px #bf616a,0 0 14px #bf616a99}`;
+    doc.head.appendChild(style);
+  }
+  const current = new Map();
+  for (const peer of peers) {
+    for (const endpoint of [peer.source_endpoint, peer.sink_endpoint]) {
+      const source = endpoint === peer.source_endpoint;
+      const block = doc.getElementById(`block-${endpoint}`);
+      const header = block?.querySelector('.endpoint-header');
+      if (!header) continue;
+      ensureEndpointChannels(frameWindow, block, endpoint,
+        source ? 'source' : 'destination',
+        source ? peer.receive_channels : peer.send_channels, peer.name);
+      current.set(endpoint, {name:peer.name, connected:Boolean(peer.connected)});
+      const dot = doc.createElement('span');
+      dot.className = `cm5-mesh-status-dot ${peer.connected?'up':'down'}`;
+      dot.title = peer.connected ? 'Remote CM5Audio connected' : 'Remote CM5Audio disconnected';
+      header.replaceChildren(dot, doc.createTextNode(peer.name));
+      header.dataset.meshPeerId = String(peer.id);
+    }
+  }
+  for (const [endpoint, old] of meshHeaders) {
+    if (current.has(endpoint)) continue;
+    const header = doc.getElementById(`block-${endpoint}`)?.querySelector('.endpoint-header');
+    if (header) {
+      header.textContent = `🔴 ${old.name}`;
+      delete header.dataset.meshPeerId;
+    }
+  }
+  meshHeaders = current;
+}
+async function syncDashboardGraph(peers) {
+  if (onMeshControlPort || !dashboardFrame) return;
+  const signature = peers.flatMap(peer => [peer.source_endpoint, peer.sink_endpoint]).sort().join('|');
+  if (signature !== frameEndpointSignature) {
+    frameEndpointSignature = signature;
+    try {
+      const frameWindow = dashboardFrame.contentWindow;
+      if (frameWindow && typeof frameWindow.loadGraph === 'function')
+        await frameWindow.loadGraph();
+    } catch (_) {
+      // The embedded dashboard may still be initializing; its next refresh
+      // will render the persisted endpoints without changing their positions.
+    }
+  }
+  updatePatchbayDots(peers);
+}
+function renderPeers(peers) {
+  lastPeers = peers;
+  void syncDashboardGraph(peers);
+  const root=$('peers');
+  if(!peers.length){root.innerHTML='<div class="muted">No remote peers configured.</div>';return;}
+  root.innerHTML=peers.map(peer=>{
+    const active=Boolean(peer.connected);
+    const incoming=peer.direction==='incoming';
+    const address=incoming ? `Incoming peer${peer.host?' · '+peer.host:''}` : `ws://${peer.host}:${peer.port}`;
+    const details=`${address} · Send ${peer.send_channels} ch · Receive ${peer.receive_channels} ch${incoming?'':` · Successful connections ${peer.successful_connections}`}`;
+    const error=peer.last_error?`<div class="peer-error">${escapeHtml(peer.last_error)}</div>`:'';
+    const remove=peer.removable===false?'':`<div class="peer-actions"><button class="danger" data-remove="${escapeHtml(peer.id)}">REMOVE</button></div>`;
+    return `<article class="peer">
+      <div><div class="peer-name"><span class="dot ${active?'up':''}"></span>${escapeHtml(peer.name)} <span class="muted">${incoming?'Incoming · ':''}${active?'Connected':'Disconnected'}</span></div>
+      <div class="peer-meta">${escapeHtml(details)}</div>
+      <div class="endpoints">Source: ${escapeHtml(peer.source_endpoint)}<br>Sink: ${escapeHtml(peer.sink_endpoint)}</div>${error}</div>
+      ${remove}
+    </article>`;
+  }).join('');
+  root.querySelectorAll('[data-remove]').forEach(button=>button.addEventListener('click',async()=>{
+    if(!confirm('Stop reconnecting to this peer? Its disconnected patchbay endpoints and saved cables will be retained.')) return;
+    button.disabled=true;
+    try { await api(`/api/peers/${button.dataset.remove}`,{method:'DELETE'}); await refresh(); }
+    catch(error){ showMessage(error.message,true); button.disabled=false; }
+  }));
+}
+async function refresh(){
+  try { const peers=await api('/api/peers'); renderPeers(peers); }
+  catch(error){ $('peers').textContent=`Unable to load peers: ${error.message}`; }
+}
+if (dashboardFrame) dashboardFrame.addEventListener('load', () => updatePatchbayDots(lastPeers));
+function showMessage(message,bad=false){ $('message').textContent=message; $('message').className=bad?'bad':'ok'; }
+$('add-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const button=$('add-button'); button.disabled=true;
+  try {
+    const result=await api('/api/peers',{method:'POST',body:JSON.stringify({
+      name:$('name').value,host:$('host').value,port:Number($('port').value),
+      send_channels:Number($('send-channels').value),
+      receive_channels:Number($('receive-channels').value)
+    })});
+    $('name').value=''; showMessage(`Peer #${result.id} added. It will reconnect automatically if unavailable.`);
+    await refresh();
+  } catch(error){ showMessage(error.message,true); }
+  finally {button.disabled=false;}
+});
+refresh();
+setInterval(refresh,1000);
+</script>
+</body>
+</html>

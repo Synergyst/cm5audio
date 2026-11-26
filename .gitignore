@@ -14,3 +14,6 @@ apply.sh
 pipewire_channel_test
 /assets/
 /cm5audio_midi_cc.json
+
+# Per-node mesh identity and peer configuration
+cm5audio_mesh.json

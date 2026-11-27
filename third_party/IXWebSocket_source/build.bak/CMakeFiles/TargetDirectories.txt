@@ -1,7 +1,0 @@
-/tmp/IXWebSocket/build/CMakeFiles/ixwebsocket.dir
-/tmp/IXWebSocket/build/CMakeFiles/edit_cache.dir
-/tmp/IXWebSocket/build/CMakeFiles/rebuild_cache.dir
-/tmp/IXWebSocket/build/CMakeFiles/list_install_components.dir
-/tmp/IXWebSocket/build/CMakeFiles/install.dir
-/tmp/IXWebSocket/build/CMakeFiles/install/local.dir
-/tmp/IXWebSocket/build/CMakeFiles/install/strip.dir

@@ -130,6 +130,9 @@ struct ma_device_info {
         ma_uint32 sampleRate;
         ma_uint32 flags;
     } nativeDataFormats[16];
+
+    // PipeWire physical identity survives registry global-ID changes.
+    std::string persistentId;
 };
 
 struct ma_context_config {
@@ -137,9 +140,21 @@ struct ma_context_config {
 };
 
 struct ma_context {
-    ma_backend backend;
+    ma_backend backend = ma_backend_pipewire;
     std::vector<ma_device_info> playbackDevices;
     std::vector<ma_device_info> captureDevices;
+    std::vector<ma_device_info> playbackSnapshot;
+    std::vector<ma_device_info> captureSnapshot;
+    std::mutex devicesMutex;
+
+    // Keep a PipeWire registry subscription alive for the entire app lifetime.
+    struct pw_main_loop* pwLoop = nullptr;
+    struct pw_context* pwContext = nullptr;
+    struct pw_core* pwCore = nullptr;
+    struct pw_registry* pwRegistry = nullptr;
+    struct spa_hook registryHook{};
+    bool registryListenerAttached = false;
+    std::thread pwLoopThread;
 };
 
 struct ma_device;
@@ -619,17 +634,44 @@ inline ma_context_config ma_context_config_init()
     return ma_context_config{};
 }
 
-struct ma_pw_enum_data {
-    std::vector<ma_device_info>* playback;
-    std::vector<ma_device_info>* capture;
-};
+inline std::string ma_pw_device_persistent_id(
+    const struct spa_dict* props, const char* mediaClass, const char* nodeName)
+{
+    auto value = [&](const char* key) -> std::string {
+        const char* item = props ? spa_dict_lookup(props, key) : nullptr;
+        return item ? std::string(item) : std::string();
+    };
+
+    const std::string serial = value("device.serial");
+    const std::string alsaPath = value("api.alsa.path");
+    const std::string objectPath = value("object.path");
+    const std::string deviceName = value("device.name");
+    const std::string bus = value("device.bus");
+    const std::string vendor = value("device.vendor.id");
+    const std::string product = value("device.product.id");
+
+    std::string identity;
+    if (!serial.empty()) identity = "serial:" + serial;
+    else if (!alsaPath.empty()) identity = "alsa-path:" + alsaPath;
+    else if (!objectPath.empty()) identity = "object-path:" + objectPath;
+    else if (nodeName && nodeName[0]) identity = "node:" + std::string(nodeName);
+    else if (!deviceName.empty()) identity = "device:" + deviceName;
+    else identity = "pipewire-unnamed";
+
+    if (!deviceName.empty()) identity += "|name:" + deviceName;
+    if (!bus.empty()) identity += "|bus:" + bus;
+    if (!vendor.empty()) identity += "|vendor:" + vendor;
+    if (!product.empty()) identity += "|product:" + product;
+    identity += "|media:" + std::string(mediaClass ? mediaClass : "unknown");
+    return identity;
+}
 
 inline void ma_pw_enum_registry_global(void* data, uint32_t id, uint32_t,
                                        const char* type, uint32_t,
                                        const struct spa_dict* props)
 {
-    auto* enumData = static_cast<ma_pw_enum_data*>(data);
-    if (!enumData || !type || !props ||
+    auto* context = static_cast<ma_context*>(data);
+    if (!context || !type || !props ||
         std::strcmp(type, PW_TYPE_INTERFACE_Node) != 0) return;
 
     const char* mediaClass = spa_dict_lookup(props, "media.class");
@@ -646,31 +688,46 @@ inline void ma_pw_enum_registry_global(void* data, uint32_t id, uint32_t,
             parsed <= MA_MAX_CHANNELS) channels = static_cast<ma_uint32>(parsed);
     }
 
-    // Enumerate actual endpoints only. Audio stream nodes and arbitrary filters
-    // are not hardware playback/capture devices for device restoration.
     const bool isSink = std::strcmp(mediaClass, "Audio/Sink") == 0;
     const bool isSource = std::strcmp(mediaClass, "Audio/Source") == 0;
     if (!isSink && !isSource) return;
 
     ma_device_info info{};
-    // CM5Audio's existing device-ID convention stores PipeWire IDs as decimal
-    // text in the ALSA union member. Do not write the numeric ID into the union:
-    // doing so makes strings such as pipewire:77 appear as pipewire:M.
     std::snprintf(info.id.alsa, sizeof(info.id.alsa), "%u", id);
-
     const char* displayName = (description && description[0]) ? description :
                               ((nodeName && nodeName[0]) ? nodeName : "PipeWire Audio Node");
     std::snprintf(info.name, sizeof(info.name), "%s", displayName);
     info.nativeDataFormatCount = 1;
     info.nativeDataFormats[0] = { ma_format_f32, channels, 48000, 0 };
+    info.persistentId = ma_pw_device_persistent_id(props, mediaClass, nodeName);
 
-    if (isSink && enumData->playback) enumData->playback->push_back(info);
-    if (isSource && enumData->capture) enumData->capture->push_back(info);
+    std::lock_guard<std::mutex> lock(context->devicesMutex);
+    auto& list = isSink ? context->playbackDevices : context->captureDevices;
+    const auto found = std::find_if(list.begin(), list.end(), [&](const ma_device_info& existing) {
+        return std::strcmp(existing.id.alsa, info.id.alsa) == 0;
+    });
+    if (found == list.end()) list.push_back(std::move(info));
+    else *found = std::move(info);
+}
+
+inline void ma_pw_enum_registry_global_remove(void* data, uint32_t id)
+{
+    auto* context = static_cast<ma_context*>(data);
+    if (!context) return;
+    const std::string wanted = std::to_string(id);
+    std::lock_guard<std::mutex> lock(context->devicesMutex);
+    const auto removeId = [&](std::vector<ma_device_info>& list) {
+        list.erase(std::remove_if(list.begin(), list.end(), [&](const ma_device_info& info) {
+            return wanted == info.id.alsa;
+        }), list.end());
+    };
+    removeId(context->playbackDevices);
+    removeId(context->captureDevices);
 }
 
 struct ma_pw_enum_sync {
-    int sequence;
-    bool done;
+    int sequence = -1;
+    bool done = false;
 };
 
 inline void ma_pw_enum_core_done(void* data, uint32_t, int sequence)
@@ -685,6 +742,7 @@ inline const struct pw_registry_events* ma_pw_get_registry_events()
         struct pw_registry_events e{};
         e.version = PW_VERSION_REGISTRY_EVENTS;
         e.global = ma_pw_enum_registry_global;
+        e.global_remove = ma_pw_enum_registry_global_remove;
         return e;
     }();
     return &events;
@@ -701,73 +759,107 @@ inline const struct pw_core_events* ma_pw_get_core_events()
     return &events;
 }
 
+inline void ma_context_release_pipewire(ma_context* pContext)
+{
+    if (!pContext) return;
+    if (pContext->pwLoop) pw_main_loop_quit(pContext->pwLoop);
+    if (pContext->pwLoopThread.joinable()) pContext->pwLoopThread.join();
+
+    if (pContext->registryListenerAttached && pContext->pwRegistry) {
+        spa_hook_remove(&pContext->registryHook);
+        pContext->registryListenerAttached = false;
+    }
+    if (pContext->pwRegistry) {
+        pw_proxy_destroy(reinterpret_cast<struct pw_proxy*>(pContext->pwRegistry));
+        pContext->pwRegistry = nullptr;
+    }
+    if (pContext->pwCore) {
+        pw_core_disconnect(pContext->pwCore);
+        pContext->pwCore = nullptr;
+    }
+    if (pContext->pwContext) {
+        pw_context_destroy(pContext->pwContext);
+        pContext->pwContext = nullptr;
+    }
+    if (pContext->pwLoop) {
+        pw_main_loop_destroy(pContext->pwLoop);
+        pContext->pwLoop = nullptr;
+    }
+}
 
 inline ma_result ma_context_init(const ma_backend*, ma_uint32,
                                  const void*, ma_context* pContext)
 {
     if (!pContext) return MA_ERROR;
     pContext->backend = ma_backend_pipewire;
-    pContext->playbackDevices.clear();
-    pContext->captureDevices.clear();
+    {
+        std::lock_guard<std::mutex> lock(pContext->devicesMutex);
+        pContext->playbackDevices.clear();
+        pContext->captureDevices.clear();
+        pContext->playbackSnapshot.clear();
+        pContext->captureSnapshot.clear();
+    }
 
     ma_pipewire_init_once();
-    struct pw_main_loop* loop = pw_main_loop_new(nullptr);
-    if (!loop) return MA_ERROR;
+    pContext->pwLoop = pw_main_loop_new(nullptr);
+    if (!pContext->pwLoop) return MA_ERROR;
 
-    struct pw_context* context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
-    if (!context) {
-        pw_main_loop_destroy(loop);
+    pContext->pwContext = pw_context_new(
+        pw_main_loop_get_loop(pContext->pwLoop), nullptr, 0);
+    if (!pContext->pwContext) {
+        ma_context_release_pipewire(pContext);
         return MA_ERROR;
     }
 
-    struct pw_core* core = pw_context_connect(context, nullptr, 0);
-    if (!core) {
-        pw_context_destroy(context);
-        pw_main_loop_destroy(loop);
+    pContext->pwCore = pw_context_connect(pContext->pwContext, nullptr, 0);
+    if (!pContext->pwCore) {
+        ma_context_release_pipewire(pContext);
         return MA_ERROR;
     }
 
-    struct pw_registry* registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
-    if (!registry) {
-        pw_core_disconnect(core);
-        pw_context_destroy(context);
-        pw_main_loop_destroy(loop);
+    pContext->pwRegistry = pw_core_get_registry(
+        pContext->pwCore, PW_VERSION_REGISTRY, 0);
+    if (!pContext->pwRegistry) {
+        ma_context_release_pipewire(pContext);
         return MA_ERROR;
     }
 
-    ma_pw_enum_data enumData{ &pContext->playbackDevices, &pContext->captureDevices };
-    ma_pw_enum_sync syncData{ -1, false };
-    struct spa_hook registryHook{};
+    ma_pw_enum_sync syncData{};
     struct spa_hook coreHook{};
-
-    pw_registry_add_listener(registry, &registryHook, ma_pw_get_registry_events(), &enumData);
-    pw_core_add_listener(core, &coreHook, ma_pw_get_core_events(), &syncData);
-    syncData.sequence = pw_core_sync(core, PW_ID_CORE, 0);
+    pw_registry_add_listener(
+        pContext->pwRegistry, &pContext->registryHook,
+        ma_pw_get_registry_events(), pContext);
+    pContext->registryListenerAttached = true;
+    pw_core_add_listener(
+        pContext->pwCore, &coreHook, ma_pw_get_core_events(), &syncData);
+    syncData.sequence = pw_core_sync(pContext->pwCore, PW_ID_CORE, 0);
     if (syncData.sequence < 0) {
-        spa_hook_remove(&registryHook);
         spa_hook_remove(&coreHook);
-        pw_proxy_destroy(reinterpret_cast<struct pw_proxy*>(registry));
-        pw_core_disconnect(core);
-        pw_context_destroy(context);
-        pw_main_loop_destroy(loop);
+        ma_context_release_pipewire(pContext);
         return MA_ERROR;
     }
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!syncData.done && std::chrono::steady_clock::now() < deadline) {
-        const int r = pw_loop_iterate(pw_main_loop_get_loop(loop), 20);
-        if (r < 0) break;
+        if (pw_loop_iterate(pw_main_loop_get_loop(pContext->pwLoop), 20) < 0) break;
+    }
+    const bool completed = syncData.done;
+    spa_hook_remove(&coreHook);
+    if (!completed) {
+        ma_context_release_pipewire(pContext);
+        return MA_ERROR;
     }
 
-    const bool completed = syncData.done;
-    spa_hook_remove(&registryHook);
-    spa_hook_remove(&coreHook);
-    pw_proxy_destroy(reinterpret_cast<struct pw_proxy*>(registry));
-    pw_core_disconnect(core);
-    pw_context_destroy(context);
-    pw_main_loop_destroy(loop);
-
-    return completed ? MA_SUCCESS : MA_ERROR;
+    try {
+        // The listener remains attached for add/remove events while CM5Audio runs.
+        pContext->pwLoopThread = std::thread([pContext]() {
+            pw_main_loop_run(pContext->pwLoop);
+        });
+    } catch (...) {
+        ma_context_release_pipewire(pContext);
+        return MA_ERROR;
+    }
+    return MA_SUCCESS;
 }
 
 inline ma_result ma_context_get_devices(ma_context* pContext,
@@ -777,15 +869,18 @@ inline ma_result ma_context_get_devices(ma_context* pContext,
                                         ma_uint32* pCaptureDeviceCount)
 {
     if (!pContext) return MA_ERROR;
+    std::lock_guard<std::mutex> lock(pContext->devicesMutex);
+    pContext->playbackSnapshot = pContext->playbackDevices;
+    pContext->captureSnapshot = pContext->captureDevices;
     if (ppPlaybackDeviceInfos && pPlaybackDeviceCount) {
-        *ppPlaybackDeviceInfos = pContext->playbackDevices.empty()
-            ? nullptr : pContext->playbackDevices.data();
-        *pPlaybackDeviceCount = static_cast<ma_uint32>(pContext->playbackDevices.size());
+        *ppPlaybackDeviceInfos = pContext->playbackSnapshot.empty()
+            ? nullptr : pContext->playbackSnapshot.data();
+        *pPlaybackDeviceCount = static_cast<ma_uint32>(pContext->playbackSnapshot.size());
     }
     if (ppCaptureDeviceInfos && pCaptureDeviceCount) {
-        *ppCaptureDeviceInfos = pContext->captureDevices.empty()
-            ? nullptr : pContext->captureDevices.data();
-        *pCaptureDeviceCount = static_cast<ma_uint32>(pContext->captureDevices.size());
+        *ppCaptureDeviceInfos = pContext->captureSnapshot.empty()
+            ? nullptr : pContext->captureSnapshot.data();
+        *pCaptureDeviceCount = static_cast<ma_uint32>(pContext->captureSnapshot.size());
     }
     return MA_SUCCESS;
 }
@@ -814,6 +909,7 @@ inline ma_result ma_context_get_device_info(ma_context* pContext, ma_device_type
                                             ma_device_info* pDeviceInfo)
 {
     if (!pContext || !pDeviceInfo) return MA_ERROR;
+    std::lock_guard<std::mutex> lock(pContext->devicesMutex);
     const auto& list = (type & ma_device_type_capture)
         ? pContext->captureDevices : pContext->playbackDevices;
 
@@ -822,7 +918,6 @@ inline ma_result ma_context_get_device_info(ma_context* pContext, ma_device_type
         *pDeviceInfo = ma_device_info{};
         return MA_ERROR;
     }
-
     for (const auto& device : list) {
         uint32_t currentId = PW_ID_ANY;
         if (!ma_pw_device_id_to_node_id(&device.id, &currentId)) continue;
@@ -838,8 +933,12 @@ inline ma_result ma_context_get_device_info(ma_context* pContext, ma_device_type
 inline ma_result ma_context_uninit(ma_context* pContext)
 {
     if (!pContext) return MA_SUCCESS;
+    ma_context_release_pipewire(pContext);
+    std::lock_guard<std::mutex> lock(pContext->devicesMutex);
     pContext->playbackDevices.clear();
     pContext->captureDevices.clear();
+    pContext->playbackSnapshot.clear();
+    pContext->captureSnapshot.clear();
     return MA_SUCCESS;
 }
 
@@ -1450,6 +1549,31 @@ inline ma_result ma_pw_auto_connect_device(ma_device* device)
     return overallSuccess ? MA_SUCCESS : MA_ERROR;
 }
 
+// Retarget a live filter to the new PipeWire node without rebuilding its ports,
+// callback thread, ring buffers, or any part of the CM5Audio DSP graph.
+inline ma_result ma_device_retarget(ma_device* pDevice,
+                                    const ma_device_id* pReplacementId)
+{
+    if (!pDevice || !pDevice->filter || !pDevice->autoConnect ||
+        !pReplacementId) return MA_ERROR;
+
+    uint32_t replacementNodeId = PW_ID_ANY;
+    if (!ma_pw_device_id_to_node_id(pReplacementId, &replacementNodeId))
+        return MA_ERROR;
+
+    if (pDevice->type & ma_device_type_playback) {
+        pDevice->playback.id = *pReplacementId;
+        pDevice->playback.pDeviceID = &pDevice->playback.id;
+        pDevice->playbackTargetNodeId = replacementNodeId;
+    }
+    if (pDevice->type & ma_device_type_capture) {
+        pDevice->capture.id = *pReplacementId;
+        pDevice->capture.pDeviceID = &pDevice->capture.id;
+        pDevice->captureTargetNodeId = replacementNodeId;
+    }
+    return ma_pw_auto_connect_device(pDevice);
+}
+
 // -----------------------------------------------------------------------------
 // 6. PIPEWIRE FILTER PROCESSING
 // -----------------------------------------------------------------------------
@@ -1638,14 +1762,16 @@ inline ma_result ma_device_init(ma_context* pContext,
     pDevice->playbackTargetNodeId = PW_ID_ANY;
     pDevice->captureTargetNodeId = PW_ID_ANY;
     if (pDevice->playback.pDeviceID) {
-        ma_pw_device_id_to_node_id(
-            pDevice->playback.pDeviceID,
-            &pDevice->playbackTargetNodeId);
+        pDevice->playback.id = *pDevice->playback.pDeviceID;
+        pDevice->playback.pDeviceID = &pDevice->playback.id;
+        ma_pw_device_id_to_node_id(&pDevice->playback.id,
+                                   &pDevice->playbackTargetNodeId);
     }
     if (pDevice->capture.pDeviceID) {
-        ma_pw_device_id_to_node_id(
-            pDevice->capture.pDeviceID,
-            &pDevice->captureTargetNodeId);
+        pDevice->capture.id = *pDevice->capture.pDeviceID;
+        pDevice->capture.pDeviceID = &pDevice->capture.id;
+        ma_pw_device_id_to_node_id(&pDevice->capture.id,
+                                   &pDevice->captureTargetNodeId);
     }
     pDevice->pipewireNodeName[0] = '\0';
 
@@ -1737,6 +1863,7 @@ inline ma_result ma_device_init(ma_context* pContext,
     if (pConfig->pNodeDescription && pConfig->pNodeDescription[0]) {
         resolvedDescription = pConfig->pNodeDescription;
     } else if (pContext) {
+        std::lock_guard<std::mutex> devicesLock(pContext->devicesMutex);
         const auto& list = wantsCapture ? pContext->captureDevices : pContext->playbackDevices;
         const ma_device_id* targetId = wantsCapture
             ? pDevice->capture.pDeviceID : pDevice->playback.pDeviceID;

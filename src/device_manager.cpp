@@ -178,6 +178,54 @@ HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context,
     m_info.requested_channels = m_requested_channels;
 }
 
+AudioDeviceInfo HardwareDevice::get_info() const {
+    std::lock_guard<std::mutex> lock(m_infoLock);
+    return m_info;
+}
+
+void HardwareDevice::set_available(bool available) {
+    std::lock_guard<std::mutex> lock(m_infoLock);
+    m_info.available = available;
+}
+
+bool HardwareDevice::reconnect(const AudioDeviceInfo& replacement) {
+    if (!m_device_initialized) return false;
+
+    uint32_t oldNodeId = PW_ID_ANY;
+    uint32_t newNodeId = PW_ID_ANY;
+    bool retry = false;
+    bool wasPending = false;
+    {
+        std::lock_guard<std::mutex> lock(m_infoLock);
+        ma_pw_device_id_to_node_id(&m_info.id, &oldNodeId);
+        if (!ma_pw_device_id_to_node_id(&replacement.id, &newNodeId))
+            return false;
+
+        m_info.id = replacement.id;
+        m_info.name = replacement.name;
+        m_info.backend = replacement.backend;
+        m_info.persistent_id = replacement.persistent_id;
+        m_info.available = true;
+
+        wasPending = m_reconnectPending;
+        retry = oldNodeId != newNodeId || m_reconnectPending;
+        if (retry) m_reconnectPending = true;
+    }
+    if (!retry) return true;
+
+    if (ma_device_retarget(&m_device, &replacement.id) == MA_SUCCESS) {
+        std::lock_guard<std::mutex> lock(m_infoLock);
+        m_reconnectPending = false;
+        return true;
+    }
+    if (!wasPending) {
+        std::cerr << "[DeviceManager] PipeWire link recreation is pending for "
+                  << m_originalId << "; waiting for the replacement node's ports."
+                  << std::endl;
+    }
+    return false;
+}
+
 HardwareDevice::~HardwareDevice() { stop(); }
 
 void HardwareDevice::stop() {
@@ -224,8 +272,9 @@ bool HardwareDevice::init() {
         m_info.id = m_info.is_capture ? m_device.capture.id : m_device.playback.id;
         const auto openedId = stable_device_id(m_context->backend, m_info.id);
         if (m_info.stable_id != openedId) m_info.native_formats.clear();
-        m_info.stable_id = openedId;
+        m_info.stable_id = m_originalId;
         m_info.backend = ma_get_backend_name(m_context->backend);
+        m_info.available = true;
         m_info.channels = m_info.is_capture ? m_device.capture.channels : m_device.playback.channels;
         m_info.sample_rate = m_device.sampleRate;
         m_info.internal_channels = m_info.is_capture ? m_device.capture.internalChannels : m_device.playback.internalChannels;
@@ -932,10 +981,15 @@ DeviceManager::DeviceManager(bool initializeBackend, bool enablePwPatchbay)
     } else {
         m_context_initialized = true;
         std::cout << "[DeviceManager] SUCCESS: Context initialized. Active Backend: " << ma_get_backend_name(m_context.backend) << std::endl;
+        enumerate_devices();
+        m_hotplugRunning.store(true, std::memory_order_release);
+        m_hotplugThread = std::thread(&DeviceManager::hotplug_loop, this);
     }
 }
 
 DeviceManager::~DeviceManager() {
+    m_hotplugRunning.store(false, std::memory_order_release);
+    if (m_hotplugThread.joinable()) m_hotplugThread.join();
     stop_all();
     set_dsp_engine(nullptr);
     {
@@ -1028,32 +1082,107 @@ void DeviceManager::set_dsp_engine(DspEngine* engine) {
 }
 
 void DeviceManager::enumerate_devices() {
-    std::lock_guard<std::mutex> lock(m_lock);
-    m_available_devices.clear();
+    std::lock_guard<std::mutex> enumerateLock(m_enumerateLock);
     if (!m_context_initialized) return;
+
     ma_device_info* playback = nullptr;
     ma_device_info* capture = nullptr;
     ma_uint32 playbackCount = 0, captureCount = 0;
-    if (ma_context_get_devices(&m_context, &playback, &playbackCount, &capture, &captureCount) != MA_SUCCESS) return;
+    if (ma_context_get_devices(&m_context, &playback, &playbackCount,
+                               &capture, &captureCount) != MA_SUCCESS) return;
+
+    std::vector<AudioDeviceInfo> discovered;
+    discovered.reserve(static_cast<size_t>(playbackCount) + captureCount);
     const auto append = [&](const ma_device_info* devices, ma_uint32 count, bool isCapture) {
-        static const std::set<std::string> virtualAlsaIds = {
-            "null", "lavrate", "samplerate", "speexrate", "jack", "oss", "pulse", "speex", "upmix", "vdownmix"
-        };
         for (ma_uint32 i = 0; i < count; ++i) {
             const auto& device = devices[i];
-            const auto id = stable_device_id(m_context.backend, device.id);
-            if (m_context.backend == ma_backend_alsa && virtualAlsaIds.count(id)) continue;
             AudioDeviceInfo info{};
             info.id = device.id;
-            info.stable_id = id;
+            info.stable_id = stable_device_id(m_context.backend, device.id);
             info.backend = ma_get_backend_name(m_context.backend);
             info.name = device.name;
             info.is_capture = isCapture;
-            m_available_devices.push_back(std::move(info));
+            info.persistent_id = device.persistentId;
+            info.available = true;
+            discovered.push_back(std::move(info));
         }
     };
     append(playback, playbackCount, false);
     append(capture, captureCount, true);
+
+    {
+        std::lock_guard<std::mutex> lock(m_lock);
+        for (auto& info : discovered) {
+            if (info.persistent_id.empty()) continue;
+            const std::string key =
+                (info.is_capture ? "capture:" : "playback:") + info.persistent_id;
+            const auto inserted = m_persistentDeviceIds.emplace(key, info.stable_id);
+            if (!inserted.second) info.stable_id = inserted.first->second;
+        }
+    }
+
+    const auto active = get_active_devices();
+    std::unordered_set<const HardwareDevice*> matched;
+    std::vector<std::pair<std::shared_ptr<HardwareDevice>, AudioDeviceInfo>> reconnects;
+
+    for (auto& available : discovered) {
+        for (const auto& endpoint : active) {
+            if (matched.count(endpoint.get())) continue;
+            const AudioDeviceInfo previous = endpoint->get_info();
+            if (previous.is_capture != available.is_capture) continue;
+
+            const bool samePhysicalDevice =
+                (!previous.persistent_id.empty() &&
+                 previous.persistent_id == available.persistent_id) ||
+                (previous.persistent_id.empty() &&
+                 previous.stable_id == available.stable_id);
+            if (!samePhysicalDevice) continue;
+
+            matched.insert(endpoint.get());
+
+            // Preserve route identity and stream layout while swapping only
+            // the current PipeWire registry ID and human-readable device name.
+            AudioDeviceInfo replacement = previous;
+            replacement.id = available.id;
+            replacement.name = available.name;
+            replacement.backend = available.backend;
+            replacement.persistent_id = available.persistent_id;
+            replacement.available = true;
+            available = replacement;
+            reconnects.emplace_back(endpoint, std::move(replacement));
+            break;
+        }
+    }
+
+    for (const auto& endpoint : active) {
+        if (matched.count(endpoint.get())) continue;
+        endpoint->set_available(false);
+        auto offline = endpoint->get_info();
+        offline.available = false;
+        const auto duplicate = std::find_if(discovered.begin(), discovered.end(),
+            [&](const AudioDeviceInfo& item) {
+                return item.stable_id == offline.stable_id &&
+                       item.is_capture == offline.is_capture;
+            });
+        if (duplicate == discovered.end()) discovered.push_back(std::move(offline));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_lock);
+        m_available_devices = std::move(discovered);
+    }
+
+    // This can require PipeWire registry round-trips. Never hold m_lock or run
+    // this work on the PipeWire process callback.
+    for (const auto& item : reconnects)
+        item.first->reconnect(item.second);
+}
+
+void DeviceManager::hotplug_loop() {
+    while (m_hotplugRunning.load(std::memory_order_acquire)) {
+        enumerate_devices();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
 }
 
 std::vector<NativeStreamFormat> DeviceManager::get_device_capabilities(
@@ -1134,6 +1263,7 @@ bool DeviceManager::activate_device(const std::string& id, unsigned captureChann
         }
         for (const auto& baseInfo : m_available_devices) {
             if (endpoint_id(baseInfo, m_context.backend) != id) continue;
+            if (!baseInfo.available) continue;
             (baseInfo.is_capture ? hasCapture : hasPlayback) = true;
             const std::string key = id + (baseInfo.is_capture ? "_capture" : "_playback");
             if (m_active_devices.count(key) != 0) continue;

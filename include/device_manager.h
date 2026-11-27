@@ -69,6 +69,8 @@ struct AudioDeviceInfo {
     ma_format internal_format = ma_format_unknown;
     std::vector<unsigned> client_channel_map;
     std::vector<unsigned> internal_channel_map;
+    std::string persistent_id;
+    bool available = true;
 };
 
 // PipeWire Patchbay Structures
@@ -118,8 +120,10 @@ public:
     bool init();
     void stop();
 
-    const AudioDeviceInfo& get_info() const { return m_info; }
+    AudioDeviceInfo get_info() const;
     const std::string& last_error() const { return m_last_error; }
+    bool reconnect(const AudioDeviceInfo& replacement);
+    void set_available(bool available);
     PcmRingBuffer& get_input_buffer() { return m_input_rb; }
     PcmRingBuffer& get_output_buffer() { return m_output_rb; }
     const std::string& get_original_id() const { return m_originalId; }
@@ -135,6 +139,8 @@ private:
     static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 
     AudioDeviceInfo m_info;
+    mutable std::mutex m_infoLock;
+    bool m_reconnectPending = false;
     ma_context* m_context;
     ma_device m_device{};
     bool m_device_initialized = false;
@@ -207,13 +213,21 @@ private:
                                     const std::vector<uint32_t>& positions);
     void stop_node_monitor_in_loop(uint32_t nodeId);
     void rebuild_pipewire_visible_links_locked();
+    void hotplug_loop();
 
     std::mutex m_lock;
+    std::mutex m_enumerateLock;
+    std::atomic<bool> m_hotplugRunning{false};
+    std::thread m_hotplugThread;
     ma_context m_context{};
     bool m_context_initialized = false;
     // Invalidates in-flight activations when a removal/stop races device init.
     std::uint64_t m_activation_generation = 0;
     std::vector<AudioDeviceInfo> m_available_devices;
+    // Process-lifetime physical-device-to-logical-endpoint mapping. Keeps the
+    // same endpoint ID if a device is unplugged, deactivated while absent, and
+    // later reconnected with a different PipeWire global ID.
+    std::unordered_map<std::string, std::string> m_persistentDeviceIds;
     // Key is "ID_capture" or "ID_playback" to support duplex devices.
     std::unordered_map<std::string, std::shared_ptr<HardwareDevice>> m_active_devices;
 

@@ -2723,6 +2723,7 @@ bool WebServer::start() {
                 nlohmann::json item = {{"id", device.stable_id}, {"name", device.name},
                     {"is_capture", device.is_capture}, {"backend", device.backend},
                     {"channels", 0}, {"sample_rate", 48000}, {"active", false},
+                    {"available", device.available},
                     {"capture_channels", selected.first}, {"playback_channels", selected.second},
                     {"max_channels", CM5_MAX_CHANNELS}};
                 for (const auto& endpoint : active) {

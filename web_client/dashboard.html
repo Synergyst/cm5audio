@@ -1519,9 +1519,13 @@ function autoOrganizeLayout() {
             }
         }
 
+        let lastDeviceListSignature = null;
         async function loadDevices() {
             try {
                 const devices = await fetchAPI('/api/devices');
+                const signature = JSON.stringify(devices);
+                if (signature === lastDeviceListSignature) return;
+                lastDeviceListSignature = signature;
                 const groups = new Map();
                 for (const device of devices) {
                     if (!groups.has(device.id)) groups.set(device.id, []);
@@ -1534,8 +1538,9 @@ function autoOrganizeLayout() {
                 list.appendChild(note);
                 for (const [id, endpoints] of groups) {
                     const active = endpoints.some(device => device.active);
+                    const available = endpoints.some(device => device.available !== false);
                     const row = document.createElement('div');
-                    row.className = 'device-item' + (active ? ' active' : '');
+                    row.className = 'device-item' + (active ? ' active' : '') + (!available ? ' unavailable' : '');
                     const info = document.createElement('div');
                     info.className = 'device-info';
                     const name = document.createElement('strong');
@@ -1543,6 +1548,11 @@ function autoOrganizeLayout() {
                     const identity = document.createElement('small');
                     identity.textContent = `${endpoints[0].backend}: ${id}`;
                     info.append(name, identity);
+                    if (!available) {
+                        const offline = document.createElement('small');
+                        offline.textContent = 'OFFLINE — logical endpoint and routes are preserved; reconnecting automatically when this device returns.';
+                        info.appendChild(offline);
+                    }
                     const controls = {};
                     for (const device of endpoints) {
                         const direction = device.is_capture ? 'capture' : 'playback';
@@ -1551,7 +1561,7 @@ function autoOrganizeLayout() {
                         const input = document.createElement('input');
                         input.type = 'number'; input.min = 0; input.max = device.max_channels || 254; input.step = 1;
                         input.value = device[direction + '_channels'] || 0;
-                        input.disabled = active;
+                        input.disabled = active || !available;
                         label.appendChild(input); info.appendChild(label);
                         controls[direction] = input;
                         if (device.layout) {
@@ -1562,7 +1572,7 @@ function autoOrganizeLayout() {
                         }
                         const probe = document.createElement('button');
                         probe.textContent = `PROBE ${direction.toUpperCase()} CAPABILITIES`;
-                        probe.disabled = active;
+                        probe.disabled = active || !available;
                         const result = document.createElement('pre');
                         result.style.whiteSpace = 'pre-wrap'; result.style.maxWidth = '100%';
                         probe.onclick = async () => {
@@ -1579,7 +1589,8 @@ function autoOrganizeLayout() {
                         info.append(probe, result);
                     }
                     const button = document.createElement('button');
-                    button.textContent = active ? 'DEACTIVATE' : 'ACTIVATE';
+                    button.textContent = active ? 'DEACTIVATE' : (available ? 'ACTIVATE' : 'OFFLINE');
+                    button.disabled = !active && !available;
                     button.onclick = async () => {
                         const params = new URLSearchParams({id});
                         if (!active) {
@@ -4801,6 +4812,7 @@ function autoOrganizeLayout() {
         setInterval(updateAudioPlayerStates, 250);
         setInterval(updateAudioPlaylistStates, 750);
         setInterval(() => loadPipewireGraph(), 1000);
+        setInterval(() => loadDevices(), 1500);
 
         async function init() {
             const viewport = $('patchbay-viewport');

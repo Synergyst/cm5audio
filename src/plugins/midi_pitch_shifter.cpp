@@ -29,6 +29,17 @@
 #include <utility>
 #include <vector>
 
+/*
+ * Per-file verbose MIDI diagnostic logging.
+ * Set this define to 1 to enable the diagnostics in this file.
+ */
+#define CM5_MIDI_PITCH_SHIFTER_DEBUG_LOGGING 0
+#if CM5_MIDI_PITCH_SHIFTER_DEBUG_LOGGING
+#define CM5_MIDI_PITCH_SHIFTER_DEBUG_LOG(...) std::fprintf(stderr, __VA_ARGS__)
+#else
+#define CM5_MIDI_PITCH_SHIFTER_DEBUG_LOG(...) ((void)0)
+#endif
+
 namespace {
 
 constexpr unsigned MIDI_CHANNELS = 16;
@@ -338,7 +349,7 @@ private:
         if (!self)
             return;
 
-        std::fprintf(stderr,
+        CM5_MIDI_PITCH_SHIFTER_DEBUG_LOG(
             "[CM5Audio MIDI AutoConnect] filter state %d -> %d; "
             "auto_connect=%s; output_selection=[%s]\n",
             static_cast<int>(oldState),
@@ -923,7 +934,7 @@ void register_midi_pitch_shifter_processor(ProcessorRegistry& registry)
             const std::string midiOutput =
                 params.at("midi_output").get<std::string>();
 
-            std::fprintf(stderr,
+            CM5_MIDI_PITCH_SHIFTER_DEBUG_LOG(
                 "[CM5Audio MIDI AutoConnect] processor factory: "
                 "auto_connect=%s; output_selection=[%s]\n",
                 autoConnect ? "enabled" : "disabled",
@@ -952,3 +963,5 @@ void register_midi_pitch_shifter_processor(ProcessorRegistry& registry)
     descriptor.chain_channel_mode = ProcessorChainChannelMode::MULTICHANNEL;
     registry.register_processor(std::move(descriptor));
 }
+
+#undef CM5_MIDI_PITCH_SHIFTER_DEBUG_LOG

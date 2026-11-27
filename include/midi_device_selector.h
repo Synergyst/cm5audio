@@ -25,6 +25,17 @@
 #include <utility>
 #include <vector>
 
+/*
+ * Per-file verbose MIDI diagnostic logging.
+ * Set this define to 1 to enable the diagnostics in this file.
+ */
+#define CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOGGING 0
+#if CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOGGING
+#define CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(...) std::fprintf(stderr, __VA_ARGS__)
+#else
+#define CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(...) ((void)0)
+#endif
+
 namespace cm5audio {
 namespace midi {
 
@@ -384,7 +395,7 @@ inline std::vector<MidiOutput> discoverOutputs()
             return a.label < b.label;
         });
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI] Discovery complete: "
         "%zu MIDI nodes, %zu output-port candidates, "
         "%zu selectable MIDI outputs\n",
@@ -393,7 +404,7 @@ inline std::vector<MidiOutput> discoverOutputs()
         outputs.size());
 
     for (const MidiOutput& output : outputs) {
-        std::fprintf(stderr,
+        CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
             "[CM5Audio MIDI] Discovered output: "
             "node='%s' port='%s' label='%s'\n",
             output.nodeName.c_str(),
@@ -695,20 +706,20 @@ inline bool discoverInputPort(uint32_t nodeId,
     if (scanSucceeded)
         selectedNodeName = scan.nodeName;
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] "
         "Destination node %u: node.name='%s'\n",
         nodeId,
         scan.nodeName.c_str());
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] "
         "Destination node %u: found %zu input ports\n",
         nodeId,
         scan.ports.size());
 
     for (const InputPortCandidate& port : scan.ports) {
-        std::fprintf(stderr,
+        CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
             "[CM5Audio MIDI AutoConnect] "
             "Destination port: object.id=%u name='%s' "
             "alias='%s' format='%s'%s\n",
@@ -780,15 +791,40 @@ inline void onLinkInfo(void* userdata,
                        const pw_link_info* info)
 {
     auto* watch = static_cast<LinkWatch*>(userdata);
-
     if (!watch || !info)
         return;
 
-    std::fprintf(stderr,
+    const bool hasError =
+        info->state == PW_LINK_STATE_ERROR ||
+        (info->error && *info->error);
+
+    if (hasError) {
+        std::fprintf(stderr,
+            "[CM5Audio MIDI AutoConnect] %s: "
+            "link id=%u state=%s (%d), "
+            "output node=%u port=%u, "
+            "input node=%u port=%u",
+            watch->description.c_str(),
+            info->id,
+            linkStateName(info->state),
+            static_cast<int>(info->state),
+            info->output_node_id,
+            info->output_port_id,
+            info->input_node_id,
+            info->input_port_id);
+
+        if (info->error && *info->error)
+            std::fprintf(stderr, ", error='%s'", info->error);
+
+        std::fprintf(stderr, "\n");
+        return;
+    }
+
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] %s: "
         "link id=%u state=%s (%d), "
         "output node=%u port=%u, "
-        "input node=%u port=%u",
+        "input node=%u port=%u\n",
         watch->description.c_str(),
         info->id,
         linkStateName(info->state),
@@ -797,11 +833,6 @@ inline void onLinkInfo(void* userdata,
         info->output_port_id,
         info->input_node_id,
         info->input_port_id);
-
-    if (info->error && *info->error)
-        std::fprintf(stderr, ", error='%s'", info->error);
-
-    std::fprintf(stderr, "\n");
 }
 
 inline void onLinkProxyBound(void* userdata,
@@ -812,7 +843,7 @@ inline void onLinkProxyBound(void* userdata,
     if (!watch)
         return;
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] %s: "
         "link proxy bound to global object id=%u\n",
         watch->description.c_str(),
@@ -826,7 +857,7 @@ inline void onLinkProxyRemoved(void* userdata)
     if (!watch)
         return;
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] %s: "
         "link proxy was removed by PipeWire\n",
         watch->description.c_str());
@@ -839,7 +870,7 @@ inline void onLinkProxyDestroy(void* userdata)
     if (!watch)
         return;
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] %s: "
         "link proxy was destroyed\n",
         watch->description.c_str());
@@ -1158,7 +1189,7 @@ inline void onInputLinkCoreDone(void* userdata,
     const std::string inputPortIdString =
         std::to_string(inputPortId);
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] "
         "Resolved endpoints on filter core:\n"
         "  output %s:%s -> global port ID %u\n"
@@ -1231,7 +1262,7 @@ inline void onInputLinkCoreDone(void* userdata,
 
     attachLinkDiagnostics(proxy, description.c_str());
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] "
         "Link-factory request created using filter core. "
         "proxy=%p\n",
@@ -1384,7 +1415,7 @@ inline InputLinkRequest* createInputLinkAsync(
         return nullptr;
     }
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] "
         "Asynchronous same-core registry scan started: "
         "output='%s:%s', input node ID=%u, input port='%s'\n",
@@ -1401,7 +1432,7 @@ inline void cancelInputLinkRequest(InputLinkRequest*& request)
     if (!request)
         return;
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] "
         "Cancelling pending same-core registry/link request\n");
 
@@ -1416,7 +1447,7 @@ inline void destroyInputLink(pw_filter* filter,
     if (!linkProxy)
         return;
 
-    std::fprintf(stderr,
+    CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG(
         "[CM5Audio MIDI AutoConnect] "
         "Destroying MIDI link proxy=%p\n",
         static_cast<void*>(linkProxy));
@@ -1440,5 +1471,7 @@ inline void destroyInputLink(pw_filter* filter,
 
 } // namespace midi
 } // namespace cm5audio
+
+#undef CM5_MIDI_DEVICE_SELECTOR_DEBUG_LOG
 
 #endif

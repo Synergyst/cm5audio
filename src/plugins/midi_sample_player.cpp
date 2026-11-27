@@ -32,6 +32,17 @@
 #include <utility>
 #include <vector>
 
+/*
+ * Per-file verbose MIDI diagnostic logging.
+ * Set this define to 1 to enable the diagnostics in this file.
+ */
+#define CM5_MIDI_SAMPLE_PLAYER_DEBUG_LOGGING 0
+#if CM5_MIDI_SAMPLE_PLAYER_DEBUG_LOGGING
+#define CM5_MIDI_SAMPLE_PLAYER_DEBUG_LOG(...) std::fprintf(stderr, __VA_ARGS__)
+#else
+#define CM5_MIDI_SAMPLE_PLAYER_DEBUG_LOG(...) ((void)0)
+#endif
+
 namespace {
 
 constexpr unsigned MIDI_CHANNELS = 16;
@@ -254,7 +265,7 @@ private:
         auto* self = static_cast<MidiEventInputService*>(userdata);
         if (!self) return;
 
-        std::fprintf(stderr,
+        CM5_MIDI_SAMPLE_PLAYER_DEBUG_LOG(
             "[CM5Audio MIDI Sample Player] PipeWire filter state %d -> %d; "
             "auto_connect=%s; output_selection=[%s]\n",
             static_cast<int>(oldState), static_cast<int>(state),
@@ -1081,3 +1092,5 @@ void register_midi_sample_player_processor(ProcessorRegistry& registry)
     descriptor.chain_channel_mode = ProcessorChainChannelMode::MONO_ONLY;
     registry.register_processor(std::move(descriptor));
 }
+
+#undef CM5_MIDI_SAMPLE_PLAYER_DEBUG_LOG

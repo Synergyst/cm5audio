@@ -38,6 +38,17 @@
 #include <utility>
 #include <vector>
 
+/*
+ * Per-file verbose MIDI diagnostic logging.
+ * Set this define to 1 to enable the diagnostics in this file.
+ */
+#define CM5_MIDI_CC_CONTROLLER_DEBUG_LOGGING 0
+#if CM5_MIDI_CC_CONTROLLER_DEBUG_LOGGING
+#define CM5_MIDI_CC_CONTROLLER_DEBUG_LOG(...) std::fprintf(stderr, __VA_ARGS__)
+#else
+#define CM5_MIDI_CC_CONTROLLER_DEBUG_LOG(...) ((void)0)
+#endif
+
 namespace {
 
 using Json = nlohmann::json;
@@ -1216,7 +1227,8 @@ private:
         auto* self = static_cast<Impl*>(userdata);
         if (!self) return;
         self->filterState_.store(static_cast<int>(state), std::memory_order_relaxed);
-        std::fprintf(stderr, "[MIDI CC] PipeWire filter state %d -> %d\n",
+        (void)oldState;
+        CM5_MIDI_CC_CONTROLLER_DEBUG_LOG("[MIDI CC] PipeWire filter state %d -> %d\n",
                      static_cast<int>(oldState), static_cast<int>(state));
         if ((state == PW_FILTER_STATE_PAUSED || state == PW_FILTER_STATE_STREAMING) &&
             self->selectedOutputForPipe_ != MANUAL_MIDI_SOURCE &&
@@ -1495,3 +1507,5 @@ MidiCcController::~MidiCcController() = default;
 bool MidiCcController::start() { return m_impl && m_impl->start(); }
 
 void MidiCcController::stop() { if (m_impl) m_impl->stop(); }
+
+#undef CM5_MIDI_CC_CONTROLLER_DEBUG_LOG
